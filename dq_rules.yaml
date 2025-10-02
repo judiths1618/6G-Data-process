@@ -1,0 +1,69 @@
+rules:
+  - patterns: ["6GDALI_Datasets/EUR/6907619/.*\\.csv$"]
+
+    required_cols:
+      - cpu_limit
+      - cpu_usage
+      - lat50
+      - lat75
+      - lat95
+      - lat99
+      - n
+      - ram_limit
+      - ram_usage
+      - time
+
+    # 数值列：存在则校验（文件缺列会自动跳过）
+    numeric_cols:
+      - cpu_limit
+      - cpu_usage
+      - lat50
+      - lat66
+      - lat75
+      - lat80
+      - lat90
+      - lat95
+      - lat98
+      - lat99
+      - lat100
+      - mean
+      - min
+      - n
+      - ram_limit
+      - ram_usage
+      # - c  # 若确认为数值可打开
+
+    # 对于带单位的数值列，声明解析规则（统一换算为 MiB）
+    numeric_unit_parsers:
+      ram_limit:
+        type: mem      # 内存单位
+        base: 1024     # 1024 进制（KiB, MiB, GiB, TiB）
+        out_unit: MiB  # 仅作标注，范围与统计都以 MiB 为单位
+
+    ranges:
+      cpu_limit: [0, null]
+      cpu_usage: [0, 100]    # 若实际为 0~1，请改成 [0, 1]
+      ram_limit: [0, null]   # 以 MiB 为单位
+      ram_usage: [0, null]
+      n: [0, null]
+      lat50: [0, null]
+      lat66: [0, null]
+      lat75: [0, null]
+      lat80: [0, null]
+      lat90: [0, null]
+      lat95: [0, null]
+      lat98: [0, null]
+      lat99: [0, null]
+      lat100: [0, null]
+      mean: [0, null]
+      min: [0, null]
+
+    enums: {}
+
+    event_time_col: "time"
+    event_time_format: "epoch_s"
+    freshness_slo_hours: 24
+    max_future_hours: 1
+    time_epoch_bounds: {min: 946684800, max: 4102444800}
+
+    primary_key: null
