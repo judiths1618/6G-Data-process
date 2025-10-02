@@ -16,7 +16,7 @@ import json
 import math
 import datetime as dt
 from dataclasses import dataclass
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Iterable
 
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions
@@ -76,10 +76,63 @@ DEFAULT_RULE = {
     "time_epoch_bounds": None,       # {"min": <epoch_s>, "max": <epoch_s>}
     "reference_keys": {},            # {"path": "...csv", "column": "...", "target_col": "..."}
     "numeric_unit_parsers": {},      # 列 -> {type:'mem', base:1024, out_unit:'MiB'}
+    "metadata_path": None,
+    "metadata_targets": [],          # 文件名（或相对路径）列表，用于从元数据中提取列说明
 }
 
+# -----------------------------
+# 元数据解析
+# -----------------------------
+_COLUMN_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _parse_metadata_text(lines: Iterable[str]) -> Dict[str, Dict[str, str]]:
+    """解析元数据文本，返回 {文件名: {列名: 描述}}。列名统一为小写。"""
+
+    files: List[str] = []
+    mapping: Dict[str, Dict[str, str]] = {}
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        lower_key = key.lower()
+
+        if lower_key in {"file", "files"}:
+            files = [os.path.basename(part.strip()) for part in value.split(",") if part.strip()]
+            for f in files:
+                mapping.setdefault(f, {})
+            continue
+
+        if not files:
+            # 还未遇到 file(s) 说明，此处多为段落描述
+            continue
+
+        if not value:
+            # 章节标题或其他说明
+            continue
+
+        if not _COLUMN_NAME_RE.match(key):
+            # 过滤掉“非列名”的行（例如长句子）
+            continue
+
+        col_name = key.strip().lower()
+        for f in files:
+            mapping.setdefault(f, {})[col_name] = value
+
+    return mapping
+
+
+def parse_metadata_descriptions(path: str) -> Dict[str, Dict[str, str]]:
+    with open(path, "r", encoding="utf-8") as fp:
+        return _parse_metadata_text(fp.readlines())
+
 def load_config(path: str) -> Dict[str, Any]:
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     if isinstance(cfg, dict) and "rules" in cfg:
         rules = cfg["rules"]
@@ -88,6 +141,7 @@ def load_config(path: str) -> Dict[str, Any]:
     else:
         rules = [cfg]
     norm: List[Dict[str, Any]] = []
+    metadata_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
     for r in rules:
         rr = dict(DEFAULT_RULE)
         if r:
@@ -99,6 +153,28 @@ def load_config(path: str) -> Dict[str, Any]:
         rr["enums"]         = rr.get("enums", {})         or {}
         rr["ranges"]        = rr.get("ranges", {})        or {}
         rr["numeric_unit_parsers"] = rr.get("numeric_unit_parsers", {}) or {}
+
+        meta_path = rr.get("metadata_path")
+        targets = rr.get("metadata_targets") or []
+        metadata_by_file: Dict[str, Dict[str, str]] = {}
+        if meta_path:
+            if meta_path not in metadata_cache:
+                metadata_cache[meta_path] = parse_metadata_descriptions(meta_path)
+            meta_map = metadata_cache[meta_path]
+            selected = targets or list(meta_map.keys())
+            for target in selected:
+                base = os.path.basename(target)
+                if base in meta_map:
+                    metadata_by_file[base] = meta_map[base]
+        if metadata_by_file:
+            rr["metadata_by_file"] = metadata_by_file
+            # 将元数据列合并进 required_cols，避免遗漏
+            meta_cols = sorted({col for cols in metadata_by_file.values() for col in cols.keys()})
+            for col in meta_cols:
+                if col not in rr["required_cols"]:
+                    rr["required_cols"].append(col)
+        else:
+            rr["metadata_by_file"] = {}
         norm.append(rr)
     return {"rules": norm}
 
@@ -232,6 +308,7 @@ class ValidateRow(beam.DoFn):
     bad_numeric   = Metrics.counter("dq", "bad_numeric")
     bad_ref       = Metrics.counter("dq", "bad_ref_integrity")
     bad_freshness = Metrics.counter("dq", "bad_freshness")
+    metadata_mismatch = Metrics.counter("dq", "metadata_mismatch")
 
     def __init__(self, rules: Dict[str, Any]):
         self.rules = rules
@@ -239,6 +316,21 @@ class ValidateRow(beam.DoFn):
     def process(self, rc: RowCtx, refset: Optional[set] = None):
         d = rc.data
         rules = self.rules
+
+        # -1) 元数据列校验（如有）
+        metadata_by_file = rules.get("metadata_by_file") or {}
+        meta_cols = metadata_by_file.get(os.path.basename(rc.file))
+        if meta_cols:
+            missing = [col for col in meta_cols.keys() if col not in rc.header]
+            if missing:
+                for col in missing:
+                    self.metadata_mismatch.inc()
+                    yield beam.pvalue.TaggedOutput(BAD_TAG, {
+                        "file": rc.file,
+                        "row": 0,
+                        "reason": f"missing_metadata_column:{col}",
+                    })
+                return
 
         # 0) 必备列存在
         for col in rules["required_cols"]:
@@ -414,13 +506,60 @@ def numeric_profiles_from_pairs(pairs_pcoll: beam.PCollection, col: str):
         | f"Sample_{col}" >> Sample.FixedSizeGlobally(10_000)
         | f"Qtls_{col}"   >> beam.Map(lambda xs: _percentiles(xs or [], (0, 25, 50, 75, 100)))
     )
-    return {"count": count, "min": minv, "max": maxv, "mean": mean, "quantiles": qtls}
+    bounds = (
+        qtls
+        | f"Bounds_{col}" >> beam.Map(
+            lambda qs: {
+                "quantiles": qs,
+                "q1": qs[1] if len(qs) >= 4 else None,
+                "q3": qs[3] if len(qs) >= 4 else None,
+                "iqr": (qs[3] - qs[1]) if len(qs) >= 4 else None,
+            }
+        )
+        | f"OutlierBounds_{col}" >> beam.Map(
+            lambda info: {
+                **info,
+                "lower": (info["q1"] - 1.5 * info["iqr"]) if info["iqr"] is not None else None,
+                "upper": (info["q3"] + 1.5 * info["iqr"]) if info["iqr"] is not None else None,
+            }
+        )
+    )
+
+    outlier_count = (
+        vals
+        | f"FlagOutliers_{col}" >> beam.Map(
+            lambda x, info: 1
+            if info and info.get("lower") is not None and (x < info["lower"] or x > info["upper"])
+            else 0,
+            info=beam.pvalue.AsSingleton(bounds),
+        )
+        | f"SumOutliers_{col}" >> beam.CombineGlobally(sum)
+    )
+
+    return {
+        "count": count,
+        "min": minv,
+        "max": maxv,
+        "mean": mean,
+        "quantiles": qtls,
+        "outlier_bounds": bounds,
+        "outlier_count": outlier_count,
+    }
 
 def union_numeric_cols(rules: List[Dict[str, Any]]) -> List[str]:
     cols = set()
     for r in rules:
         cols.update(r.get("numeric_cols", []))
     return sorted(cols)
+
+
+def gather_column_descriptions(rules: List[Dict[str, Any]]) -> Dict[str, str]:
+    descriptions: Dict[str, str] = {}
+    for r in rules:
+        for _, cols in (r.get("metadata_by_file") or {}).items():
+            for col, desc in cols.items():
+                descriptions.setdefault(col, desc)
+    return descriptions
 
 
 def classify_issue(reason: str) -> Tuple[str, str]:
@@ -431,6 +570,8 @@ def classify_issue(reason: str) -> Tuple[str, str]:
     r = reason.lower()
     if r.startswith("missing_required_column"):
         return "Completeness", "Required column missing from header"
+    if r.startswith("missing_metadata_column"):
+        return "Completeness", "Column listed in metadata is missing from header"
     if r.startswith("null_required"):
         return "Completeness", "Required field is empty"
     if r.startswith("bad_enum"):
@@ -514,6 +655,7 @@ def attach_dimension(issue: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_path: str):
     cfg = load_config(config_path)
     rules = cfg["rules"]
+    column_descriptions = gather_column_descriptions(rules)
 
     # 外键集合（可按需扩展为多集合 keyed side input）
     refset_local: Optional[set] = None
@@ -698,37 +840,122 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
             prof = numeric_profiles_from_pairs(stats_pairs, col)
             _ = (
                 prof["count"]
-                | f"FmtCount_{col}" >> beam.Map(lambda x: str(x))
+                | f"FmtCount_{col}" >> beam.Map(
+                    lambda x, column=col, desc=column_descriptions.get(col): json.dumps(
+                        {
+                            "column": column,
+                            "metric": "count",
+                            "value": x,
+                            "description": desc,
+                        }
+                    )
+                )
                 | f"WriteCount_{col}" >> beam.io.WriteToText(
                     os.path.join(dq_out, f"num_{col}_count"), file_name_suffix=".txt", num_shards=1
                 )
             )
             _ = (
                 prof["min"]
-                | f"FmtMin_{col}" >> beam.Map(lambda x: str(x))
+                | f"FmtMin_{col}" >> beam.Map(
+                    lambda x, column=col, desc=column_descriptions.get(col): json.dumps(
+                        {
+                            "column": column,
+                            "metric": "min",
+                            "value": x,
+                            "description": desc,
+                        }
+                    )
+                )
                 | f"WriteMin_{col}" >> beam.io.WriteToText(
                     os.path.join(dq_out, f"num_{col}_min"), file_name_suffix=".txt", num_shards=1
                 )
             )
             _ = (
                 prof["max"]
-                | f"FmtMax_{col}" >> beam.Map(lambda x: str(x))
+                | f"FmtMax_{col}" >> beam.Map(
+                    lambda x, column=col, desc=column_descriptions.get(col): json.dumps(
+                        {
+                            "column": column,
+                            "metric": "max",
+                            "value": x,
+                            "description": desc,
+                        }
+                    )
+                )
                 | f"WriteMax_{col}" >> beam.io.WriteToText(
                     os.path.join(dq_out, f"num_{col}_max"), file_name_suffix=".txt", num_shards=1
                 )
             )
             _ = (
                 prof["mean"]
-                | f"FmtMean_{col}" >> beam.Map(lambda x: str(x))
+                | f"FmtMean_{col}" >> beam.Map(
+                    lambda x, column=col, desc=column_descriptions.get(col): json.dumps(
+                        {
+                            "column": column,
+                            "metric": "mean",
+                            "value": x,
+                            "description": desc,
+                        }
+                    )
+                )
                 | f"WriteMean_{col}" >> beam.io.WriteToText(
                     os.path.join(dq_out, f"num_{col}_mean"), file_name_suffix=".txt", num_shards=1
                 )
             )
             _ = (
                 prof["quantiles"]
-                | f"QtlsToJSON_{col}" >> beam.Map(json.dumps)
+                | f"QtlsToJSON_{col}" >> beam.Map(
+                    lambda qs, column=col, desc=column_descriptions.get(col): json.dumps(
+                        {
+                            "column": column,
+                            "metric": "quantiles",
+                            "values": qs,
+                            "description": desc,
+                        }
+                    )
+                )
                 | f"WriteQtls_{col}" >> beam.io.WriteToText(
                     os.path.join(dq_out, f"num_{col}_quantiles"), file_name_suffix=".jsonl", num_shards=1
+                )
+            )
+            _ = (
+                prof["outlier_bounds"]
+                | f"OutlierBoundsJSON_{col}" >> beam.Map(
+                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
+                        {
+                            "column": column,
+                            "metric": "outlier_bounds",
+                            "description": desc,
+                            "lower": info.get("lower"),
+                            "upper": info.get("upper"),
+                            "iqr": info.get("iqr"),
+                            "q1": info.get("q1"),
+                            "q3": info.get("q3"),
+                            "quantiles": info.get("quantiles"),
+                        }
+                    )
+                )
+                | f"WriteOutlierBounds_{col}" >> beam.io.WriteToText(
+                    os.path.join(dq_out, f"num_{col}_outlier_bounds"), file_name_suffix=".jsonl", num_shards=1
+                )
+            )
+            _ = (
+                prof["outlier_count"]
+                | f"OutlierCountJSON_{col}" >> beam.Map(
+                    lambda cnt, total, column=col, desc=column_descriptions.get(col): json.dumps(
+                        {
+                            "column": column,
+                            "metric": "outliers",
+                            "outlier_count": cnt,
+                            "total_count": total,
+                            "outlier_ratio": (cnt / total) if total else 0.0,
+                            "description": desc,
+                        }
+                    ),
+                    total=beam.pvalue.AsSingleton(prof["count"]),
+                )
+                | f"WriteOutlierCount_{col}" >> beam.io.WriteToText(
+                    os.path.join(dq_out, f"num_{col}_outliers"), file_name_suffix=".jsonl", num_shards=1
                 )
             )
 
@@ -750,6 +977,28 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
                 os.path.join(dq_out, "issue_summary"), file_name_suffix=".jsonl", num_shards=1
             )
         )
+
+        metadata_entries = []
+        for r in rules:
+            for fname, cols in (r.get("metadata_by_file") or {}).items():
+                metadata_entries.append(
+                    {
+                        "pattern": r.get("patterns"),
+                        "file": fname,
+                        "columns": [
+                            {"name": col, "description": desc} for col, desc in sorted(cols.items())
+                        ],
+                    }
+                )
+        if metadata_entries:
+            _ = (
+                p
+                | "CreateMetadataEntries" >> beam.Create(metadata_entries)
+                | "MetadataToJSON" >> beam.Map(lambda x: json.dumps(x, ensure_ascii=False))
+                | "WriteMetadataSummary" >> beam.io.WriteToText(
+                    os.path.join(dq_out, "metadata_columns"), file_name_suffix=".jsonl", num_shards=1
+                )
+            )
 
 # -----------------------------
 # CLI
