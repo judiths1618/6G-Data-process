@@ -1,0 +1,1 @@
+{"column": "cpu_usage", "metric": "outlier_bounds", "description": "the amount of CPU used by the container at the time of the metrics collection.", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": []}

@@ -1,1 +1,1 @@
-0
+{"column": "lat100", "metric": "count", "value": 0, "description": "the least response time in microseconds."}

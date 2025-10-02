@@ -1,1 +1,1 @@
-0
+{"column": "min", "metric": "count", "value": 0, "description": "the minimum consumption time for the producer messages."}

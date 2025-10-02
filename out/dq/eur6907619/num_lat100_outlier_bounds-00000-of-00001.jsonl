@@ -1,0 +1,1 @@
+{"column": "lat100", "metric": "outlier_bounds", "description": "the least response time in microseconds.", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": []}

@@ -1,1 +1,1 @@
-0
+{"column": "n", "metric": "count", "value": 0, "description": "the number of requests sent to the container."}

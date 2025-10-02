@@ -1,1 +1,1 @@
-[]
+{"column": "lat100", "metric": "quantiles", "values": [], "description": "the least response time in microseconds."}

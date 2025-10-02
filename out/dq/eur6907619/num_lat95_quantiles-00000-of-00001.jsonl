@@ -1,1 +1,1 @@
-[]
+{"column": "lat95", "metric": "quantiles", "values": [], "description": "the least response time for the best 95% requests in microseconds."}

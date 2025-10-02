@@ -1,0 +1,1 @@
+{"column": "cpu_limit", "metric": "outlier_bounds", "description": "the CPU allocated to the container.", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": []}

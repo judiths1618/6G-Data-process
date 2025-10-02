@@ -1,0 +1,1 @@
+{"column": "min", "metric": "outlier_bounds", "description": "the minimum consumption time for the producer messages.", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": []}

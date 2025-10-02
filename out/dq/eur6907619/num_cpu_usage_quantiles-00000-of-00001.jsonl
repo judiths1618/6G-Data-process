@@ -1,1 +1,1 @@
-[]
+{"column": "cpu_usage", "metric": "quantiles", "values": [], "description": "the amount of CPU used by the container at the time of the metrics collection."}

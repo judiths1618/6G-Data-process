@@ -1,1 +1,1 @@
-[]
+{"column": "n", "metric": "quantiles", "values": [], "description": "the number of requests sent to the container."}
