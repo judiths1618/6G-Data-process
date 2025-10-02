@@ -13,7 +13,6 @@ import io
 import csv
 import re
 import json
-import math
 import datetime as dt
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple, Iterable
@@ -22,7 +21,7 @@ import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.io import fileio
 from apache_beam.metrics.metric import Metrics
-from apache_beam.transforms.combiners import Sample
+from apache_beam.transforms.combiners import ApproximateQuantiles
 
 import yaml
 from dateutil import parser as dtparse
@@ -464,18 +463,6 @@ def load_reference_keys(path: str, column: str) -> set:
         rdr = csv.DictReader(f)
         return { (row.get(column) or "").strip() for row in rdr }
 
-def _percentiles(xs: List[float], perc=(0, 25, 50, 75, 100)) -> List[float]:
-    if not xs:
-        return []
-    xs = sorted(xs)
-    n = len(xs)
-    out = []
-    for p in perc:
-        k = (n - 1) * (p / 100.0)
-        f = math.floor(k); c = math.ceil(k)
-        out.append(xs[int(k)] if f == c else xs[f] + (xs[c] - xs[f]) * (k - f))
-    return out
-
 # === 关键修复：按“每条记录对应的规则”做数值统计 ===
 def numeric_profiles_from_pairs(pairs_pcoll: beam.PCollection, col: str):
     """
@@ -484,6 +471,9 @@ def numeric_profiles_from_pairs(pairs_pcoll: beam.PCollection, col: str):
     """
     def cast_with_rule(pair):
         rc, rule = pair
+        numeric_cols = rule.get("numeric_cols") or []
+        if numeric_cols and col not in numeric_cols:
+            return None
         v = rc.data.get(col)
         if v in (None, "", "NaN"):
             return None
@@ -498,32 +488,48 @@ def numeric_profiles_from_pairs(pairs_pcoll: beam.PCollection, col: str):
         | f"DropNone_{col}" >> beam.Filter(lambda x: x is not None)
     )
     count = vals | f"Count_{col}" >> beam.combiners.Count.Globally()
-    minv  = vals | f"Min_{col}"   >> beam.CombineGlobally(min).without_defaults()
-    maxv  = vals | f"Max_{col}"   >> beam.CombineGlobally(max).without_defaults()
-    mean  = vals | f"Mean_{col}"  >> beam.combiners.Mean.Globally().without_defaults()
-    qtls  = (
+    minv = vals | f"Min_{col}" >> beam.CombineGlobally(min).without_defaults()
+    maxv = vals | f"Max_{col}" >> beam.CombineGlobally(max).without_defaults()
+    mean = vals | f"Mean_{col}" >> beam.combiners.Mean.Globally().without_defaults()
+    qtls = (
         vals
-        | f"Sample_{col}" >> Sample.FixedSizeGlobally(10_000)
-        | f"Qtls_{col}"   >> beam.Map(lambda xs: _percentiles(xs or [], (0, 25, 50, 75, 100)))
+        | f"Qtls_{col}" >> ApproximateQuantiles.Globally(num_quantiles=5)
     )
-    bounds = (
-        qtls
-        | f"Bounds_{col}" >> beam.Map(
-            lambda qs: {
-                "quantiles": qs,
-                "q1": qs[1] if len(qs) >= 4 else None,
-                "q3": qs[3] if len(qs) >= 4 else None,
-                "iqr": (qs[3] - qs[1]) if len(qs) >= 4 else None,
+
+    def _qtls_to_bounds(qs: List[float]) -> Dict[str, Any]:
+        if not qs:
+            return {
+                "quantiles": [],
+                "q1": None,
+                "q3": None,
+                "iqr": None,
+                "lower": None,
+                "upper": None,
             }
-        )
-        | f"OutlierBounds_{col}" >> beam.Map(
-            lambda info: {
-                **info,
-                "lower": (info["q1"] - 1.5 * info["iqr"]) if info["iqr"] is not None else None,
-                "upper": (info["q3"] + 1.5 * info["iqr"]) if info["iqr"] is not None else None,
-            }
-        )
-    )
+        q1 = qs[1] if len(qs) >= 4 else None
+        q3 = qs[3] if len(qs) >= 4 else None
+        iqr = (q3 - q1) if (q1 is not None and q3 is not None) else None
+        lower = (q1 - 1.5 * iqr) if iqr is not None else None
+        upper = (q3 + 1.5 * iqr) if iqr is not None else None
+        return {
+            "quantiles": qs,
+            "q1": q1,
+            "q3": q3,
+            "iqr": iqr,
+            "lower": lower,
+            "upper": upper,
+        }
+
+    bounds = qtls | f"Bounds_{col}" >> beam.Map(_qtls_to_bounds)
+
+    default_bounds = {
+        "quantiles": [],
+        "q1": None,
+        "q3": None,
+        "iqr": None,
+        "lower": None,
+        "upper": None,
+    }
 
     outlier_count = (
         vals
@@ -531,20 +537,35 @@ def numeric_profiles_from_pairs(pairs_pcoll: beam.PCollection, col: str):
             lambda x, info: 1
             if info and info.get("lower") is not None and (x < info["lower"] or x > info["upper"])
             else 0,
-            info=beam.pvalue.AsSingleton(bounds),
+            info=beam.pvalue.AsSingleton(bounds, default_value=default_bounds),
         )
-        | f"SumOutliers_{col}" >> beam.CombineGlobally(sum)
+        | f"SumOutliers_{col}" >> beam.CombineGlobally(sum).without_defaults()
     )
 
-    return {
-        "count": count,
-        "min": minv,
-        "max": maxv,
-        "mean": mean,
-        "quantiles": qtls,
-        "outlier_bounds": bounds,
-        "outlier_count": outlier_count,
-    }
+    pipeline = pairs_pcoll.pipeline
+    profile = (
+        pipeline
+        | f"BuildProfile_{col}" >> beam.Create([None])
+        | beam.Map(
+            lambda _, cnt, min_value, max_value, mean_value, info, out_cnt: {
+                "count": cnt,
+                "min": min_value,
+                "max": max_value,
+                "mean": mean_value,
+                "quantiles": info.get("quantiles") or [],
+                "outlier_bounds": info,
+                "outlier_count": out_cnt if out_cnt is not None else 0,
+            },
+            cnt=beam.pvalue.AsSingleton(count, default_value=0),
+            min_value=beam.pvalue.AsSingleton(minv, default_value=None),
+            max_value=beam.pvalue.AsSingleton(maxv, default_value=None),
+            mean_value=beam.pvalue.AsSingleton(mean, default_value=None),
+            info=beam.pvalue.AsSingleton(bounds, default_value=default_bounds),
+            out_cnt=beam.pvalue.AsSingleton(outlier_count, default_value=0),
+        )
+    )
+
+    return profile
 
 def union_numeric_cols(rules: List[Dict[str, Any]]) -> List[str]:
     cols = set()
@@ -839,13 +860,13 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
         for col in num_cols:
             prof = numeric_profiles_from_pairs(stats_pairs, col)
             _ = (
-                prof["count"]
+                prof
                 | f"FmtCount_{col}" >> beam.Map(
-                    lambda x, column=col, desc=column_descriptions.get(col): json.dumps(
+                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
                         {
                             "column": column,
                             "metric": "count",
-                            "value": x,
+                            "value": info.get("count", 0),
                             "description": desc,
                         }
                     )
@@ -855,14 +876,19 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
                 )
             )
             _ = (
-                prof["min"]
+                prof
                 | f"FmtMin_{col}" >> beam.Map(
-                    lambda x, column=col, desc=column_descriptions.get(col): json.dumps(
+                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
                         {
                             "column": column,
                             "metric": "min",
-                            "value": x,
+                            "value": info.get("min"),
                             "description": desc,
+                            **(
+                                {"note": "no valid numeric values"}
+                                if info.get("count", 0) == 0 or info.get("min") is None
+                                else {}
+                            ),
                         }
                     )
                 )
@@ -871,14 +897,19 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
                 )
             )
             _ = (
-                prof["max"]
+                prof
                 | f"FmtMax_{col}" >> beam.Map(
-                    lambda x, column=col, desc=column_descriptions.get(col): json.dumps(
+                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
                         {
                             "column": column,
                             "metric": "max",
-                            "value": x,
+                            "value": info.get("max"),
                             "description": desc,
+                            **(
+                                {"note": "no valid numeric values"}
+                                if info.get("count", 0) == 0 or info.get("max") is None
+                                else {}
+                            ),
                         }
                     )
                 )
@@ -887,14 +918,19 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
                 )
             )
             _ = (
-                prof["mean"]
+                prof
                 | f"FmtMean_{col}" >> beam.Map(
-                    lambda x, column=col, desc=column_descriptions.get(col): json.dumps(
+                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
                         {
                             "column": column,
                             "metric": "mean",
-                            "value": x,
+                            "value": info.get("mean"),
                             "description": desc,
+                            **(
+                                {"note": "no valid numeric values"}
+                                if info.get("count", 0) == 0 or info.get("mean") is None
+                                else {}
+                            ),
                         }
                     )
                 )
@@ -903,14 +939,19 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
                 )
             )
             _ = (
-                prof["quantiles"]
+                prof
                 | f"QtlsToJSON_{col}" >> beam.Map(
-                    lambda qs, column=col, desc=column_descriptions.get(col): json.dumps(
+                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
                         {
                             "column": column,
                             "metric": "quantiles",
-                            "values": qs,
+                            "values": info.get("quantiles", []),
                             "description": desc,
+                            **(
+                                {"note": "no valid numeric values"}
+                                if info.get("count", 0) == 0 or not info.get("quantiles")
+                                else {}
+                            ),
                         }
                     )
                 )
@@ -919,19 +960,24 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
                 )
             )
             _ = (
-                prof["outlier_bounds"]
+                prof
                 | f"OutlierBoundsJSON_{col}" >> beam.Map(
                     lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
                         {
                             "column": column,
                             "metric": "outlier_bounds",
                             "description": desc,
-                            "lower": info.get("lower"),
-                            "upper": info.get("upper"),
-                            "iqr": info.get("iqr"),
-                            "q1": info.get("q1"),
-                            "q3": info.get("q3"),
-                            "quantiles": info.get("quantiles"),
+                            "lower": (info.get("outlier_bounds") or {}).get("lower"),
+                            "upper": (info.get("outlier_bounds") or {}).get("upper"),
+                            "iqr": (info.get("outlier_bounds") or {}).get("iqr"),
+                            "q1": (info.get("outlier_bounds") or {}).get("q1"),
+                            "q3": (info.get("outlier_bounds") or {}).get("q3"),
+                            "quantiles": (info.get("outlier_bounds") or {}).get("quantiles"),
+                            **(
+                                {"note": "no valid numeric values"}
+                                if info.get("count", 0) == 0
+                                else {}
+                            ),
                         }
                     )
                 )
@@ -940,19 +986,27 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
                 )
             )
             _ = (
-                prof["outlier_count"]
+                prof
                 | f"OutlierCountJSON_{col}" >> beam.Map(
-                    lambda cnt, total, column=col, desc=column_descriptions.get(col): json.dumps(
+                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
                         {
                             "column": column,
                             "metric": "outliers",
-                            "outlier_count": cnt,
-                            "total_count": total,
-                            "outlier_ratio": (cnt / total) if total else 0.0,
+                            "outlier_count": info.get("outlier_count", 0),
+                            "total_count": info.get("count", 0),
+                            "outlier_ratio": (
+                                (info.get("outlier_count", 0) / info.get("count", 0))
+                                if info.get("count", 0)
+                                else 0.0
+                            ),
                             "description": desc,
+                            **(
+                                {"note": "no valid numeric values"}
+                                if info.get("count", 0) == 0
+                                else {}
+                            ),
                         }
-                    ),
-                    total=beam.pvalue.AsSingleton(prof["count"]),
+                    )
                 )
                 | f"WriteOutlierCount_{col}" >> beam.io.WriteToText(
                     os.path.join(dq_out, f"num_{col}_outliers"), file_name_suffix=".jsonl", num_shards=1
