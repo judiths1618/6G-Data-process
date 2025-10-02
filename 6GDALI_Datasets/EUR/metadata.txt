@@ -1,0 +1,116 @@
+The datasets are collected for 3 types of applications: Web servers written in python and Golang, RabbitMQ data broker and the OpenAirInterface 5G Core network function AMF (Access and Mobility Management Function).
+
+
+ 
+
+Web Servers:
+
+files:  golang-web-server-performance.csv, python-web-server-performance.csv
+
+We used Golang and Python-based web servers for the test. Each request to the web server returns a video of a size 43 MB. For testing we used ApacheBench, a command-line program used for benchmarking HTTP web servers. ApacheBench allows parallel requests from multiple clients. For each web server instance we send a number of requests ranging from 100 to 1000 and a concurrency level between 1 and 100, representing the number of parallel clients performing the requests.
+
+The information available in the dataset are as follows:
+
+time: timestamp of collection of metrics.
+
+ram_limit: the memory allocated to the container in megabytes.
+
+cpu_limit: the CPU allocated to the container.
+
+ram_usage: the amount of memory used by the container at the time of the metrics collection in byte.
+
+cpu_usage: the amount of CPU used by the container at the time of the metrics collection.
+
+n: the number of requests sent to the container.
+
+c: the concurrency level in the requests.
+
+lat50: the least response time for the best 50% requests in microseconds.
+
+lat66: the least response time for the best 66% requests in microseconds.
+
+lat75: the least response time for the best 75% requests in microseconds.
+
+lat80: the least response time for the best 80% requests in microseconds.
+
+lat90: the least response time for the best 90% requests in microseconds.
+
+lat95: the least response time for the best 95% requests in microseconds.
+
+lat98: the least response time for the best 98% requests in microseconds.
+
+lat99: the least response time for the best 99% requests in microseconds.
+
+lat100: the least response time in microseconds.
+
+ 
+
+5G Core network’s AMF:
+
+file: amf-performance.csv
+
+For testing we use my5G-RANTester, a tool for emulating control and data planes of the UE and gNB (5G base station). The number of simultaneous registration requests that are sent to each instance of the AMF varies between 10 and 400.
+
+The information available in the dataset are as follows:
+
+time: timestamp of collection of metrics.
+
+ram_limit: the memory allocated to the container in megabytes.
+
+cpu_limit: the CPU allocated to the container.
+
+ram_usage: the amount of memory used by the container at the time of the metrics collection in byte.
+
+cpu_usage: the amount of CPU used by the container at the time of the metrics collection.
+
+n: the number of parallel registration requests sent to the AMF.
+
+mean: the mean registration time for all the registration requests in microseconds.
+
+lat50: the median registration time for registration requests in microseconds.
+
+lat75: the least registration time for the best 75% registration requests in microseconds.
+
+lat80: the least registration time for the best 80% registration requests in microseconds.
+
+lat90: the least registration time for the best 90% registration requests in microseconds.
+
+lat95: the least registration time for the best 95% registration requests in microseconds.
+
+lat98: the least registration time for the best 98% registration requests in microseconds.
+
+lat99: the least registration time for the best 99% registration requests in microseconds.
+
+lat100: the least registration time in microseconds.
+
+ 
+
+RabbitMQ data broker:
+
+file: rabbitmq-performance.csv
+
+For testing we used RabbitMQ PerfTest which is a throughput testing tool that simulates basic workloads and provides the throughput and the time that a message takes to be consumed by a consumer. For each deployed RabbitMQ server we used a number of producers and consumers that ranges from 50 to 500. Each producer sends messages to the broker with a rate of 100 messages per second for a period of time of 90 seconds.
+
+The information available in the dataset are as follows:
+
+time: timestamp of collection of metrics.
+
+ram_limit: the memory allocated to the container in megabytes.
+
+cpu_limit: the CPU allocated to the container.
+
+ram_usage: the amount of memory used by the container at the time of the metrics collection in byte.
+
+cpu_usage: the amount of CPU used by the container at the time of the metrics collection.
+
+n: the number of producers sending messages to the RabbitMQ server.
+
+Min: the minimum consumption time for the producer messages.
+
+lat50: the median consumption time for the producer messages.
+
+lat75: the least consumption time for the best 75% messages in microseconds.
+
+lat95: the least consumption time for the best 95% messages in microseconds.
+
+lat99: the least consumption time for the best 99% messages in microseconds.
