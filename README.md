@@ -2,6 +2,14 @@
 python -m venv .venv && source .venv/bin/activate
 pip install "apache-beam[gcp]" python-dateutil
 
+> **Note**
+> Some execution environments (including the one used for automated
+> verification) block outbound package downloads behind a proxy. If you
+> encounter repeated `ProxyError` messages when attempting to install
+> `apache-beam`, you will need to perform the installation from a network
+> location with PyPI access or provide the wheel files via an internal
+> mirror before running the pipeline.
+
 # Example 1: the EUR/6907619 files
 python dq_local_beam.py \
   --inputs "6GDALI_Datasets/EUR/6907619/*.csv" \
