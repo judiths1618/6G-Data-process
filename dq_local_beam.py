@@ -30,6 +30,25 @@ from dateutil import parser as dtparse
 BAD_TAG = "bad"
 HEADERS_TAG = "headers"
 
+DIMENSION_DESCRIPTIONS = {
+    "Accuracy": (
+        "Data are accurate when data values stored in the database correspond to real-world values."
+    ),
+    "Completeness": (
+        "The ability of an information system to represent every meaningful state of the represented real-world system."
+    ),
+    "Staleness": (
+        "The extent to which the age of the data is appropriate for the task at hand."
+    ),
+    "Consistency": (
+        "The extent to which data is presented in the same format and compatible with previous data while respecting semantic rules."
+    ),
+    "Duplication": (
+        "A measure of unwanted duplication existing within or across systems for a particular field, record, or data set."
+    ),
+    "Other": "Issues that do not map to a predefined data-quality dimension.",
+}
+
 # -----------------------------
 # 数据结构
 # -----------------------------
@@ -403,6 +422,92 @@ def union_numeric_cols(rules: List[Dict[str, Any]]) -> List[str]:
         cols.update(r.get("numeric_cols", []))
     return sorted(cols)
 
+
+def classify_issue(reason: str) -> Tuple[str, str]:
+    """Map a failure reason to a (dimension, scenario) tuple."""
+    if not reason:
+        return "Other", "Uncategorized issue"
+
+    r = reason.lower()
+    if r.startswith("missing_required_column"):
+        return "Completeness", "Required column missing from header"
+    if r.startswith("null_required"):
+        return "Completeness", "Required field is empty"
+    if r.startswith("bad_enum"):
+        return "Accuracy", "Value not in allowed enumeration"
+    if r.startswith("out_of_range"):
+        return "Accuracy", "Numeric value outside configured range"
+    if r.startswith("bad_numeric"):
+        return "Accuracy", "Numeric value could not be parsed"
+    if r.startswith("bad_timestamp"):
+        return "Accuracy", "Timestamp could not be parsed"
+    if r.startswith("time_epoch_out_of_range"):
+        return "Staleness", "Epoch timestamp outside allowed bounds"
+    if r.startswith("stale_event"):
+        return "Staleness", "Event is older than freshness SLO"
+    if r.startswith("future_event"):
+        return "Staleness", "Event timestamp is too far in the future"
+    if r.startswith("fk_missing"):
+        return "Consistency", "Referenced value missing from reference data"
+    if r.startswith("parse_error"):
+        return "Accuracy", "CSV row could not be parsed"
+    if r in ("empty_file",):
+        return "Completeness", "File contains no data"
+    if r.startswith("no_header"):
+        return "Completeness", "Header row missing"
+    if r.startswith("duplicate_primary_key"):
+        return "Duplication", "Duplicate primary key values detected"
+    return "Other", "Uncategorized issue"
+
+
+class DimensionIssueSummary(beam.CombineFn):
+    """Aggregate issue information by dimension."""
+
+    def create_accumulator(self):
+        return {"count": 0, "scenarios": {}, "examples": []}
+
+    def add_input(self, accumulator, issue: Dict[str, Any]):
+        weight = issue.get("occurrence_count", 1)
+        scenario = issue.get("scenario") or "Uncategorized issue"
+        accumulator["count"] += weight
+        accumulator["scenarios"][scenario] = accumulator["scenarios"].get(scenario, 0) + weight
+        if len(accumulator["examples"]) < 5:
+            example = dict(issue)
+            example.pop("occurrence_count", None)
+            accumulator["examples"].append(example)
+        return accumulator
+
+    def merge_accumulators(self, accumulators):
+        merged = self.create_accumulator()
+        for acc in accumulators:
+            merged["count"] += acc["count"]
+            for scenario, cnt in acc["scenarios"].items():
+                merged["scenarios"][scenario] = merged["scenarios"].get(scenario, 0) + cnt
+            if len(merged["examples"]) < 5:
+                merged["examples"].extend(acc["examples"][: 5 - len(merged["examples"])])
+        return merged
+
+    def extract_output(self, accumulator):
+        scenarios = [
+            {"scenario": scen, "count": cnt}
+            for scen, cnt in sorted(accumulator["scenarios"].items(), key=lambda item: item[1], reverse=True)
+        ]
+        return {
+            "issue_count": accumulator["count"],
+            "scenarios": scenarios,
+            "examples": accumulator["examples"],
+        }
+
+
+def attach_dimension(issue: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    dimension, scenario = classify_issue(issue.get("reason", ""))
+    enriched = dict(issue)
+    enriched["dimension"] = dimension
+    enriched["scenario"] = scenario
+    if "occurrence_count" not in enriched:
+        enriched["occurrence_count"] = 1
+    return dimension, enriched
+
 # -----------------------------
 # 主流程
 # -----------------------------
@@ -502,6 +607,8 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
             | "WriteBad" >> beam.io.WriteToText(bad_out, file_name_suffix=".jsonl", num_shards=1)
         )
 
+        issue_pairs = bad | "AttachIssueDimensions" >> beam.Map(attach_dimension)
+
         # 文件级 GOOD 行数
         per_file_counts = (
             validated.good
@@ -516,6 +623,7 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
         )
 
         # 主键重复统计（若配置）
+        dup_issue_pairs = p | "EmptyDupIssues" >> beam.Create([])
         if any(r.get("primary_key") for r in rules):
             def pk_pairs(pair: Tuple[RowCtx, Dict[str, Any]]):
                 rc, rule = pair
@@ -527,16 +635,31 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
                     yield (key, rc.file)
 
             pkp = with_rules | "PKPairs" >> beam.FlatMap(pk_pairs)
-            dup_pk = (
+            dup_keys = (
                 pkp
                 | "PKCount" >> beam.combiners.Count.PerKey()
                 | "PKOnlyDup" >> beam.Filter(lambda kv: kv[1] > 1)
-                | "PKDupCount" >> beam.combiners.Count.Globally()
             )
+            dup_pk = dup_keys | "PKDupCount" >> beam.combiners.Count.Globally()
             _ = (
                 dup_pk
                 | "WritePKDup" >> beam.io.WriteToText(os.path.join(dq_out, "pk_duplicates"),
                                                       file_name_suffix=".txt", num_shards=1)
+            )
+            dup_issue_pairs = (
+                dup_keys
+                | "DupIssues" >> beam.Map(
+                    lambda kv: (
+                        "Duplication",
+                        {
+                            "dimension": "Duplication",
+                            "reason": f"duplicate_primary_key:{kv[0]}",
+                            "scenario": "Duplicate primary key values detected",
+                            "detail": {"primary_key": kv[0], "occurrences": kv[1]},
+                            "occurrence_count": max(kv[1] - 1, 1),
+                        },
+                    )
+                )
             )
 
         # 新鲜度汇总
@@ -608,6 +731,25 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
                     os.path.join(dq_out, f"num_{col}_quantiles"), file_name_suffix=".jsonl", num_shards=1
                 )
             )
+
+        all_issue_pairs = (issue_pairs, dup_issue_pairs) | "MergeIssuePairs" >> beam.Flatten()
+        _ = (
+            all_issue_pairs
+            | "SummarizeIssues" >> beam.CombinePerKey(DimensionIssueSummary())
+            | "FormatIssueSummary" >> beam.Map(
+                lambda kv: json.dumps(
+                    {
+                        "dimension": kv[0],
+                        "description": DIMENSION_DESCRIPTIONS.get(kv[0], DIMENSION_DESCRIPTIONS["Other"]),
+                        **kv[1],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            | "WriteIssueSummary" >> beam.io.WriteToText(
+                os.path.join(dq_out, "issue_summary"), file_name_suffix=".jsonl", num_shards=1
+            )
+        )
 
 # -----------------------------
 # CLI
