@@ -1061,6 +1061,17 @@ def _accumulate_numeric_values(
             per_file_values.setdefault(file_path, {}).setdefault(col, []).append(parsed_val)
 
 
+def _format_stat_value(value: Optional[float]) -> str:
+    if value is None:
+        return "N/A"
+    if value == 0:
+        return "0"
+    magnitude = abs(value)
+    if magnitude >= 1000 or magnitude < 0.01:
+        return f"{value:.3g}"
+    return f"{value:.3f}"
+
+
 def _plot_histogram(values: List[float], output_path: str, title: str, xlabel: str) -> None:
     if not values:
         return
@@ -1076,6 +1087,65 @@ def _plot_histogram(values: List[float], output_path: str, title: str, xlabel: s
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Frequency")
     ax.grid(True, linestyle="--", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
+def _plot_boxplot(
+    values: List[float],
+    output_path: str,
+    title: str,
+    xlabel: str,
+    summary: Dict[str, Any],
+) -> None:
+    if not values:
+        return
+    if plt is None:
+        raise RuntimeError(
+            "matplotlib is required to generate visualizations. Install matplotlib to enable this feature."
+        )
+
+    bounds = summary.get("outlier_bounds", {}) if summary else {}
+    text_lines = [
+        f"Q1: {_format_stat_value(bounds.get('q1'))}",
+        f"Q3: {_format_stat_value(bounds.get('q3'))}",
+        f"IQR: {_format_stat_value(bounds.get('iqr'))}",
+        f"Lower fence: {_format_stat_value(bounds.get('lower'))}",
+        f"Upper fence: {_format_stat_value(bounds.get('upper'))}",
+        f"Outliers: {summary.get('outlier_count', 0)}",
+    ]
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.boxplot(
+        values,
+        vert=False,
+        patch_artist=True,
+        boxprops={"facecolor": "#2a9d8f", "alpha": 0.6},
+        medianprops={"color": "#e76f51", "linewidth": 2},
+        whiskerprops={"color": "#264653"},
+        capprops={"color": "#264653"},
+        flierprops={
+            "marker": "o",
+            "markerfacecolor": "#e76f51",
+            "markeredgecolor": "#264653",
+            "alpha": 0.6,
+        },
+    )
+    ax.set_title(f"{title} – outlier analysis")
+    ax.set_xlabel(xlabel)
+    ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+    ax.text(
+        0.98,
+        0.02,
+        "\n".join(text_lines),
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=9,
+        bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.8},
+    )
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
@@ -1105,8 +1175,15 @@ def create_feature_visualizations(
             if desc:
                 title = f"{title}\n{desc}"
             output_path = os.path.join(visualization_root, safe_file, f"{safe_col}.png")
+            summary = summarize_numeric_values(values)
             _plot_histogram(values, output_path, title, col)
             generated.setdefault(file_path, {})[col] = os.path.relpath(output_path, dq_out)
+
+            outlier_path = os.path.join(
+                visualization_root, safe_file, f"{safe_col}_outliers.png"
+            )
+            _plot_boxplot(values, outlier_path, title, col, summary)
+            generated[file_path][f"{col}_outliers"] = os.path.relpath(outlier_path, dq_out)
 
     return generated, None
 
@@ -1180,11 +1257,21 @@ def write_quality_report(
         numeric_summary: Dict[str, Any] = {}
         for col, values in sorted((per_file_numeric_values.get(file_path) or {}).items()):
             stats = summarize_numeric_values(values)
+            outlier_bounds = stats.get("outlier_bounds") or {}
             numeric_summary[col] = {
                 "count": stats.get("count"),
                 "min": stats.get("min"),
                 "max": stats.get("max"),
                 "mean": stats.get("mean"),
+                "quantiles": stats.get("quantiles"),
+                "outliers": {
+                    "count": stats.get("outlier_count"),
+                    "lower_fence": outlier_bounds.get("lower"),
+                    "upper_fence": outlier_bounds.get("upper"),
+                    "iqr": outlier_bounds.get("iqr"),
+                    "q1": outlier_bounds.get("q1"),
+                    "q3": outlier_bounds.get("q3"),
+                },
                 "description": column_descriptions.get(col),
             }
 
