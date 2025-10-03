@@ -25,7 +25,23 @@ try:
     from apache_beam.options.pipeline_options import PipelineOptions
     from apache_beam.io import fileio
     from apache_beam.metrics.metric import Metrics
-    from apache_beam.transforms.combiners import ApproximateQuantiles
+    try:
+        from apache_beam.transforms.combiners import ApproximateQuantiles
+    except ImportError:
+        try:
+            from apache_beam.transforms.combiners.approximate_quantiles import (  # type: ignore
+                ApproximateQuantiles,
+            )
+        except ImportError:  # apache-beam>=2.66 relocated the combiner symbol
+            from apache_beam.transforms import combiners as _beam_combiners
+
+            ApproximateQuantiles = getattr(  # type: ignore[assignment]
+                _beam_combiners,
+                "ApproximateQuantiles",
+                None,
+            )
+            if ApproximateQuantiles is None:
+                raise
 
     _HAVE_BEAM = True
 except ModuleNotFoundError:
