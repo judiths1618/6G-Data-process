@@ -1,1 +1,1 @@
-{"column": "lat80", "description": "the least response time for the best 80% requests in microseconds.", "metric": "max", "value": null, "note": "no valid numeric values"}
+{"column": "lat80", "description": "the least response time for the best 80% requests in microseconds.", "metric": "max", "value": 1684104000.0}

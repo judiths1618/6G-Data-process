@@ -1,1 +1,1 @@
-{"column": "lat99", "description": "the least response time for the best 99% requests in microseconds.", "metric": "mean", "value": null, "note": "no valid numeric values"}
+{"column": "lat99", "description": "the least response time for the best 99% requests in microseconds.", "metric": "mean", "value": 19948515.99002741}

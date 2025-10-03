@@ -1,1 +1,1 @@
-{"column": "cpu_usage", "description": "the amount of CPU used by the container at the time of the metrics collection.", "metric": "count", "value": 0}
+{"column": "cpu_usage", "description": "the amount of CPU used by the container at the time of the metrics collection.", "metric": "count", "value": 124040}

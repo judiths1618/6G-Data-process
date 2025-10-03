@@ -1,1 +1,1 @@
-{"column": "ram_limit", "description": "the memory allocated to the container in megabytes.", "metric": "quantiles", "values": [], "note": "no valid numeric values"}
+{"column": "ram_limit", "description": "the memory allocated to the container in megabytes.", "metric": "quantiles", "values": [63.0, 256.0, 768.0, 1792.0, 4096.0]}

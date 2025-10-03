@@ -1,1 +1,1 @@
-{"column": "mean", "description": "the mean registration time for all the registration requests in microseconds.", "metric": "quantiles", "values": [], "note": "no valid numeric values"}
+{"column": "mean", "description": "the mean registration time for all the registration requests in microseconds.", "metric": "quantiles", "values": [164099.0, 923408.0, 1949563.0, 12009014.0, 99274796.0]}

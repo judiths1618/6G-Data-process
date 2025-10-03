@@ -1,1 +1,1 @@
-{"column": "c", "description": "the concurrency level in the requests.", "metric": "outlier_bounds", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": [], "note": "no valid numeric values"}
+{"column": "c", "description": "the concurrency level in the requests.", "metric": "outlier_bounds", "lower": -49.0, "upper": 111.0, "iqr": 40.0, "q1": 11.0, "q3": 51.0, "quantiles": [1.0, 11.0, 31.0, 51.0, 101.0]}

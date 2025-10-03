@@ -1,1 +1,1 @@
-{"column": "lat99", "description": "the least response time for the best 99% requests in microseconds.", "metric": "outliers", "outlier_count": 0, "total_count": 0, "outlier_ratio": 0.0, "note": "no valid numeric values"}
+{"column": "lat99", "description": "the least response time for the best 99% requests in microseconds.", "metric": "outliers", "outlier_count": 18614, "total_count": 124040, "outlier_ratio": 0.150064495324089}

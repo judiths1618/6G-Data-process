@@ -1,1 +1,1 @@
-{"column": "lat50", "description": "the least response time for the best 50% requests in microseconds.", "metric": "outlier_bounds", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": [], "note": "no valid numeric values"}
+{"column": "lat50", "description": "the least response time for the best 50% requests in microseconds.", "metric": "outlier_bounds", "lower": -15349130.125, "upper": 28483216.875, "iqr": 10958086.75, "q1": 1088000.0, "q3": 12046086.75, "quantiles": [0.0, 1088000.0, 4049000.0, 12046086.75, 1571406000.0]}

@@ -1,1 +1,1 @@
-{"column": "cpu_usage", "description": "the amount of CPU used by the container at the time of the metrics collection.", "metric": "max", "value": null, "note": "no valid numeric values"}
+{"column": "cpu_usage", "description": "the amount of CPU used by the container at the time of the metrics collection.", "metric": "max", "value": 3.998097}

@@ -1,1 +1,1 @@
-{"column": "n", "description": "the number of requests sent to the container.", "metric": "mean", "value": null, "note": "no valid numeric values"}
+{"column": "n", "description": "the number of requests sent to the container.", "metric": "mean", "value": 402.1185101580135}

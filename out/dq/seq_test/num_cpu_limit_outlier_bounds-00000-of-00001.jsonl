@@ -1,1 +1,1 @@
-{"column": "cpu_limit", "description": "the CPU allocated to the container.", "metric": "outlier_bounds", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": [], "note": "no valid numeric values"}
+{"column": "cpu_limit", "description": "the CPU allocated to the container.", "metric": "outlier_bounds", "lower": -2.2499999999999996, "upper": 5.35, "iqr": 1.9, "q1": 0.6, "q3": 2.5, "quantiles": [0.1, 0.6, 1.5, 2.5, 5.0]}

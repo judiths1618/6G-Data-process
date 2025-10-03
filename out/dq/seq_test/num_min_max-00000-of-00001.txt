@@ -1,1 +1,1 @@
-{"column": "min", "description": "the minimum consumption time for the producer messages.", "metric": "max", "value": null, "note": "no valid numeric values"}
+{"column": "min", "description": "the minimum consumption time for the producer messages.", "metric": "max", "value": 103253096.0}

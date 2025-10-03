@@ -1,1 +1,1 @@
-{"column": "c", "description": "the concurrency level in the requests.", "metric": "min", "value": null, "note": "no valid numeric values"}
+{"column": "c", "description": "the concurrency level in the requests.", "metric": "min", "value": 1.0}

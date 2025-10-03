@@ -1,1 +1,1 @@
-{"column": "mean", "description": "the mean registration time for all the registration requests in microseconds.", "metric": "min", "value": null, "note": "no valid numeric values"}
+{"column": "mean", "description": "the mean registration time for all the registration requests in microseconds.", "metric": "min", "value": 164099.0}

@@ -1,1 +1,1 @@
-{"column": "cpu_limit", "description": "the CPU allocated to the container.", "metric": "mean", "value": null, "note": "no valid numeric values"}
+{"column": "cpu_limit", "description": "the CPU allocated to the container.", "metric": "mean", "value": 1.7219646888102873}

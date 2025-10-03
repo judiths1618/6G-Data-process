@@ -1,1 +1,1 @@
-{"column": "ram_limit", "description": "the memory allocated to the container in megabytes.", "metric": "min", "value": null, "note": "no valid numeric values"}
+{"column": "ram_limit", "description": "the memory allocated to the container in megabytes.", "metric": "min", "value": 63.0}

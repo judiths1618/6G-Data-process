@@ -1,1 +1,1 @@
-{"column": "mean", "description": "the mean registration time for all the registration requests in microseconds.", "metric": "outliers", "outlier_count": 0, "total_count": 0, "outlier_ratio": 0.0, "note": "no valid numeric values"}
+{"column": "mean", "description": "the mean registration time for all the registration requests in microseconds.", "metric": "outliers", "outlier_count": 4077, "total_count": 27413, "outlier_ratio": 0.14872505745449238}
