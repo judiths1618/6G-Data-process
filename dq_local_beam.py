@@ -17,14 +17,49 @@ import datetime as dt
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple, Iterable
 
-import apache_beam as beam
-from apache_beam.options.pipeline_options import PipelineOptions
-from apache_beam.io import fileio
-from apache_beam.metrics.metric import Metrics
-from apache_beam.transforms.combiners import ApproximateQuantiles
+import glob
 
-import yaml
-from dateutil import parser as dtparse
+try:
+    import apache_beam as beam  # type: ignore
+    from apache_beam.options.pipeline_options import PipelineOptions
+    from apache_beam.io import fileio
+    from apache_beam.metrics.metric import Metrics
+    from apache_beam.transforms.combiners import ApproximateQuantiles
+
+    _HAVE_BEAM = True
+except ModuleNotFoundError:
+    beam = None  # type: ignore
+    PipelineOptions = None  # type: ignore
+    fileio = None  # type: ignore
+
+    class _DummyCounter:
+        def inc(self, unused_amount: int = 1) -> None:
+            return None
+
+    class _DummyMetrics:
+        @staticmethod
+        def counter(*_args, **_kwargs):
+            return _DummyCounter()
+
+    Metrics = _DummyMetrics()  # type: ignore
+
+    class _DummyApproximateQuantiles:
+        @staticmethod
+        def Globally(*_args, **_kwargs):
+            raise RuntimeError("ApproximateQuantiles requires apache_beam. Install apache-beam or use the sequential engine.")
+
+    ApproximateQuantiles = _DummyApproximateQuantiles()  # type: ignore
+
+    _HAVE_BEAM = False
+
+try:
+    import yaml  # type: ignore
+except ModuleNotFoundError:
+    yaml = None  # type: ignore
+try:
+    from dateutil import parser as dtparse  # type: ignore
+except ModuleNotFoundError:
+    dtparse = None  # type: ignore
 
 BAD_TAG = "bad"
 HEADERS_TAG = "headers"
@@ -130,9 +165,150 @@ def parse_metadata_descriptions(path: str) -> Dict[str, Dict[str, str]]:
     with open(path, "r", encoding="utf-8") as fp:
         return _parse_metadata_text(fp.readlines())
 
+
+def _split_inline_items(text: str) -> List[str]:
+    items: List[str] = []
+    buf: List[str] = []
+    depth = 0
+    for ch in text:
+        if ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            items.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        items.append("".join(buf).strip())
+    return [item for item in items if item]
+
+
+def _parse_simple_yaml_value(token: str) -> Any:
+    if token == "":
+        return None
+    lower = token.lower()
+    if lower in {"null", "none"}:
+        return None
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    if token.startswith("[") and token.endswith("]"):
+        inner = token[1:-1].strip()
+        if not inner:
+            return []
+        return [_parse_simple_yaml_value(part) for part in _split_inline_items(inner)]
+    if token.startswith("{") and token.endswith("}"):
+        inner = token[1:-1].strip()
+        result: Dict[str, Any] = {}
+        if inner:
+            for part in _split_inline_items(inner):
+                if ":" not in part:
+                    raise ValueError(f"Invalid inline mapping segment: {part}")
+                key, value = part.split(":", 1)
+                result[key.strip()] = _parse_simple_yaml_value(value.strip())
+        return result
+    if token.startswith("\"") and token.endswith("\""):
+        return json.loads(token)
+    if token.startswith("'") and token.endswith("'"):
+        return token[1:-1]
+    try:
+        if any(c in token for c in ".eE"):
+            return float(token)
+        return int(token)
+    except ValueError:
+        return token
+
+
+def _simple_yaml_parse(lines: List[str], start: int, indent: int) -> Tuple[Any, int]:
+    result: Any = None
+    idx = start
+    while idx < len(lines):
+        raw = lines[idx]
+        if not raw.strip():
+            idx += 1
+            continue
+        current_indent = len(raw) - len(raw.lstrip(" "))
+        if current_indent < indent:
+            break
+        stripped = raw.strip()
+        if stripped.startswith("- "):
+            if result is None:
+                result = []
+            elif not isinstance(result, list):
+                raise ValueError("Mixed list/dict structures are not supported in simple YAML parser")
+            value_part = stripped[2:].strip()
+            if value_part:
+                if ":" in value_part and not value_part.startswith("{"):
+                    key, remainder = value_part.split(":", 1)
+                    child_dict: Dict[str, Any] = {}
+                    remainder = remainder.strip()
+                    if remainder:
+                        child_dict[key.strip()] = _parse_simple_yaml_value(remainder)
+                        idx += 1
+                    else:
+                        child_value, idx = _simple_yaml_parse(
+                            lines, idx + 1, current_indent + 2
+                        )
+                        child_dict[key.strip()] = child_value
+
+                    # merge additional nested keys at deeper indent
+                    next_idx = idx
+                    while next_idx < len(lines) and not lines[next_idx].strip():
+                        next_idx += 1
+                    if next_idx < len(lines):
+                        next_indent = len(lines[next_idx]) - len(lines[next_idx].lstrip(" "))
+                    else:
+                        next_indent = None
+                    if next_indent is not None and next_indent >= current_indent + 2:
+                        child_rest, idx = _simple_yaml_parse(lines, idx, current_indent + 2)
+                        if isinstance(child_rest, dict):
+                            child_dict.update(child_rest)
+                    result.append(child_dict)
+                else:
+                    result.append(_parse_simple_yaml_value(value_part))
+                    idx += 1
+            else:
+                child, idx = _simple_yaml_parse(lines, idx + 1, current_indent + 2)
+                result.append(child)
+        else:
+            if ":" not in stripped:
+                raise ValueError(f"Invalid YAML mapping line: {stripped}")
+            key, remainder = stripped.split(":", 1)
+            key = key.strip()
+            remainder = remainder.strip()
+            if result is None:
+                result = {}
+            elif not isinstance(result, dict):
+                raise ValueError("Mixed list/dict structures are not supported in simple YAML parser")
+            if remainder:
+                result[key] = _parse_simple_yaml_value(remainder)
+                idx += 1
+            else:
+                child, idx = _simple_yaml_parse(lines, idx + 1, current_indent + 2)
+                result[key] = child
+    if result is None:
+        return {}, idx
+    return result, idx
+
+
+def _simple_yaml_load(text: str) -> Any:
+    lines = [line.rstrip("\n") for line in text.splitlines()]
+    parsed, _ = _simple_yaml_parse(lines, 0, 0)
+    return parsed
+
+
+def _load_config_text(text: str) -> Any:
+    if yaml is not None:
+        return yaml.safe_load(text)
+    return _simple_yaml_load(text)
+
+
 def load_config(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+        cfg = _load_config_text(f.read())
     if isinstance(cfg, dict) and "rules" in cfg:
         rules = cfg["rules"]
     elif isinstance(cfg, list):
@@ -196,12 +372,7 @@ def parse_event_time(val, fmt: str = "auto") -> dt.datetime:
         is_numeric = False
 
     if fmt == "iso" or (fmt == "auto" and not is_numeric):
-        t = dtparse.parse(str(val))
-        if t.tzinfo is None:
-            t = t.replace(tzinfo=dt.timezone.utc)
-        else:
-            t = t.astimezone(dt.timezone.utc)
-        return t
+        return _parse_iso_datetime(str(val))
 
     if fmt == "epoch_s":
         seconds = x
@@ -214,6 +385,39 @@ def parse_event_time(val, fmt: str = "auto") -> dt.datetime:
         elif ax >= 1e12: seconds = x / 1_000.0        # ms
         else: seconds = x                              # s
     return dt.datetime.fromtimestamp(seconds, tz=dt.timezone.utc)
+
+
+def _parse_iso_datetime(value: str) -> dt.datetime:
+    if dtparse is not None:
+        t = dtparse.parse(value)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=dt.timezone.utc)
+        else:
+            t = t.astimezone(dt.timezone.utc)
+        return t
+
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        parsed = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                parsed = dt.datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            raise
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    else:
+        parsed = parsed.astimezone(dt.timezone.utc)
+    return parsed
 
 # -----------------------------
 # 带单位数值解析（返回 float，统一 MiB）
@@ -255,208 +459,304 @@ def parse_numeric_with_units(val: Any, col: str, rule: Dict[str, Any]) -> float:
     return float(mib)
 
 # -----------------------------
+# CSV 解析（Beam 与本地模式共享）
+# -----------------------------
+
+
+def _parse_csv_text(path: str, text: str) -> Tuple[List[str], List[RowCtx], List[Dict[str, Any]]]:
+    issues: List[Dict[str, Any]] = []
+    if not text.strip():
+        issues.append({"file": path, "row": 0, "reason": "empty_file"})
+        return [], [], issues
+
+    buf = io.StringIO(text)
+    sample = buf.read(2048)
+    buf.seek(0)
+    try:
+        dialect = csv.Sniffer().sniff(sample)
+    except Exception:
+        dialect = csv.excel
+
+    reader = csv.DictReader(buf, dialect=dialect)
+    if not reader.fieldnames:
+        issues.append({"file": path, "row": 0, "reason": "no_header"})
+        return [], [], issues
+
+    header = [h.strip() for h in reader.fieldnames]
+    rows: List[RowCtx] = []
+    for i, row in enumerate(reader, start=1):
+        try:
+            cleaned = {
+                (k.strip() if k else k): (v.strip() if isinstance(v, str) else v)
+                for k, v in row.items()
+            }
+            rows.append(RowCtx(file=path, rownum=i, header=header, data=cleaned))
+        except Exception as exc:
+            issues.append({
+                "file": path,
+                "row": i,
+                "reason": f"parse_error:{exc}",
+            })
+    return header, rows, issues
+
+
+def read_csv_file(path: str) -> Tuple[List[str], List[RowCtx], List[Dict[str, Any]]]:
+    with open(path, "r", encoding="utf-8") as fp:
+        text = fp.read()
+    return _parse_csv_text(path, text)
+
+# -----------------------------
 # 读 CSV（带表头）+ 发 headers
 # -----------------------------
-class ReadCSVWithHeader(beam.DoFn):
-    bad_parse   = Metrics.counter("dq", "bad_parse")
-    empty_files = Metrics.counter("dq", "empty_files")
+if _HAVE_BEAM:
 
-    def process(self, rf: fileio.ReadableFile):
-        path = rf.metadata.path
-        text = rf.read_utf8()
-        if not text.strip():
-            self.empty_files.inc()
-            yield beam.pvalue.TaggedOutput(BAD_TAG, {"file": path, "row": 0, "reason": "empty_file"})
-            return
+    class ReadCSVWithHeader(beam.DoFn):  # type: ignore[attr-defined]
+        bad_parse = Metrics.counter("dq", "bad_parse")
+        empty_files = Metrics.counter("dq", "empty_files")
 
-        buf = io.StringIO(text)
-        sample = buf.read(2048)
-        buf.seek(0)
-        try:
-            dialect = csv.Sniffer().sniff(sample)
-        except Exception:
-            dialect = csv.excel
-        reader = csv.DictReader(buf, dialect=dialect)
+        def process(self, rf: fileio.ReadableFile):  # type: ignore[valid-type]
+            path = rf.metadata.path
+            header, rows, issues = _parse_csv_text(path, rf.read_utf8())
+            if not header and issues:
+                for issue in issues:
+                    if issue["reason"] == "empty_file":
+                        self.empty_files.inc()
+                    else:
+                        self.bad_parse.inc()
+                    yield beam.pvalue.TaggedOutput(BAD_TAG, issue)
+                return
 
-        if not reader.fieldnames:
-            self.bad_parse.inc()
-            yield beam.pvalue.TaggedOutput(BAD_TAG, {"file": path, "row": 0, "reason": "no_header"})
-            return
+            if not header:
+                return
 
-        header = [h.strip() for h in reader.fieldnames]
-        yield beam.pvalue.TaggedOutput(HEADERS_TAG, {"file": path, "header": header})
-
-        for i, row in enumerate(reader, start=1):
-            try:
-                cleaned = { (k.strip() if k else k): (v.strip() if isinstance(v, str) else v)
-                            for k, v in row.items() }
-                yield RowCtx(file=path, rownum=i, header=header, data=cleaned)
-            except Exception as e:
+            yield beam.pvalue.TaggedOutput(HEADERS_TAG, {"file": path, "header": header})
+            for row in rows:
+                yield row
+            for issue in issues:
                 self.bad_parse.inc()
-                yield beam.pvalue.TaggedOutput(BAD_TAG, {
-                    "file": path, "row": i, "reason": f"parse_error:{e}"
-                })
+                yield beam.pvalue.TaggedOutput(BAD_TAG, issue)
 
 # -----------------------------
-# 校验器
+# 校验逻辑（Beam/本地共享）
 # -----------------------------
-class ValidateRow(beam.DoFn):
-    nulls         = Metrics.counter("dq", "null_required")
-    bad_enum      = Metrics.counter("dq", "bad_enum")
-    bad_range     = Metrics.counter("dq", "bad_range")
-    bad_numeric   = Metrics.counter("dq", "bad_numeric")
-    bad_ref       = Metrics.counter("dq", "bad_ref_integrity")
-    bad_freshness = Metrics.counter("dq", "bad_freshness")
-    metadata_mismatch = Metrics.counter("dq", "metadata_mismatch")
 
-    def __init__(self, rules: Dict[str, Any]):
-        self.rules = rules
 
-    def process(self, rc: RowCtx, refset: Optional[set] = None):
-        d = rc.data
-        rules = self.rules
+def validate_row_against_rule(
+    rc: RowCtx,
+    rule: Dict[str, Any],
+    refset: Optional[set] = None,
+    increment: Optional[Any] = None,
+) -> Tuple[Optional[RowCtx], List[Dict[str, Any]]]:
+    inc = increment or (lambda _name: None)
+    issues: List[Dict[str, Any]] = []
+    data = rc.data
 
-        # -1) 元数据列校验（如有）
-        metadata_by_file = rules.get("metadata_by_file") or {}
-        meta_cols = metadata_by_file.get(os.path.basename(rc.file))
-        if meta_cols:
-            missing = [col for col in meta_cols.keys() if col not in rc.header]
-            if missing:
-                for col in missing:
-                    self.metadata_mismatch.inc()
-                    yield beam.pvalue.TaggedOutput(BAD_TAG, {
+    metadata_by_file = rule.get("metadata_by_file") or {}
+    meta_cols = metadata_by_file.get(os.path.basename(rc.file))
+    if meta_cols:
+        missing = [col for col in meta_cols.keys() if col not in rc.header]
+        if missing:
+            for col in missing:
+                inc("metadata_mismatch")
+                issues.append(
+                    {
                         "file": rc.file,
                         "row": 0,
                         "reason": f"missing_metadata_column:{col}",
-                    })
-                return
+                    }
+                )
+            return None, issues
 
-        # 0) 必备列存在
-        for col in rules["required_cols"]:
-            if col not in rc.header:
-                yield beam.pvalue.TaggedOutput(BAD_TAG, {
-                    "file": rc.file, "row": 0, "reason": f"missing_required_column:{col}"
-                })
-                return
+    for col in rule["required_cols"]:
+        if col not in rc.header:
+            issues.append(
+                {
+                    "file": rc.file,
+                    "row": 0,
+                    "reason": f"missing_required_column:{col}",
+                }
+            )
+            return None, issues
 
-        # 1) 必备列非空
-        for col in rules["required_cols"]:
-            if d.get(col) in (None, "", "NaN"):
-                self.nulls.inc()
-                yield beam.pvalue.TaggedOutput(BAD_TAG, {
-                    "file": rc.file, "row": rc.rownum, "reason": f"null_required:{col}"
-                })
-                return
+    for col in rule["required_cols"]:
+        if data.get(col) in (None, "", "NaN"):
+            inc("nulls")
+            issues.append(
+                {
+                    "file": rc.file,
+                    "row": rc.rownum,
+                    "reason": f"null_required:{col}",
+                }
+            )
+            return None, issues
 
-        # 2) 数值解析 + 范围（numeric_cols 为“可选”）
-        for col in rules["numeric_cols"]:
-            if col not in rc.header:
-                continue
-            val = d.get(col, "")
-            try:
-                f = parse_numeric_with_units(val, col, rules)
-            except Exception:
-                self.bad_numeric.inc()
-                yield beam.pvalue.TaggedOutput(BAD_TAG, {
-                    "file": rc.file, "row": rc.rownum, "reason": f"bad_numeric:{col}={val}"
-                })
-                return
-            rng = rules["ranges"].get(col)
-            if rng:
-                lo, hi = rng
-                if (lo is not None and f < lo) or (hi is not None and f > hi):
-                    self.bad_range.inc()
-                    yield beam.pvalue.TaggedOutput(BAD_TAG, {
-                        "file": rc.file, "row": rc.rownum,
-                        "reason": f"out_of_range:{col}={f} not [{lo},{hi}]"
-                    })
-                    return
+    for col in rule["numeric_cols"]:
+        if col not in rc.header:
+            continue
+        val = data.get(col, "")
+        try:
+            parsed_val = parse_numeric_with_units(val, col, rule)
+        except Exception:
+            inc("bad_numeric")
+            issues.append(
+                {
+                    "file": rc.file,
+                    "row": rc.rownum,
+                    "reason": f"bad_numeric:{col}={val}",
+                }
+            )
+            return None, issues
+        rng = rule["ranges"].get(col)
+        if rng:
+            lo, hi = rng
+            if (lo is not None and parsed_val < lo) or (hi is not None and parsed_val > hi):
+                inc("bad_range")
+                issues.append(
+                    {
+                        "file": rc.file,
+                        "row": rc.rownum,
+                        "reason": f"out_of_range:{col}={parsed_val} not [{lo},{hi}]",
+                    }
+                )
+                return None, issues
 
-        # 3) 枚举
-        for col, allowed in rules["enums"].items():
-            if col not in rc.header:
-                continue
-            val = d.get(col, "")
-            if val != "" and val not in allowed:
-                self.bad_enum.inc()
-                yield beam.pvalue.TaggedOutput(BAD_TAG, {
-                    "file": rc.file, "row": rc.rownum, "reason": f"bad_enum:{col}={val}"
-                })
-                return
+    for col, allowed in rule["enums"].items():
+        if col not in rc.header:
+            continue
+        val = data.get(col, "")
+        if val != "" and val not in allowed:
+            inc("bad_enum")
+            issues.append(
+                {
+                    "file": rc.file,
+                    "row": rc.rownum,
+                    "reason": f"bad_enum:{col}={val}",
+                }
+            )
+            return None, issues
 
-        # 4) 外键（如有）
-        rconf = rules.get("reference_keys") or {}
-        target_col = rconf.get("target_col")
-        if target_col and refset is not None and target_col in rc.header:
-            val = d.get(target_col)
-            if val not in refset:
-                self.bad_ref.inc()
-                yield beam.pvalue.TaggedOutput(BAD_TAG, {
-                    "file": rc.file, "row": rc.rownum, "reason": f"fk_missing:{target_col}={val}"
-                })
-                return
+    rconf = rule.get("reference_keys") or {}
+    target_col = rconf.get("target_col")
+    if target_col and refset is not None and target_col in rc.header:
+        val = data.get(target_col)
+        if val not in refset:
+            inc("bad_ref")
+            issues.append(
+                {
+                    "file": rc.file,
+                    "row": rc.rownum,
+                    "reason": f"fk_missing:{target_col}={val}",
+                }
+            )
+            return None, issues
 
-        # 5) 新鲜度/未来时间/epoch 边界
-        et_col = rules.get("event_time_col")
-        slo_h  = rules.get("freshness_slo_hours")
-        if et_col and et_col in rc.header and (slo_h or rules.get("max_future_hours") or rules.get("time_epoch_bounds")):
-            val = d.get(et_col)
-            try:
-                et_fmt = (rules.get("event_time_format") or "auto").lower()
-                ts = parse_event_time(val, et_fmt)
-                now = dt.datetime.now(dt.timezone.utc)
+    et_col = rule.get("event_time_col")
+    slo_h = rule.get("freshness_slo_hours")
+    if et_col and et_col in rc.header and (
+        slo_h or rule.get("max_future_hours") or rule.get("time_epoch_bounds")
+    ):
+        val = data.get(et_col)
+        try:
+            et_fmt = (rule.get("event_time_format") or "auto").lower()
+            ts = parse_event_time(val, et_fmt)
+            now = dt.datetime.now(dt.timezone.utc)
 
-                if slo_h is not None:
-                    age_h = (now - ts).total_seconds() / 3600.0
-                    if age_h > float(slo_h):
-                        self.bad_freshness.inc()
-                        yield beam.pvalue.TaggedOutput(BAD_TAG, {
-                            "file": rc.file, "row": rc.rownum,
-                            "reason": f"stale_event:{et_col} age_h={age_h:.2f} slo_h={slo_h}"
-                        })
-                        return
+            if slo_h is not None:
+                age_h = (now - ts).total_seconds() / 3600.0
+                if age_h > float(slo_h):
+                    inc("bad_freshness")
+                    issues.append(
+                        {
+                            "file": rc.file,
+                            "row": rc.rownum,
+                            "reason": f"stale_event:{et_col} age_h={age_h:.2f} slo_h={slo_h}",
+                        }
+                    )
+                    return None, issues
 
-                mf = rules.get("max_future_hours")
-                if mf is not None:
-                    future_h = (ts - now).total_seconds() / 3600.0
-                    if future_h > float(mf):
-                        self.bad_freshness.inc()
-                        yield beam.pvalue.TaggedOutput(BAD_TAG, {
-                            "file": rc.file, "row": rc.rownum,
-                            "reason": f"future_event:{et_col} future_h={future_h:.2f} max={mf}"
-                        })
-                        return
+            mf = rule.get("max_future_hours")
+            if mf is not None:
+                future_h = (ts - now).total_seconds() / 3600.0
+                if future_h > float(mf):
+                    inc("bad_freshness")
+                    issues.append(
+                        {
+                            "file": rc.file,
+                            "row": rc.rownum,
+                            "reason": f"future_event:{et_col} future_h={future_h:.2f} max={mf}",
+                        }
+                    )
+                    return None, issues
 
-                bounds = rules.get("time_epoch_bounds")
-                if bounds and str(val).strip() != "":
-                    try:
-                        x = float(val)
-                        lo = bounds.get("min"); hi = bounds.get("max")
-                        if (lo is not None and x < float(lo)) or (hi is not None and x > float(hi)):
-                            self.bad_range.inc()
-                            yield beam.pvalue.TaggedOutput(BAD_TAG, {
-                                "file": rc.file, "row": rc.rownum,
-                                "reason": f"time_epoch_out_of_range:{val} not [{lo},{hi}]"
-                            })
-                            return
-                    except Exception:
-                        pass
+            bounds = rule.get("time_epoch_bounds")
+            if bounds and str(val).strip() != "":
+                try:
+                    num_val = float(val)
+                    lo = bounds.get("min")
+                    hi = bounds.get("max")
+                    if (lo is not None and num_val < float(lo)) or (
+                        hi is not None and num_val > float(hi)
+                    ):
+                        inc("bad_range")
+                        issues.append(
+                            {
+                                "file": rc.file,
+                                "row": rc.rownum,
+                                "reason": f"time_epoch_out_of_range:{val} not [{lo},{hi}]",
+                            }
+                        )
+                        return None, issues
+                except Exception:
+                    pass
 
-            except Exception:
-                self.bad_numeric.inc()
-                yield beam.pvalue.TaggedOutput(BAD_TAG, {
-                    "file": rc.file, "row": rc.rownum, "reason": f"bad_timestamp:{et_col}={val}"
-                })
-                return
+        except Exception:
+            inc("bad_numeric")
+            issues.append(
+                {
+                    "file": rc.file,
+                    "row": rc.rownum,
+                    "reason": f"bad_timestamp:{et_col}={val}",
+                }
+            )
+            return None, issues
 
-        yield rc
+    return rc, issues
+
+
+if _HAVE_BEAM:
+
+    class ValidateRow(beam.DoFn):  # type: ignore[attr-defined]
+        nulls = Metrics.counter("dq", "null_required")
+        bad_enum = Metrics.counter("dq", "bad_enum")
+        bad_range = Metrics.counter("dq", "bad_range")
+        bad_numeric = Metrics.counter("dq", "bad_numeric")
+        bad_ref = Metrics.counter("dq", "bad_ref_integrity")
+        bad_freshness = Metrics.counter("dq", "bad_freshness")
+        metadata_mismatch = Metrics.counter("dq", "metadata_mismatch")
+
+        def __init__(self, rules: Dict[str, Any]):
+            self.rules = rules
+
+        def process(self, rc: RowCtx, refset: Optional[set] = None):
+            def inc(name: str) -> None:
+                counter = getattr(self, name, None)
+                if counter is not None:
+                    counter.inc()
+
+            valid, issues = validate_row_against_rule(rc, self.rules, refset, inc)
+            if valid is not None:
+                yield valid
+            for issue in issues:
+                yield beam.pvalue.TaggedOutput(BAD_TAG, issue)
 
 # -----------------------------
 # 工具
 # -----------------------------
-class ToCsvLine(beam.DoFn):
-    def process(self, rc: RowCtx):
-        yield ",".join(str(rc.data.get(c, "")) for c in rc.header)
+if _HAVE_BEAM:
+
+    class ToCsvLine(beam.DoFn):  # type: ignore[attr-defined]
+        def process(self, rc: RowCtx):
+            yield ",".join(str(rc.data.get(c, "")) for c in rc.header)
 
 def load_reference_keys(path: str, column: str) -> set:
     with open(path, "r") as f:
@@ -464,7 +764,9 @@ def load_reference_keys(path: str, column: str) -> set:
         return { (row.get(column) or "").strip() for row in rdr }
 
 # === 关键修复：按“每条记录对应的规则”做数值统计 ===
-def numeric_profiles_from_pairs(pairs_pcoll: beam.PCollection, col: str):
+def numeric_profiles_from_pairs(pairs_pcoll, col: str):
+    if not _HAVE_BEAM:
+        raise RuntimeError("numeric_profiles_from_pairs requires apache_beam. Use summarize_numeric_values for the sequential engine.")
     """
     输入: PCollection[(RowCtx, rule_dict)]
     对指定列做统计；解析单位使用每条记录对应的 rule_dict。
@@ -567,6 +869,96 @@ def numeric_profiles_from_pairs(pairs_pcoll: beam.PCollection, col: str):
 
     return profile
 
+
+def _quantiles_from_values(values: List[float]) -> List[float]:
+    if not values:
+        return []
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    result: List[float] = []
+    for q in (0.0, 0.25, 0.5, 0.75, 1.0):
+        if n == 1:
+            result.append(sorted_vals[0])
+            continue
+        pos = q * (n - 1)
+        lower = math.floor(pos)
+        upper = math.ceil(pos)
+        if lower == upper:
+            result.append(sorted_vals[int(pos)])
+        else:
+            weight = pos - lower
+            interpolated = sorted_vals[lower] * (1 - weight) + sorted_vals[upper] * weight
+            result.append(interpolated)
+    return result
+
+
+def summarize_numeric_values(values: List[float]) -> Dict[str, Any]:
+    if not values:
+        return {
+            "count": 0,
+            "min": None,
+            "max": None,
+            "mean": None,
+            "quantiles": [],
+            "outlier_bounds": {
+                "quantiles": [],
+                "q1": None,
+                "q3": None,
+                "iqr": None,
+                "lower": None,
+                "upper": None,
+            },
+            "outlier_count": 0,
+        }
+
+    count = len(values)
+    min_val = min(values)
+    max_val = max(values)
+    mean_val = sum(values) / count
+    quantiles = _quantiles_from_values(values)
+
+    q1 = quantiles[1] if len(quantiles) >= 4 else None
+    q3 = quantiles[3] if len(quantiles) >= 4 else None
+    iqr = (q3 - q1) if (q1 is not None and q3 is not None) else None
+    lower = (q1 - 1.5 * iqr) if iqr is not None else None
+    upper = (q3 + 1.5 * iqr) if iqr is not None else None
+
+    outlier_count = 0
+    if lower is not None or upper is not None:
+        for v in values:
+            if (lower is not None and v < lower) or (upper is not None and v > upper):
+                outlier_count += 1
+
+    return {
+        "count": count,
+        "min": min_val,
+        "max": max_val,
+        "mean": mean_val,
+        "quantiles": quantiles,
+        "outlier_bounds": {
+            "quantiles": quantiles,
+            "q1": q1,
+            "q3": q3,
+            "iqr": iqr,
+            "lower": lower,
+            "upper": upper,
+        },
+        "outlier_count": outlier_count,
+    }
+
+
+def _write_single_shard(prefix: str, suffix: str, lines: Iterable[str]) -> str:
+    path = f"{prefix}-00000-of-00001{suffix}"
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fp:
+        for line in lines:
+            fp.write(line)
+            if not line.endswith("\n"):
+                fp.write("\n")
+    return path
+
 def union_numeric_cols(rules: List[Dict[str, Any]]) -> List[str]:
     cols = set()
     for r in rules:
@@ -622,7 +1014,7 @@ def classify_issue(reason: str) -> Tuple[str, str]:
     return "Other", "Uncategorized issue"
 
 
-class DimensionIssueSummary(beam.CombineFn):
+class DimensionIssueSummary(beam.CombineFn if _HAVE_BEAM else object):  # type: ignore[misc]
     """Aggregate issue information by dimension."""
 
     def create_accumulator(self):
@@ -673,7 +1065,7 @@ def attach_dimension(issue: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 # -----------------------------
 # 主流程
 # -----------------------------
-def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_path: str):
+def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_path: str):
     cfg = load_config(config_path)
     rules = cfg["rules"]
     column_descriptions = gather_column_descriptions(rules)
@@ -1054,6 +1446,373 @@ def run(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_pat
                 )
             )
 
+
+def _run_without_beam(
+    input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_path: str
+) -> None:
+    cfg = load_config(config_path)
+    rules = cfg["rules"]
+    column_descriptions = gather_column_descriptions(rules)
+
+    refset_local: Optional[set] = None
+    for r in rules:
+        rconf = r.get("reference_keys") or {}
+        if rconf.get("path") and rconf.get("column"):
+            refset_local = load_reference_keys(rconf["path"], rconf["column"])
+            break
+
+    matched_files = sorted(glob.glob(input_pattern, recursive=True))
+    if not matched_files:
+        raise FileNotFoundError(f"No files matched input pattern: {input_pattern}")
+
+    os.makedirs(dq_out, exist_ok=True)
+
+    headers_info: List[Dict[str, Any]] = []
+    header_union: set = set()
+    header_intersection: Optional[set] = None
+    bad_issues: List[Dict[str, Any]] = []
+    good_rows: List[RowCtx] = []
+    per_file_counts: Dict[str, int] = {}
+    numeric_values: Dict[str, List[float]] = {}
+    pk_counts: Dict[str, int] = {}
+    freshness_enabled = any(
+        r.get("event_time_col") and r.get("freshness_slo_hours") for r in rules
+    )
+    ages_per_file: Dict[str, List[float]] = {}
+
+    for path in matched_files:
+        header, rows, parse_issues = read_csv_file(path)
+        headers_info.append({"file": path, "header": header})
+
+        if header:
+            header_union.update(header)
+            if header_intersection is None:
+                header_intersection = set(header)
+            else:
+                header_intersection &= set(header)
+        else:
+            if header_intersection is None:
+                header_intersection = set()
+
+        bad_issues.extend(parse_issues)
+
+        rule = pick_rule(rules, path)
+
+        if freshness_enabled:
+            et_col = rule.get("event_time_col")
+            if et_col and et_col in (header or []):
+                et_fmt = (rule.get("event_time_format") or "auto").lower()
+                for rc in rows:
+                    value = rc.data.get(et_col)
+                    if not value:
+                        continue
+                    try:
+                        ts = parse_event_time(value, et_fmt)
+                        age_h = (dt.datetime.now(dt.timezone.utc) - ts).total_seconds() / 3600.0
+                        ages_per_file.setdefault(path, []).append(age_h)
+                    except Exception:
+                        continue
+
+        for rc in rows:
+            valid, issues = validate_row_against_rule(rc, rule, refset_local)
+            if issues:
+                bad_issues.extend(issues)
+            if valid is None:
+                continue
+
+            good_rows.append(valid)
+            per_file_counts[path] = per_file_counts.get(path, 0) + 1
+
+            for col in rule.get("numeric_cols", []):
+                if col not in valid.header:
+                    continue
+                val = valid.data.get(col)
+                if val in (None, "", "NaN"):
+                    continue
+                try:
+                    parsed_val = parse_numeric_with_units(val, col, rule)
+                except Exception:
+                    continue
+                numeric_values.setdefault(col, []).append(parsed_val)
+
+            pk = rule.get("primary_key")
+            if pk and pk in valid.header:
+                key_val = valid.data.get(pk)
+                if key_val not in (None, "", "NaN"):
+                    pk_counts[key_val] = pk_counts.get(key_val, 0) + 1
+
+    header_intersection = header_intersection or set()
+
+    good_lines = [
+        ",".join(str(rc.data.get(col, "")) for col in rc.header)
+        for rc in good_rows
+    ]
+    _write_single_shard(good_out, ".csv", good_lines)
+
+    bad_lines = [json.dumps(issue, ensure_ascii=False) for issue in bad_issues]
+    _write_single_shard(bad_out, ".jsonl", bad_lines)
+
+    header_lines = [json.dumps(info, ensure_ascii=False) for info in headers_info]
+    _write_single_shard(os.path.join(dq_out, "headers", "per_file"), ".jsonl", header_lines)
+    _write_single_shard(
+        os.path.join(dq_out, "headers", "union"),
+        ".json",
+        [json.dumps(sorted(header_union))],
+    )
+    _write_single_shard(
+        os.path.join(dq_out, "headers", "intersection"),
+        ".json",
+        [json.dumps(sorted(header_intersection))],
+    )
+
+    count_lines = [
+        json.dumps({"file": f, "good_rows": cnt})
+        for f, cnt in sorted(per_file_counts.items())
+    ]
+    _write_single_shard(os.path.join(dq_out, "good_counts"), ".jsonl", count_lines)
+
+    if freshness_enabled:
+        freshness_lines = [
+            json.dumps({"file": f, "max_age_hours": max(ages)})
+            for f, ages in sorted(ages_per_file.items())
+            if ages
+        ]
+        if freshness_lines:
+            _write_single_shard(os.path.join(dq_out, "freshness"), ".jsonl", freshness_lines)
+
+    for col in union_numeric_cols(rules):
+        values = numeric_values.get(col, [])
+        info = summarize_numeric_values(values)
+        desc = column_descriptions.get(col)
+
+        def add_note(payload: Dict[str, Any], condition: bool) -> Dict[str, Any]:
+            if condition:
+                payload = dict(payload)
+                payload["note"] = "no valid numeric values"
+            return payload
+
+        base = {"column": col, "description": desc}
+        _write_single_shard(
+            os.path.join(dq_out, f"num_{col}_count"),
+            ".txt",
+            [
+                json.dumps(
+                    {
+                        **base,
+                        "metric": "count",
+                        "value": info.get("count", 0),
+                    }
+                )
+            ],
+        )
+
+        _write_single_shard(
+            os.path.join(dq_out, f"num_{col}_min"),
+            ".txt",
+            [
+                json.dumps(
+                    add_note(
+                        {
+                            **base,
+                            "metric": "min",
+                            "value": info.get("min"),
+                        },
+                        info.get("count", 0) == 0 or info.get("min") is None,
+                    )
+                )
+            ],
+        )
+
+        _write_single_shard(
+            os.path.join(dq_out, f"num_{col}_max"),
+            ".txt",
+            [
+                json.dumps(
+                    add_note(
+                        {
+                            **base,
+                            "metric": "max",
+                            "value": info.get("max"),
+                        },
+                        info.get("count", 0) == 0 or info.get("max") is None,
+                    )
+                )
+            ],
+        )
+
+        _write_single_shard(
+            os.path.join(dq_out, f"num_{col}_mean"),
+            ".txt",
+            [
+                json.dumps(
+                    add_note(
+                        {
+                            **base,
+                            "metric": "mean",
+                            "value": info.get("mean"),
+                        },
+                        info.get("count", 0) == 0 or info.get("mean") is None,
+                    )
+                )
+            ],
+        )
+
+        _write_single_shard(
+            os.path.join(dq_out, f"num_{col}_quantiles"),
+            ".jsonl",
+            [
+                json.dumps(
+                    add_note(
+                        {
+                            **base,
+                            "metric": "quantiles",
+                            "values": info.get("quantiles", []),
+                        },
+                        info.get("count", 0) == 0 or not info.get("quantiles"),
+                    )
+                )
+            ],
+        )
+
+        bounds = info.get("outlier_bounds") or {}
+        _write_single_shard(
+            os.path.join(dq_out, f"num_{col}_outlier_bounds"),
+            ".jsonl",
+            [
+                json.dumps(
+                    add_note(
+                        {
+                            **base,
+                            "metric": "outlier_bounds",
+                            "lower": bounds.get("lower"),
+                            "upper": bounds.get("upper"),
+                            "iqr": bounds.get("iqr"),
+                            "q1": bounds.get("q1"),
+                            "q3": bounds.get("q3"),
+                            "quantiles": bounds.get("quantiles"),
+                        },
+                        info.get("count", 0) == 0,
+                    ),
+                    ensure_ascii=False,
+                )
+            ],
+        )
+
+        count_val = info.get("count", 0)
+        out_cnt = info.get("outlier_count", 0) or 0
+        ratio = (out_cnt / count_val) if count_val else 0.0
+        _write_single_shard(
+            os.path.join(dq_out, f"num_{col}_outliers"),
+            ".jsonl",
+            [
+                json.dumps(
+                    add_note(
+                        {
+                            **base,
+                            "metric": "outliers",
+                            "outlier_count": out_cnt,
+                            "total_count": count_val,
+                            "outlier_ratio": ratio,
+                        },
+                        count_val == 0,
+                    )
+                )
+            ],
+        )
+
+    issue_pairs = [attach_dimension(issue) for issue in bad_issues]
+
+    has_primary_key = any(r.get("primary_key") for r in rules)
+    if has_primary_key:
+        dup_keys = {k: v for k, v in pk_counts.items() if v > 1}
+        _write_single_shard(
+            os.path.join(dq_out, "pk_duplicates"),
+            ".txt",
+            [str(len(dup_keys))],
+        )
+        for key, occ in sorted(dup_keys.items()):
+            issue_pairs.append(
+                (
+                    "Duplication",
+                    {
+                        "dimension": "Duplication",
+                        "reason": f"duplicate_primary_key:{key}",
+                        "scenario": "Duplicate primary key values detected",
+                        "detail": {"primary_key": key, "occurrences": occ},
+                        "occurrence_count": max(occ - 1, 1),
+                    },
+                )
+            )
+
+    combiner = DimensionIssueSummary()
+    accumulators: Dict[str, Any] = {}
+    for dim, issue in issue_pairs:
+        acc = accumulators.get(dim)
+        if acc is None:
+            acc = combiner.create_accumulator()
+        acc = combiner.add_input(acc, issue)
+        accumulators[dim] = acc
+
+    summary_lines = [
+        json.dumps(
+            {
+                "dimension": dim,
+                "description": DIMENSION_DESCRIPTIONS.get(dim, DIMENSION_DESCRIPTIONS["Other"]),
+                **combiner.extract_output(acc),
+            },
+            ensure_ascii=False,
+        )
+        for dim, acc in sorted(accumulators.items())
+    ]
+    _write_single_shard(os.path.join(dq_out, "issue_summary"), ".jsonl", summary_lines)
+
+    metadata_entries = []
+    for r in rules:
+        for fname, cols in (r.get("metadata_by_file") or {}).items():
+            metadata_entries.append(
+                {
+                    "pattern": r.get("patterns"),
+                    "file": fname,
+                    "columns": [
+                        {"name": col, "description": desc}
+                        for col, desc in sorted(cols.items())
+                    ],
+                }
+            )
+    if metadata_entries:
+        metadata_lines = [json.dumps(entry, ensure_ascii=False) for entry in metadata_entries]
+        _write_single_shard(
+            os.path.join(dq_out, "metadata_columns"),
+            ".jsonl",
+            metadata_lines,
+        )
+
+
+def run(
+    input_pattern: str,
+    good_out: str,
+    bad_out: str,
+    dq_out: str,
+    config_path: str,
+    engine: str = "auto",
+) -> None:
+    selected = (engine or "auto").lower()
+    if selected not in {"auto", "beam", "sequential"}:
+        raise ValueError("engine must be one of 'auto', 'beam', or 'sequential'")
+
+    if selected == "beam":
+        if not _HAVE_BEAM:
+            raise RuntimeError("apache_beam is not installed; cannot run Beam engine")
+        _run_with_beam(input_pattern, good_out, bad_out, dq_out, config_path)
+        return
+
+    if selected == "sequential" or not _HAVE_BEAM:
+        _run_without_beam(input_pattern, good_out, bad_out, dq_out, config_path)
+        return
+
+    _run_with_beam(input_pattern, good_out, bad_out, dq_out, config_path)
+
+
 # -----------------------------
 # CLI
 # -----------------------------
@@ -1066,5 +1825,18 @@ if __name__ == "__main__":
     ap.add_argument("--good_out", required=True, help="GOOD 输出前缀")
     ap.add_argument("--bad_out", required=True, help="BAD 输出前缀（JSONL）")
     ap.add_argument("--dq_out", required=True, help="DQ 汇总输出目录")
+    ap.add_argument(
+        "--engine",
+        choices=["auto", "beam", "sequential"],
+        default="auto",
+        help="执行引擎：auto(默认，优先 Beam)、beam(强制 Beam)、sequential(无需 apache-beam)",
+    )
     args, _ = ap.parse_known_args()
-    run(args.input_pattern, args.good_out, args.bad_out, args.dq_out, args.config)
+    run(
+        args.input_pattern,
+        args.good_out,
+        args.bad_out,
+        args.dq_out,
+        args.config,
+        engine=args.engine,
+    )

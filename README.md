@@ -10,6 +10,23 @@ pip install "apache-beam[gcp]" python-dateutil
 > location with PyPI access or provide the wheel files via an internal
 > mirror before running the pipeline.
 
+If installing `apache-beam` is not feasible you can switch the script to a
+pure-Python fallback engine:
+
+```
+python dq_local_beam.py \
+  --input_pattern "6GDALI_Datasets/EUR/6907619/*.csv" \
+  --config dq_rules.yaml \
+  --good_out out/good/eur6907619 \
+  --bad_out out/bad/eur6907619 \
+  --dq_out out/dq/eur6907619 \
+  --engine sequential
+```
+
+The sequential engine produces the same outputs (good rows, rejected rows,
+and data-quality profiles) without requiring any Beam dependencies, although
+it runs in a single process so very large datasets may take longer to finish.
+
 # Example 1: the EUR/6907619 files
 python dq_local_beam.py \
   --inputs "6GDALI_Datasets/EUR/6907619/*.csv" \
