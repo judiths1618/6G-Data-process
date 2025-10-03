@@ -14,6 +14,7 @@ import csv
 import re
 import json
 import datetime as dt
+import math
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple, Iterable
 
@@ -24,7 +25,7 @@ try:
     from apache_beam.options.pipeline_options import PipelineOptions
     from apache_beam.io import fileio
     from apache_beam.metrics.metric import Metrics
-    # from apache_beam.transforms.combiners import ApproximateQuantiles
+    from apache_beam.transforms.combiners import ApproximateQuantiles
 
     _HAVE_BEAM = True
 except ModuleNotFoundError:
@@ -1243,11 +1244,8 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
                                                     file_name_suffix=".jsonl", num_shards=1)
             )
 
-        # === 数值分布：逐行附规则后统计（修复“统计为空”） ===
-        stats_pairs = (
-            validated.good
-            | "AttachRuleForStats" >> beam.Map(lambda rc: (rc, pick_rule(rules, rc.file)))
-        )
+        # === 数值分布：使用所有成功解析的记录进行统计（即使校验失败） ===
+        stats_pairs = with_rules
         num_cols = union_numeric_cols(rules)
         for col in num_cols:
             prof = numeric_profiles_from_pairs(stats_pairs, col)
@@ -1517,16 +1515,11 @@ def _run_without_beam(
             valid, issues = validate_row_against_rule(rc, rule, refset_local)
             if issues:
                 bad_issues.extend(issues)
-            if valid is None:
-                continue
-
-            good_rows.append(valid)
-            per_file_counts[path] = per_file_counts.get(path, 0) + 1
 
             for col in rule.get("numeric_cols", []):
-                if col not in valid.header:
+                if col not in rc.header:
                     continue
-                val = valid.data.get(col)
+                val = rc.data.get(col)
                 if val in (None, "", "NaN"):
                     continue
                 try:
@@ -1534,6 +1527,12 @@ def _run_without_beam(
                 except Exception:
                     continue
                 numeric_values.setdefault(col, []).append(parsed_val)
+
+            if valid is None:
+                continue
+
+            good_rows.append(valid)
+            per_file_counts[path] = per_file_counts.get(path, 0) + 1
 
             pk = rule.get("primary_key")
             if pk and pk in valid.header:
