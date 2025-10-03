@@ -21,6 +21,15 @@ from typing import Dict, Any, List, Optional, Tuple, Iterable
 import glob
 
 try:
+    import matplotlib  # type: ignore
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    matplotlib = None  # type: ignore
+    plt = None  # type: ignore
+
+try:
     import apache_beam as beam  # type: ignore
     from apache_beam.options.pipeline_options import PipelineOptions
     from apache_beam.io import fileio
@@ -976,6 +985,226 @@ def _write_single_shard(prefix: str, suffix: str, lines: Iterable[str]) -> str:
                 fp.write("\n")
     return path
 
+
+def _single_shard_path(prefix: str, suffix: str) -> str:
+    return f"{prefix}-00000-of-00001{suffix}"
+
+
+def _safe_component_name(name: str) -> str:
+    base = os.path.basename(name)
+    if not base:
+        base = "unknown"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", base)
+
+
+def _accumulate_numeric_values(
+    rc: RowCtx,
+    rule: Dict[str, Any],
+    global_values: Optional[Dict[str, List[float]]] = None,
+    per_file_values: Optional[Dict[str, Dict[str, List[float]]]] = None,
+    file_path: Optional[str] = None,
+) -> None:
+    for col in rule.get("numeric_cols", []):
+        if col not in rc.header:
+            continue
+        val = rc.data.get(col)
+        if val in (None, "", "NaN"):
+            continue
+        try:
+            parsed_val = parse_numeric_with_units(val, col, rule)
+        except Exception:
+            continue
+        if global_values is not None:
+            global_values.setdefault(col, []).append(parsed_val)
+        if per_file_values is not None and file_path is not None:
+            per_file_values.setdefault(file_path, {}).setdefault(col, []).append(parsed_val)
+
+
+def _plot_histogram(values: List[float], output_path: str, title: str, xlabel: str) -> None:
+    if not values:
+        return
+    if plt is None:
+        raise RuntimeError(
+            "matplotlib is required to generate visualizations. Install matplotlib to enable this feature."
+        )
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    bins = max(10, min(50, int(math.sqrt(len(values)))))
+    ax.hist(values, bins=bins, color="#2a9d8f", edgecolor="black", alpha=0.75)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Frequency")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
+def create_feature_visualizations(
+    per_file_numeric_values: Dict[str, Dict[str, List[float]]],
+    dq_out: str,
+    column_descriptions: Dict[str, str],
+) -> Tuple[Dict[str, Dict[str, str]], Optional[str]]:
+    if not per_file_numeric_values:
+        return {}, "No numeric columns detected; skipping feature visualizations."
+    if plt is None:
+        return {}, "matplotlib is not installed; feature visualizations were skipped."
+
+    visualization_root = os.path.join(dq_out, "visualizations")
+    generated: Dict[str, Dict[str, str]] = {}
+
+    for file_path, col_values in sorted(per_file_numeric_values.items()):
+        safe_file = _safe_component_name(file_path)
+        for col, values in sorted(col_values.items()):
+            if not values:
+                continue
+            safe_col = _safe_component_name(col)
+            title = f"{os.path.basename(file_path)} – {col} distribution"
+            desc = column_descriptions.get(col)
+            if desc:
+                title = f"{title}\n{desc}"
+            output_path = os.path.join(visualization_root, safe_file, f"{safe_col}.png")
+            _plot_histogram(values, output_path, title, col)
+            generated.setdefault(file_path, {})[col] = os.path.relpath(output_path, dq_out)
+
+    return generated, None
+
+
+def write_execution_log(
+    dq_out: str,
+    input_pattern: str,
+    matched_files: List[str],
+    per_file_counts: Dict[str, int],
+    bad_issue_count: int,
+    issue_summary: List[Dict[str, Any]],
+    visualization_index: Dict[str, Dict[str, str]],
+    visualization_note: Optional[str],
+) -> None:
+    timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+    total_good = sum(per_file_counts.values())
+    lines: List[str] = []
+    header = f"[{timestamp}] Data quality pipeline completed"
+    lines.append(header)
+    lines.append(f"Input pattern: {input_pattern}")
+    lines.append(f"Files processed: {len(matched_files)}")
+    lines.append(f"Total good rows: {total_good}")
+    lines.append(f"Total issues detected: {bad_issue_count}")
+    lines.append("")
+    lines.append("Per-file good row counts:")
+    if per_file_counts:
+        for file_path, count in sorted(per_file_counts.items()):
+            lines.append(f"  - {file_path}: {count}")
+    else:
+        lines.append("  (no good rows emitted)")
+    lines.append("")
+    lines.append("Issue summary by dimension:")
+    if issue_summary:
+        for entry in issue_summary:
+            lines.append(
+                f"  - {entry.get('dimension')}: {entry.get('issue_count', 0)} issues across {len(entry.get('scenarios', []))} scenarios"
+            )
+    else:
+        lines.append("  (no issues detected)")
+    lines.append("")
+    if visualization_note:
+        lines.append(f"Visualizations: {visualization_note}")
+    else:
+        chart_count = sum(len(cols) for cols in visualization_index.values())
+        lines.append(f"Visualizations generated: {chart_count} charts across {len(visualization_index)} files")
+    lines.append("")
+    lines.append("Output directory: {0}".format(dq_out))
+
+    _write_single_shard(os.path.join(dq_out, "logs", "pipeline"), ".log", lines)
+
+
+def write_quality_report(
+    dq_out: str,
+    input_pattern: str,
+    matched_files: List[str],
+    per_file_counts: Dict[str, int],
+    bad_issue_count: int,
+    bad_issue_samples: List[Dict[str, Any]],
+    issue_summary: List[Dict[str, Any]],
+    per_file_numeric_values: Dict[str, Dict[str, List[float]]],
+    column_descriptions: Dict[str, str],
+    visualization_index: Dict[str, Dict[str, str]],
+    visualization_note: Optional[str],
+) -> None:
+    generated_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    total_good = sum(per_file_counts.values())
+
+    per_file_section: List[Dict[str, Any]] = []
+    for file_path in matched_files:
+        numeric_summary: Dict[str, Any] = {}
+        for col, values in sorted((per_file_numeric_values.get(file_path) or {}).items()):
+            stats = summarize_numeric_values(values)
+            numeric_summary[col] = {
+                "count": stats.get("count"),
+                "min": stats.get("min"),
+                "max": stats.get("max"),
+                "mean": stats.get("mean"),
+                "description": column_descriptions.get(col),
+            }
+
+        per_file_section.append(
+            {
+                "file": file_path,
+                "good_rows": per_file_counts.get(file_path, 0),
+                "numeric_columns": numeric_summary,
+                "visualizations": visualization_index.get(file_path, {}),
+            }
+        )
+
+    report = {
+        "generated_at": generated_at,
+        "input_pattern": input_pattern,
+        "files_processed": len(matched_files),
+        "total_good_rows": total_good,
+        "total_issue_records": bad_issue_count,
+        "issue_summary": issue_summary,
+        "bad_issue_samples": bad_issue_samples,
+        "per_file": per_file_section,
+    }
+    if visualization_note:
+        report["visualizations"] = {"note": visualization_note}
+
+    _write_single_shard(
+        os.path.join(dq_out, "quality_report"),
+        ".json",
+        [json.dumps(report, ensure_ascii=False, indent=2)],
+    )
+
+
+def collect_numeric_values_by_file(
+    files: List[str], rules: List[Dict[str, Any]]
+) -> Dict[str, Dict[str, List[float]]]:
+    per_file: Dict[str, Dict[str, List[float]]] = {}
+    for path in files:
+        _, rows, _ = read_csv_file(path)
+        rule = pick_rule(rules, path)
+        for rc in rows:
+            _accumulate_numeric_values(rc, rule, None, per_file, path)
+    return per_file
+
+
+def _load_jsonl(path: str, limit: Optional[int] = None) -> Tuple[int, List[Dict[str, Any]]]:
+    count = 0
+    samples: List[Dict[str, Any]] = []
+    if not os.path.exists(path):
+        return count, samples
+    with open(path, "r", encoding="utf-8") as fp:
+        for line in fp:
+            line = line.strip()
+            if not line:
+                continue
+            count += 1
+            if limit is None or len(samples) < limit:
+                try:
+                    samples.append(json.loads(line))
+                except json.JSONDecodeError:
+                    samples.append({"raw": line, "error": "json_decode_error"})
+    return count, samples
+
 def union_numeric_cols(rules: List[Dict[str, Any]]) -> List[str]:
     cols = set()
     for r in rules:
@@ -1086,6 +1315,10 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
     cfg = load_config(config_path)
     rules = cfg["rules"]
     column_descriptions = gather_column_descriptions(rules)
+
+    matched_files = sorted(glob.glob(input_pattern, recursive=True))
+    if not matched_files:
+        raise FileNotFoundError(f"No files matched input pattern: {input_pattern}")
 
     # 外键集合（可按需扩展为多集合 keyed side input）
     refset_local: Optional[set] = None
@@ -1461,6 +1694,68 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
             )
 
 
+    per_file_counts: Dict[str, int] = {}
+    counts_path = _single_shard_path(os.path.join(dq_out, "good_counts"), ".jsonl")
+    if os.path.exists(counts_path):
+        with open(counts_path, "r", encoding="utf-8") as fp:
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                file_key = payload.get("file")
+                if not file_key:
+                    continue
+                per_file_counts[file_key] = payload.get("good_rows", 0)
+
+    issue_summary_path = _single_shard_path(os.path.join(dq_out, "issue_summary"), ".jsonl")
+    issue_summary = []
+    if os.path.exists(issue_summary_path):
+        with open(issue_summary_path, "r", encoding="utf-8") as fp:
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    issue_summary.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    bad_path = _single_shard_path(bad_out, ".jsonl")
+    bad_issue_count, bad_issue_samples = _load_jsonl(bad_path, limit=10)
+
+    per_file_numeric_values = collect_numeric_values_by_file(matched_files, rules)
+    visualization_index, visualization_note = create_feature_visualizations(
+        per_file_numeric_values, dq_out, column_descriptions
+    )
+    write_execution_log(
+        dq_out,
+        input_pattern,
+        matched_files,
+        per_file_counts,
+        bad_issue_count,
+        issue_summary,
+        visualization_index,
+        visualization_note,
+    )
+    write_quality_report(
+        dq_out,
+        input_pattern,
+        matched_files,
+        per_file_counts,
+        bad_issue_count,
+        bad_issue_samples,
+        issue_summary,
+        per_file_numeric_values,
+        column_descriptions,
+        visualization_index,
+        visualization_note,
+    )
+
+
 def _run_without_beam(
     input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_path: str
 ) -> None:
@@ -1488,6 +1783,7 @@ def _run_without_beam(
     good_rows: List[RowCtx] = []
     per_file_counts: Dict[str, int] = {}
     numeric_values: Dict[str, List[float]] = {}
+    per_file_numeric_values: Dict[str, Dict[str, List[float]]] = {}
     pk_counts: Dict[str, int] = {}
     freshness_enabled = any(
         r.get("event_time_col") and r.get("freshness_slo_hours") for r in rules
@@ -1532,17 +1828,13 @@ def _run_without_beam(
             if issues:
                 bad_issues.extend(issues)
 
-            for col in rule.get("numeric_cols", []):
-                if col not in rc.header:
-                    continue
-                val = rc.data.get(col)
-                if val in (None, "", "NaN"):
-                    continue
-                try:
-                    parsed_val = parse_numeric_with_units(val, col, rule)
-                except Exception:
-                    continue
-                numeric_values.setdefault(col, []).append(parsed_val)
+            _accumulate_numeric_values(
+                rc,
+                rule,
+                global_values=numeric_values,
+                per_file_values=per_file_numeric_values,
+                file_path=path,
+            )
 
             if valid is None:
                 continue
@@ -1780,6 +2072,37 @@ def _run_without_beam(
         for dim, acc in sorted(accumulators.items())
     ]
     _write_single_shard(os.path.join(dq_out, "issue_summary"), ".jsonl", summary_lines)
+
+    issue_summary = [json.loads(line) for line in summary_lines]
+    bad_issue_count = len(bad_issues)
+    bad_issue_samples = bad_issues[:10]
+
+    visualization_index, visualization_note = create_feature_visualizations(
+        per_file_numeric_values, dq_out, column_descriptions
+    )
+    write_execution_log(
+        dq_out,
+        input_pattern,
+        matched_files,
+        per_file_counts,
+        bad_issue_count,
+        issue_summary,
+        visualization_index,
+        visualization_note,
+    )
+    write_quality_report(
+        dq_out,
+        input_pattern,
+        matched_files,
+        per_file_counts,
+        bad_issue_count,
+        bad_issue_samples,
+        issue_summary,
+        per_file_numeric_values,
+        column_descriptions,
+        visualization_index,
+        visualization_note,
+    )
 
     metadata_entries = []
     for r in rules:
