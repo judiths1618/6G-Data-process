@@ -1,1 +1,0 @@
-{"column": "mean", "metric": "outlier_bounds", "description": "the mean registration time for all the registration requests in microseconds.", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": []}

@@ -1,1 +1,0 @@
-{"column": "ram_usage", "metric": "outlier_bounds", "description": "the amount of memory used by the container at the time of the metrics collection in byte.", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": []}

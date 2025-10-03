@@ -1,1 +1,0 @@
-{"column": "lat75", "metric": "quantiles", "values": [], "description": "the least response time for the best 75% requests in microseconds."}

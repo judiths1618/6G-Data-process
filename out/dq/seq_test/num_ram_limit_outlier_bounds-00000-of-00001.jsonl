@@ -1,0 +1,1 @@
+{"column": "ram_limit", "description": "the memory allocated to the container in megabytes.", "metric": "outlier_bounds", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": [], "note": "no valid numeric values"}

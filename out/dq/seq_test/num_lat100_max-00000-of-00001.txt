@@ -1,0 +1,1 @@
+{"column": "lat100", "description": "the least response time in microseconds.", "metric": "max", "value": null, "note": "no valid numeric values"}

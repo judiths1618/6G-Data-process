@@ -1,0 +1,1 @@
+{"column": "lat50", "description": "the least response time for the best 50% requests in microseconds.", "metric": "outlier_bounds", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": [], "note": "no valid numeric values"}

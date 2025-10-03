@@ -1,1 +1,0 @@
-{"column": "lat98", "metric": "outlier_bounds", "description": "the least response time for the best 98% requests in microseconds.", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": []}

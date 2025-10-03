@@ -1,1 +1,0 @@
-{"column": "ram_limit", "metric": "count", "value": 0, "description": "the memory allocated to the container in megabytes."}

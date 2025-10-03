@@ -1,0 +1,1 @@
+{"column": "lat98", "description": "the least response time for the best 98% requests in microseconds.", "metric": "max", "value": null, "note": "no valid numeric values"}

@@ -1,1 +1,0 @@
-{"column": "mean", "metric": "quantiles", "values": [], "description": "the mean registration time for all the registration requests in microseconds."}

@@ -1,1 +1,0 @@
-{"column": "n", "metric": "outlier_bounds", "description": "the number of requests sent to the container.", "lower": null, "upper": null, "iqr": null, "q1": null, "q3": null, "quantiles": []}

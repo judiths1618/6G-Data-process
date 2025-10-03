@@ -24,7 +24,7 @@ try:
     from apache_beam.options.pipeline_options import PipelineOptions
     from apache_beam.io import fileio
     from apache_beam.metrics.metric import Metrics
-    from apache_beam.transforms.combiners import ApproximateQuantiles
+    # from apache_beam.transforms.combiners import ApproximateQuantiles
 
     _HAVE_BEAM = True
 except ModuleNotFoundError:

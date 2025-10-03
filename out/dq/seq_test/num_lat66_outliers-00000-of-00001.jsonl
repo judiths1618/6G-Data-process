@@ -1,0 +1,1 @@
+{"column": "lat66", "description": "the least response time for the best 66% requests in microseconds.", "metric": "outliers", "outlier_count": 0, "total_count": 0, "outlier_ratio": 0.0, "note": "no valid numeric values"}

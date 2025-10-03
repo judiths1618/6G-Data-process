@@ -1,1 +1,0 @@
-{"column": "c", "metric": "count", "value": 0, "description": "the concurrency level in the requests."}
