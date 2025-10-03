@@ -1446,10 +1446,10 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
                 | "PKOnlyDup" >> beam.Filter(lambda kv: kv[1] > 1)
             )
             dup_pk = dup_keys | "PKDupCount" >> beam.combiners.Count.Globally()
-            _ = (
-                dup_pk
-                | "WritePKDup" >> beam.io.WriteToText(os.path.join(dq_out, "pk_duplicates"),
-                                                      file_name_suffix=".txt", num_shards=1)
+            # _ = (
+            #     dup_pk
+            #     | "WritePKDup" >> beam.io.WriteToText(os.path.join(dq_out, "pk_duplicates"),
+            #                                           file_name_suffix=".txt", num_shards=1)
             )
             dup_issue_pairs = (
                 dup_keys
