@@ -15,6 +15,7 @@ import re
 import json
 import datetime as dt
 import math
+import shutil
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple, Iterable
 
@@ -108,6 +109,34 @@ DIMENSION_DESCRIPTIONS = {
     ),
     "Other": "Issues that do not map to a predefined data-quality dimension.",
 }
+
+
+def complete_issue_dimensions(issue_summary: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ensure that all predefined data quality dimensions are represented."""
+
+    summary_by_dim: Dict[str, Dict[str, Any]] = {}
+    for entry in issue_summary:
+        dim = entry.get("dimension")
+        if not dim:
+            continue
+        summary = dict(entry)
+        summary.setdefault("description", DIMENSION_DESCRIPTIONS.get(dim, DIMENSION_DESCRIPTIONS["Other"]))
+        summary.setdefault("issue_count", 0)
+        summary.setdefault("scenarios", [])
+        summary.setdefault("examples", [])
+        summary_by_dim[dim] = summary
+
+    for dim, desc in DIMENSION_DESCRIPTIONS.items():
+        if dim not in summary_by_dim:
+            summary_by_dim[dim] = {
+                "dimension": dim,
+                "description": desc,
+                "issue_count": 0,
+                "scenarios": [],
+                "examples": [],
+            }
+
+    return [summary_by_dim[dim] for dim in sorted(summary_by_dim.keys())]
 
 # -----------------------------
 # 数据结构
@@ -997,6 +1026,18 @@ def _safe_component_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", base)
 
 
+def cleanup_outputs(patterns: Iterable[str]) -> None:
+    for pattern in patterns:
+        for candidate in glob.glob(pattern):
+            if os.path.isdir(candidate):
+                shutil.rmtree(candidate, ignore_errors=True)
+            else:
+                try:
+                    os.remove(candidate)
+                except FileNotFoundError:
+                    continue
+
+
 def _accumulate_numeric_values(
     rc: RowCtx,
     rule: Dict[str, Any],
@@ -1132,6 +1173,7 @@ def write_quality_report(
 ) -> None:
     generated_at = dt.datetime.now(dt.timezone.utc).isoformat()
     total_good = sum(per_file_counts.values())
+    issue_summary = complete_issue_dimensions(issue_summary)
 
     per_file_section: List[Dict[str, Any]] = []
     for file_path in matched_files:
@@ -1397,13 +1439,6 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
                 | "ValidateRows" >> beam.ParDo(ValidateWrapper(), refset=ref_view).with_outputs(BAD_TAG, main="good")
             )
 
-        # GOOD 输出
-        _ = (
-            validated.good
-            | "ToCsv" >> beam.ParDo(ToCsvLine())
-            | "WriteGood" >> beam.io.WriteToText(good_out, file_name_suffix=".csv", num_shards=1)
-        )
-
         # BAD 输出（JSONL）
         bad = (parsed.bad, validated.bad) | "FlattenBad" >> beam.Flatten()
         _ = (
@@ -1450,7 +1485,7 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
             #     dup_pk
             #     | "WritePKDup" >> beam.io.WriteToText(os.path.join(dq_out, "pk_duplicates"),
             #                                           file_name_suffix=".txt", num_shards=1)
-            )
+            # )
             dup_issue_pairs = (
                 dup_keys
                 | "DupIssues" >> beam.Map(
@@ -1464,191 +1499,6 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
                             "occurrence_count": max(kv[1] - 1, 1),
                         },
                     )
-                )
-            )
-
-        # 新鲜度汇总
-        if any(r.get("event_time_col") and r.get("freshness_slo_hours") for r in rules):
-            def to_age(pair):
-                rc, rule = pair
-                col = rule.get("event_time_col")
-                if not col or col not in rc.header:
-                    return
-                v = rc.data.get(col)
-                if not v:
-                    return
-                try:
-                    ts = parse_event_time(v, (rule.get("event_time_format") or "auto"))
-                    age_h = (dt.datetime.now(dt.timezone.utc) - ts).total_seconds() / 3600.0
-                    yield (rc.file, age_h)
-                except Exception:
-                    return
-
-            ages = with_rules | "ToAges" >> beam.FlatMap(to_age)
-            max_age = ages | "MaxAgePerFile" >> beam.CombinePerKey(max)
-            _ = (
-                max_age
-                | "AgeJSON" >> beam.Map(lambda kv: json.dumps({"file": kv[0], "max_age_hours": kv[1]}))
-                | "WriteAge" >> beam.io.WriteToText(os.path.join(dq_out, "freshness"),
-                                                    file_name_suffix=".jsonl", num_shards=1)
-            )
-
-        # === 数值分布：使用所有成功解析的记录进行统计（即使校验失败） ===
-        stats_pairs = with_rules
-        num_cols = union_numeric_cols(rules)
-        for col in num_cols:
-            prof = numeric_profiles_from_pairs(stats_pairs, col)
-            _ = (
-                prof
-                | f"FmtCount_{col}" >> beam.Map(
-                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
-                        {
-                            "column": column,
-                            "metric": "count",
-                            "value": info.get("count", 0),
-                            "description": desc,
-                        }
-                    )
-                )
-                | f"WriteCount_{col}" >> beam.io.WriteToText(
-                    os.path.join(dq_out, f"num_{col}_count"), file_name_suffix=".txt", num_shards=1
-                )
-            )
-            _ = (
-                prof
-                | f"FmtMin_{col}" >> beam.Map(
-                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
-                        {
-                            "column": column,
-                            "metric": "min",
-                            "value": info.get("min"),
-                            "description": desc,
-                            **(
-                                {"note": "no valid numeric values"}
-                                if info.get("count", 0) == 0 or info.get("min") is None
-                                else {}
-                            ),
-                        }
-                    )
-                )
-                | f"WriteMin_{col}" >> beam.io.WriteToText(
-                    os.path.join(dq_out, f"num_{col}_min"), file_name_suffix=".txt", num_shards=1
-                )
-            )
-            _ = (
-                prof
-                | f"FmtMax_{col}" >> beam.Map(
-                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
-                        {
-                            "column": column,
-                            "metric": "max",
-                            "value": info.get("max"),
-                            "description": desc,
-                            **(
-                                {"note": "no valid numeric values"}
-                                if info.get("count", 0) == 0 or info.get("max") is None
-                                else {}
-                            ),
-                        }
-                    )
-                )
-                | f"WriteMax_{col}" >> beam.io.WriteToText(
-                    os.path.join(dq_out, f"num_{col}_max"), file_name_suffix=".txt", num_shards=1
-                )
-            )
-            _ = (
-                prof
-                | f"FmtMean_{col}" >> beam.Map(
-                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
-                        {
-                            "column": column,
-                            "metric": "mean",
-                            "value": info.get("mean"),
-                            "description": desc,
-                            **(
-                                {"note": "no valid numeric values"}
-                                if info.get("count", 0) == 0 or info.get("mean") is None
-                                else {}
-                            ),
-                        }
-                    )
-                )
-                | f"WriteMean_{col}" >> beam.io.WriteToText(
-                    os.path.join(dq_out, f"num_{col}_mean"), file_name_suffix=".txt", num_shards=1
-                )
-            )
-            _ = (
-                prof
-                | f"QtlsToJSON_{col}" >> beam.Map(
-                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
-                        {
-                            "column": column,
-                            "metric": "quantiles",
-                            "values": info.get("quantiles", []),
-                            "description": desc,
-                            **(
-                                {"note": "no valid numeric values"}
-                                if info.get("count", 0) == 0 or not info.get("quantiles")
-                                else {}
-                            ),
-                        }
-                    )
-                )
-                | f"WriteQtls_{col}" >> beam.io.WriteToText(
-                    os.path.join(dq_out, f"num_{col}_quantiles"), file_name_suffix=".jsonl", num_shards=1
-                )
-            )
-            _ = (
-                prof
-                | f"OutlierBoundsJSON_{col}" >> beam.Map(
-                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
-                        {
-                            "column": column,
-                            "metric": "outlier_bounds",
-                            "description": desc,
-                            "lower": (info.get("outlier_bounds") or {}).get("lower"),
-                            "upper": (info.get("outlier_bounds") or {}).get("upper"),
-                            "iqr": (info.get("outlier_bounds") or {}).get("iqr"),
-                            "q1": (info.get("outlier_bounds") or {}).get("q1"),
-                            "q3": (info.get("outlier_bounds") or {}).get("q3"),
-                            "quantiles": (info.get("outlier_bounds") or {}).get("quantiles"),
-                            **(
-                                {"note": "no valid numeric values"}
-                                if info.get("count", 0) == 0
-                                else {}
-                            ),
-                        }
-                    )
-                )
-                | f"WriteOutlierBounds_{col}" >> beam.io.WriteToText(
-                    os.path.join(dq_out, f"num_{col}_outlier_bounds"), file_name_suffix=".jsonl", num_shards=1
-                )
-            )
-            _ = (
-                prof
-                | f"OutlierCountJSON_{col}" >> beam.Map(
-                    lambda info, column=col, desc=column_descriptions.get(col): json.dumps(
-                        {
-                            "column": column,
-                            "metric": "outliers",
-                            "outlier_count": info.get("outlier_count", 0),
-                            "total_count": info.get("count", 0),
-                            "outlier_ratio": (
-                                (info.get("outlier_count", 0) / info.get("count", 0))
-                                if info.get("count", 0)
-                                else 0.0
-                            ),
-                            "description": desc,
-                            **(
-                                {"note": "no valid numeric values"}
-                                if info.get("count", 0) == 0
-                                else {}
-                            ),
-                        }
-                    )
-                )
-                | f"WriteOutlierCount_{col}" >> beam.io.WriteToText(
-                    os.path.join(dq_out, f"num_{col}_outliers"), file_name_suffix=".jsonl", num_shards=1
                 )
             )
 
@@ -1671,28 +1521,6 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
             )
         )
 
-        metadata_entries = []
-        for r in rules:
-            for fname, cols in (r.get("metadata_by_file") or {}).items():
-                metadata_entries.append(
-                    {
-                        "pattern": r.get("patterns"),
-                        "file": fname,
-                        "columns": [
-                            {"name": col, "description": desc} for col, desc in sorted(cols.items())
-                        ],
-                    }
-                )
-        if metadata_entries:
-            _ = (
-                p
-                | "CreateMetadataEntries" >> beam.Create(metadata_entries)
-                | "MetadataToJSON" >> beam.Map(lambda x: json.dumps(x, ensure_ascii=False))
-                | "WriteMetadataSummary" >> beam.io.WriteToText(
-                    os.path.join(dq_out, "metadata_columns"), file_name_suffix=".jsonl", num_shards=1
-                )
-            )
-
 
     per_file_counts: Dict[str, int] = {}
     counts_path = _single_shard_path(os.path.join(dq_out, "good_counts"), ".jsonl")
@@ -1712,7 +1540,7 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
                 per_file_counts[file_key] = payload.get("good_rows", 0)
 
     issue_summary_path = _single_shard_path(os.path.join(dq_out, "issue_summary"), ".jsonl")
-    issue_summary = []
+    issue_summary: List[Dict[str, Any]] = []
     if os.path.exists(issue_summary_path):
         with open(issue_summary_path, "r", encoding="utf-8") as fp:
             for line in fp:
@@ -1723,9 +1551,11 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
                     issue_summary.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
+    issue_summary = complete_issue_dimensions(issue_summary)
 
     bad_path = _single_shard_path(bad_out, ".jsonl")
-    bad_issue_count, bad_issue_samples = _load_jsonl(bad_path, limit=10)
+    _, bad_issue_samples = _load_jsonl(bad_path, limit=10)
+    bad_issue_count = sum(entry.get("issue_count", 0) for entry in issue_summary)
 
     per_file_numeric_values = collect_numeric_values_by_file(matched_files, rules)
     visualization_index, visualization_note = create_feature_visualizations(
@@ -1755,6 +1585,16 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
         visualization_note,
     )
 
+    cleanup_outputs(
+        [
+            f"{good_out}-*",
+            f"{bad_out}-*",
+            os.path.join(dq_out, "good_counts") + "-*",
+            os.path.join(dq_out, "issue_summary") + "-*",
+            os.path.join(dq_out, "metadata_columns") + "-*",
+        ]
+    )
+
 
 def _run_without_beam(
     input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_path: str
@@ -1780,15 +1620,9 @@ def _run_without_beam(
     header_union: set = set()
     header_intersection: Optional[set] = None
     bad_issues: List[Dict[str, Any]] = []
-    good_rows: List[RowCtx] = []
     per_file_counts: Dict[str, int] = {}
-    numeric_values: Dict[str, List[float]] = {}
     per_file_numeric_values: Dict[str, Dict[str, List[float]]] = {}
     pk_counts: Dict[str, int] = {}
-    freshness_enabled = any(
-        r.get("event_time_col") and r.get("freshness_slo_hours") for r in rules
-    )
-    ages_per_file: Dict[str, List[float]] = {}
 
     for path in matched_files:
         header, rows, parse_issues = read_csv_file(path)
@@ -1808,21 +1642,6 @@ def _run_without_beam(
 
         rule = pick_rule(rules, path)
 
-        if freshness_enabled:
-            et_col = rule.get("event_time_col")
-            if et_col and et_col in (header or []):
-                et_fmt = (rule.get("event_time_format") or "auto").lower()
-                for rc in rows:
-                    value = rc.data.get(et_col)
-                    if not value:
-                        continue
-                    try:
-                        ts = parse_event_time(value, et_fmt)
-                        age_h = (dt.datetime.now(dt.timezone.utc) - ts).total_seconds() / 3600.0
-                        ages_per_file.setdefault(path, []).append(age_h)
-                    except Exception:
-                        continue
-
         for rc in rows:
             valid, issues = validate_row_against_rule(rc, rule, refset_local)
             if issues:
@@ -1831,7 +1650,7 @@ def _run_without_beam(
             _accumulate_numeric_values(
                 rc,
                 rule,
-                global_values=numeric_values,
+                global_values=None,
                 per_file_values=per_file_numeric_values,
                 file_path=path,
             )
@@ -1839,7 +1658,6 @@ def _run_without_beam(
             if valid is None:
                 continue
 
-            good_rows.append(valid)
             per_file_counts[path] = per_file_counts.get(path, 0) + 1
 
             pk = rule.get("primary_key")
@@ -1849,15 +1667,6 @@ def _run_without_beam(
                     pk_counts[key_val] = pk_counts.get(key_val, 0) + 1
 
     header_intersection = header_intersection or set()
-
-    good_lines = [
-        ",".join(str(rc.data.get(col, "")) for col in rc.header)
-        for rc in good_rows
-    ]
-    _write_single_shard(good_out, ".csv", good_lines)
-
-    bad_lines = [json.dumps(issue, ensure_ascii=False) for issue in bad_issues]
-    _write_single_shard(bad_out, ".jsonl", bad_lines)
 
     header_lines = [json.dumps(info, ensure_ascii=False) for info in headers_info]
     _write_single_shard(os.path.join(dq_out, "headers", "per_file"), ".jsonl", header_lines)
@@ -1872,171 +1681,11 @@ def _run_without_beam(
         [json.dumps(sorted(header_intersection))],
     )
 
-    count_lines = [
-        json.dumps({"file": f, "good_rows": cnt})
-        for f, cnt in sorted(per_file_counts.items())
-    ]
-    _write_single_shard(os.path.join(dq_out, "good_counts"), ".jsonl", count_lines)
-
-    if freshness_enabled:
-        freshness_lines = [
-            json.dumps({"file": f, "max_age_hours": max(ages)})
-            for f, ages in sorted(ages_per_file.items())
-            if ages
-        ]
-        if freshness_lines:
-            _write_single_shard(os.path.join(dq_out, "freshness"), ".jsonl", freshness_lines)
-
-    for col in union_numeric_cols(rules):
-        values = numeric_values.get(col, [])
-        info = summarize_numeric_values(values)
-        desc = column_descriptions.get(col)
-
-        def add_note(payload: Dict[str, Any], condition: bool) -> Dict[str, Any]:
-            if condition:
-                payload = dict(payload)
-                payload["note"] = "no valid numeric values"
-            return payload
-
-        base = {"column": col, "description": desc}
-        _write_single_shard(
-            os.path.join(dq_out, f"num_{col}_count"),
-            ".txt",
-            [
-                json.dumps(
-                    {
-                        **base,
-                        "metric": "count",
-                        "value": info.get("count", 0),
-                    }
-                )
-            ],
-        )
-
-        _write_single_shard(
-            os.path.join(dq_out, f"num_{col}_min"),
-            ".txt",
-            [
-                json.dumps(
-                    add_note(
-                        {
-                            **base,
-                            "metric": "min",
-                            "value": info.get("min"),
-                        },
-                        info.get("count", 0) == 0 or info.get("min") is None,
-                    )
-                )
-            ],
-        )
-
-        _write_single_shard(
-            os.path.join(dq_out, f"num_{col}_max"),
-            ".txt",
-            [
-                json.dumps(
-                    add_note(
-                        {
-                            **base,
-                            "metric": "max",
-                            "value": info.get("max"),
-                        },
-                        info.get("count", 0) == 0 or info.get("max") is None,
-                    )
-                )
-            ],
-        )
-
-        _write_single_shard(
-            os.path.join(dq_out, f"num_{col}_mean"),
-            ".txt",
-            [
-                json.dumps(
-                    add_note(
-                        {
-                            **base,
-                            "metric": "mean",
-                            "value": info.get("mean"),
-                        },
-                        info.get("count", 0) == 0 or info.get("mean") is None,
-                    )
-                )
-            ],
-        )
-
-        _write_single_shard(
-            os.path.join(dq_out, f"num_{col}_quantiles"),
-            ".jsonl",
-            [
-                json.dumps(
-                    add_note(
-                        {
-                            **base,
-                            "metric": "quantiles",
-                            "values": info.get("quantiles", []),
-                        },
-                        info.get("count", 0) == 0 or not info.get("quantiles"),
-                    )
-                )
-            ],
-        )
-
-        bounds = info.get("outlier_bounds") or {}
-        _write_single_shard(
-            os.path.join(dq_out, f"num_{col}_outlier_bounds"),
-            ".jsonl",
-            [
-                json.dumps(
-                    add_note(
-                        {
-                            **base,
-                            "metric": "outlier_bounds",
-                            "lower": bounds.get("lower"),
-                            "upper": bounds.get("upper"),
-                            "iqr": bounds.get("iqr"),
-                            "q1": bounds.get("q1"),
-                            "q3": bounds.get("q3"),
-                            "quantiles": bounds.get("quantiles"),
-                        },
-                        info.get("count", 0) == 0,
-                    ),
-                    ensure_ascii=False,
-                )
-            ],
-        )
-
-        count_val = info.get("count", 0)
-        out_cnt = info.get("outlier_count", 0) or 0
-        ratio = (out_cnt / count_val) if count_val else 0.0
-        _write_single_shard(
-            os.path.join(dq_out, f"num_{col}_outliers"),
-            ".jsonl",
-            [
-                json.dumps(
-                    add_note(
-                        {
-                            **base,
-                            "metric": "outliers",
-                            "outlier_count": out_cnt,
-                            "total_count": count_val,
-                            "outlier_ratio": ratio,
-                        },
-                        count_val == 0,
-                    )
-                )
-            ],
-        )
-
     issue_pairs = [attach_dimension(issue) for issue in bad_issues]
 
     has_primary_key = any(r.get("primary_key") for r in rules)
     if has_primary_key:
         dup_keys = {k: v for k, v in pk_counts.items() if v > 1}
-        _write_single_shard(
-            os.path.join(dq_out, "pk_duplicates"),
-            ".txt",
-            [str(len(dup_keys))],
-        )
         for key, occ in sorted(dup_keys.items()):
             issue_pairs.append(
                 (
@@ -2071,10 +1720,8 @@ def _run_without_beam(
         )
         for dim, acc in sorted(accumulators.items())
     ]
-    _write_single_shard(os.path.join(dq_out, "issue_summary"), ".jsonl", summary_lines)
-
-    issue_summary = [json.loads(line) for line in summary_lines]
-    bad_issue_count = len(bad_issues)
+    issue_summary = complete_issue_dimensions([json.loads(line) for line in summary_lines])
+    bad_issue_count = sum(entry.get("issue_count", 0) for entry in issue_summary)
     bad_issue_samples = bad_issues[:10]
 
     visualization_index, visualization_note = create_feature_visualizations(
@@ -2103,27 +1750,6 @@ def _run_without_beam(
         visualization_index,
         visualization_note,
     )
-
-    metadata_entries = []
-    for r in rules:
-        for fname, cols in (r.get("metadata_by_file") or {}).items():
-            metadata_entries.append(
-                {
-                    "pattern": r.get("patterns"),
-                    "file": fname,
-                    "columns": [
-                        {"name": col, "description": desc}
-                        for col, desc in sorted(cols.items())
-                    ],
-                }
-            )
-    if metadata_entries:
-        metadata_lines = [json.dumps(entry, ensure_ascii=False) for entry in metadata_entries]
-        _write_single_shard(
-            os.path.join(dq_out, "metadata_columns"),
-            ".jsonl",
-            metadata_lines,
-        )
 
 
 def run(
