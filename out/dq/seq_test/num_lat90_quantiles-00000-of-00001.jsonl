@@ -1,1 +1,0 @@
-{"column": "lat90", "description": "the least response time for the best 90% requests in microseconds.", "metric": "quantiles", "values": [32000.0, 1232166.5, 4146000.0, 10098000.0, 1738751000.0]}

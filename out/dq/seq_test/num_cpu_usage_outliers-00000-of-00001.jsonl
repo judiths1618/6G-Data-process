@@ -1,1 +1,0 @@
-{"column": "cpu_usage", "description": "the amount of CPU used by the container at the time of the metrics collection.", "metric": "outliers", "outlier_count": 13785, "total_count": 124040, "outlier_ratio": 0.11113350532086423}

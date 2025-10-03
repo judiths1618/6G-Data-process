@@ -1,1 +1,0 @@
-{"column": "lat50", "description": "the least response time for the best 50% requests in microseconds.", "metric": "max", "value": 1571406000.0}

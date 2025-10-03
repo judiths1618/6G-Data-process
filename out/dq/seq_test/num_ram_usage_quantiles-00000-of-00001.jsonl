@@ -1,1 +1,0 @@
-{"column": "ram_usage", "description": "the amount of memory used by the container at the time of the metrics collection in byte.", "metric": "quantiles", "values": [0.0, 50520064.0, 61317120.0, 575188992.0, 3731898368.0]}

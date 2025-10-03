@@ -1,1 +1,0 @@
-{"column": "lat99", "description": "the least response time for the best 99% requests in microseconds.", "metric": "min", "value": 0.0}

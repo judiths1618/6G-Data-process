@@ -1,1 +1,0 @@
-{"column": "lat100", "description": "the least response time in microseconds.", "metric": "max", "value": 1960394000.0}

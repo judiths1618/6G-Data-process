@@ -1,10 +1,45 @@
 {
-  "generated_at": "2025-10-03T10:31:34.160552+00:00",
+  "generated_at": "2025-10-03T10:49:43.753480+00:00",
   "input_pattern": "6GDALI_Datasets/EUR/6907619/*.csv",
   "files_processed": 4,
   "total_good_rows": 0,
   "total_issue_records": 124040,
   "issue_summary": [
+    {
+      "dimension": "Accuracy",
+      "description": "Data are accurate when data values stored in the database correspond to real-world values.",
+      "issue_count": 0,
+      "scenarios": [],
+      "examples": []
+    },
+    {
+      "dimension": "Completeness",
+      "description": "The ability of an information system to represent every meaningful state of the represented real-world system.",
+      "issue_count": 0,
+      "scenarios": [],
+      "examples": []
+    },
+    {
+      "dimension": "Consistency",
+      "description": "The extent to which data is presented in the same format and compatible with previous data while respecting semantic rules.",
+      "issue_count": 0,
+      "scenarios": [],
+      "examples": []
+    },
+    {
+      "dimension": "Duplication",
+      "description": "A measure of unwanted duplication existing within or across systems for a particular field, record, or data set.",
+      "issue_count": 0,
+      "scenarios": [],
+      "examples": []
+    },
+    {
+      "dimension": "Other",
+      "description": "Issues that do not map to a predefined data-quality dimension.",
+      "issue_count": 0,
+      "scenarios": [],
+      "examples": []
+    },
     {
       "dimension": "Staleness",
       "description": "The extent to which the age of the data is appropriate for the task at hand.",
@@ -19,35 +54,35 @@
         {
           "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
           "row": 1,
-          "reason": "stale_event:time age_h=34148.42 slo_h=24",
+          "reason": "stale_event:time age_h=34148.72 slo_h=24",
           "dimension": "Staleness",
           "scenario": "Event is older than freshness SLO"
         },
         {
           "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
           "row": 2,
-          "reason": "stale_event:time age_h=34148.41 slo_h=24",
+          "reason": "stale_event:time age_h=34148.72 slo_h=24",
           "dimension": "Staleness",
           "scenario": "Event is older than freshness SLO"
         },
         {
           "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
           "row": 3,
-          "reason": "stale_event:time age_h=34148.41 slo_h=24",
+          "reason": "stale_event:time age_h=34148.72 slo_h=24",
           "dimension": "Staleness",
           "scenario": "Event is older than freshness SLO"
         },
         {
           "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
           "row": 4,
-          "reason": "stale_event:time age_h=34148.41 slo_h=24",
+          "reason": "stale_event:time age_h=34148.71 slo_h=24",
           "dimension": "Staleness",
           "scenario": "Event is older than freshness SLO"
         },
         {
           "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
           "row": 5,
-          "reason": "stale_event:time age_h=34148.41 slo_h=24",
+          "reason": "stale_event:time age_h=34148.71 slo_h=24",
           "dimension": "Staleness",
           "scenario": "Event is older than freshness SLO"
         }
@@ -58,52 +93,52 @@
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 1,
-      "reason": "stale_event:time age_h=34148.42 slo_h=24"
+      "reason": "stale_event:time age_h=34148.72 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 2,
-      "reason": "stale_event:time age_h=34148.41 slo_h=24"
+      "reason": "stale_event:time age_h=34148.72 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 3,
-      "reason": "stale_event:time age_h=34148.41 slo_h=24"
+      "reason": "stale_event:time age_h=34148.72 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 4,
-      "reason": "stale_event:time age_h=34148.41 slo_h=24"
+      "reason": "stale_event:time age_h=34148.71 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 5,
-      "reason": "stale_event:time age_h=34148.41 slo_h=24"
+      "reason": "stale_event:time age_h=34148.71 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 6,
-      "reason": "stale_event:time age_h=34148.40 slo_h=24"
+      "reason": "stale_event:time age_h=34148.71 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 7,
-      "reason": "stale_event:time age_h=34148.40 slo_h=24"
+      "reason": "stale_event:time age_h=34148.70 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 8,
-      "reason": "stale_event:time age_h=34148.40 slo_h=24"
+      "reason": "stale_event:time age_h=34148.70 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 9,
-      "reason": "stale_event:time age_h=34148.39 slo_h=24"
+      "reason": "stale_event:time age_h=34148.70 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 10,
-      "reason": "stale_event:time age_h=34148.39 slo_h=24"
+      "reason": "stale_event:time age_h=34148.69 slo_h=24"
     }
   ],
   "per_file": [

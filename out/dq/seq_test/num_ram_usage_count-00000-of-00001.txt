@@ -1,1 +1,0 @@
-{"column": "ram_usage", "description": "the amount of memory used by the container at the time of the metrics collection in byte.", "metric": "count", "value": 124040}

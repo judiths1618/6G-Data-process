@@ -1,1 +1,0 @@
-{"column": "cpu_usage", "description": "the amount of CPU used by the container at the time of the metrics collection.", "metric": "mean", "value": 0.46751682543534506}

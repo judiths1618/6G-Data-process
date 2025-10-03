@@ -1,1 +1,0 @@
-{"column": "n", "description": "the number of requests sent to the container.", "metric": "max", "value": 1000.0}

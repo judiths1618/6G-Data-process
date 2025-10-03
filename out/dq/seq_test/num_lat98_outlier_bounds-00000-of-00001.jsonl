@@ -1,1 +1,0 @@
-{"column": "lat98", "description": "the least response time for the best 98% requests in microseconds.", "metric": "outlier_bounds", "lower": -12754236.625, "upper": 24742394.375, "iqr": 9374157.75, "q1": 1307000.0, "q3": 10681157.75, "quantiles": [34000.0, 1307000.0, 4230000.0, 10681157.75, 1838001000.0]}

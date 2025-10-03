@@ -1,1 +1,0 @@
-{"column": "lat100", "description": "the least response time in microseconds.", "metric": "quantiles", "values": [35000.0, 1336964.75, 4260000.0, 11117189.0, 1960394000.0]}

@@ -1,1 +1,0 @@
-{"column": "ram_usage", "description": "the amount of memory used by the container at the time of the metrics collection in byte.", "metric": "outliers", "outlier_count": 5757, "total_count": 124040, "outlier_ratio": 0.04641244759754918}

@@ -1,1 +1,0 @@
-{"column": "lat98", "description": "the least response time for the best 98% requests in microseconds.", "metric": "mean", "value": 16236448.907936227}

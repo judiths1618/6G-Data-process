@@ -1,1 +1,0 @@
-{"column": "cpu_limit", "description": "the CPU allocated to the container.", "metric": "min", "value": 0.1}
