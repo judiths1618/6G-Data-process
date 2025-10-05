@@ -27,6 +27,23 @@ The sequential engine produces the same outputs (good rows, rejected rows,
 and data-quality profiles) without requiring any Beam dependencies, although
 it runs in a single process so very large datasets may take longer to finish.
 
+## Benchmarking the engines
+
+To compare the runtime of the sequential fallback against the Apache Beam
+implementation, use the `benchmarks/compare_engines.py` helper. The script
+executes the pipeline for each requested engine, measures the wall-clock
+duration, and surfaces key metrics from the generated quality report.
+
+```
+python benchmarks/compare_engines.py \
+  --input_pattern "6GDALI_Datasets/EUR/6907619/*.csv" \
+  --config dq_rules.yaml \
+  --output_root out/benchmarks/eur6907619
+```
+
+When `apache-beam` is unavailable, the Beam run is skipped automatically and
+only the sequential results are reported.
+
 # Example 1: the EUR/6907619 files
 python dq_local_beam.py \
   --inputs "6GDALI_Datasets/EUR/6907619/*.csv" \
