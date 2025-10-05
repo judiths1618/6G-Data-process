@@ -1,5 +1,5 @@
 {
-  "generated_at": "2025-10-05T14:44:10.874243+00:00",
+  "generated_at": "2025-10-05T14:52:08.591653+00:00",
   "input_pattern": "6GDALI_Datasets/EUR/6907619/*.csv",
   "files_processed": 4,
   "total_good_rows": 0,
@@ -54,35 +54,35 @@
         {
           "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
           "row": 1,
-          "reason": "stale_event:time age_h=34200.63 slo_h=24",
+          "reason": "stale_event:time age_h=34200.76 slo_h=24",
           "dimension": "Staleness",
           "scenario": "Event is older than freshness SLO"
         },
         {
           "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
           "row": 2,
-          "reason": "stale_event:time age_h=34200.63 slo_h=24",
+          "reason": "stale_event:time age_h=34200.76 slo_h=24",
           "dimension": "Staleness",
           "scenario": "Event is older than freshness SLO"
         },
         {
           "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
           "row": 3,
-          "reason": "stale_event:time age_h=34200.62 slo_h=24",
+          "reason": "stale_event:time age_h=34200.76 slo_h=24",
           "dimension": "Staleness",
           "scenario": "Event is older than freshness SLO"
         },
         {
           "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
           "row": 4,
-          "reason": "stale_event:time age_h=34200.62 slo_h=24",
+          "reason": "stale_event:time age_h=34200.75 slo_h=24",
           "dimension": "Staleness",
           "scenario": "Event is older than freshness SLO"
         },
         {
           "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
           "row": 5,
-          "reason": "stale_event:time age_h=34200.62 slo_h=24",
+          "reason": "stale_event:time age_h=34200.75 slo_h=24",
           "dimension": "Staleness",
           "scenario": "Event is older than freshness SLO"
         }
@@ -93,52 +93,52 @@
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 1,
-      "reason": "stale_event:time age_h=34200.63 slo_h=24"
+      "reason": "stale_event:time age_h=34200.76 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 2,
-      "reason": "stale_event:time age_h=34200.63 slo_h=24"
+      "reason": "stale_event:time age_h=34200.76 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 3,
-      "reason": "stale_event:time age_h=34200.62 slo_h=24"
+      "reason": "stale_event:time age_h=34200.76 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 4,
-      "reason": "stale_event:time age_h=34200.62 slo_h=24"
+      "reason": "stale_event:time age_h=34200.75 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 5,
-      "reason": "stale_event:time age_h=34200.62 slo_h=24"
+      "reason": "stale_event:time age_h=34200.75 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 6,
-      "reason": "stale_event:time age_h=34200.61 slo_h=24"
+      "reason": "stale_event:time age_h=34200.75 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 7,
-      "reason": "stale_event:time age_h=34200.61 slo_h=24"
+      "reason": "stale_event:time age_h=34200.74 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 8,
-      "reason": "stale_event:time age_h=34200.61 slo_h=24"
+      "reason": "stale_event:time age_h=34200.74 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 9,
-      "reason": "stale_event:time age_h=34200.60 slo_h=24"
+      "reason": "stale_event:time age_h=34200.74 slo_h=24"
     },
     {
       "file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv",
       "row": 10,
-      "reason": "stale_event:time age_h=34200.60 slo_h=24"
+      "reason": "stale_event:time age_h=34200.73 slo_h=24"
     }
   ],
   "per_file": [
