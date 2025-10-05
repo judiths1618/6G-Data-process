@@ -1,6 +1,8 @@
 # Exclude KUL dataset from version control
 6GDALI_Datasets/KUL/
 
+out/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

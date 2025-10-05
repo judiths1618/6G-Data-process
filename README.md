@@ -44,23 +44,15 @@ python benchmarks/compare_engines.py \
 When `apache-beam` is unavailable, the Beam run is skipped automatically and
 only the sequential results are reported.
 
-# Example 1: the EUR/6907619 files
-python dq_local_beam.py \
-  --inputs "6GDALI_Datasets/EUR/6907619/*.csv" \
-  --good_out "out/good/eur6907619" \
-  --bad_out "out/bad/eur6907619" \
-  --dq_out "out/dq/eur6907619"
+```
+python dq_local_beam.py \  --input_pattern "6GDALI_Datasets/KUL/nomadic_dataset_ULA_static/antennas_as_features/user_*.csv" --config dq_rules.yaml \  --good_out "out/good/kul_antennas_as_features" \  --bad_out "out/bad/kul_antennas_as_features" \  --dq_out "out/dq/kul_antennas_as_features"
 
-# Example 2: all KUL “user_*.csv” files under antennas_as_features
-python dq_local_beam.py \
-  --inputs "KUL/nomadic_dataset_ULA_static/antennas_as_features/user_*.csv" \
-  --good_out "out/good/kul_ant" \
-  --bad_out "out/bad/kul_ant" \
-  --dq_out "out/dq/kul_ant"
+python dq_local_beam.py \  --input_pattern "6GDALI_Datasets/KUL/nomadic_dataset_ULA_static/csi_as_features/user_*.csv" --config dq_rules.yaml \  --good_out "out/good/kul_csi_as_features" \  --bad_out "out/bad/kul_csi_as_features" \  --dq_out "out/dq/kul_csi_as_features"
 
-# Example 3: recursively hit other feature folders
-python dq_local_beam.py \
-  --inputs "KUL/nomadic_dataset_ULA_static/**/*.csv" \
-  --good_out "out/good/kul_all" \
-  --bad_out "out/bad/kul_all" \
-  --dq_out "out/dq/kul_all"
+python dq_local_beam.py \  --input_pattern "6GDALI_Datasets/KUL/nomadic_dataset_ULA_static/subcarriers_as_features_complex/user_*.csv" --config dq_rules.yaml \  --good_out "out/good/kul_subcarriers_as_features_complex" \  --bad_out "out/bad/kul_subcarriers_as_features_complex" \  --dq_out "out/dq/kul_subcarriers_as_features_complex"
+
+python dq_local_beam.py \  --input_pattern "6GDALI_Datasets/KUL/nomadic_dataset_ULA_static/subcarriers_as_features_real/user_*.csv" --config dq_rules.yaml \  --good_out "out/good/kul_subcarriers_as_features_real" \  --bad_out "out/bad/kul_subcarriers_as_features_real" \  --dq_out "out/dq/kul_subcarriers_as_features_real"
+
+
+```
+/Users/yuandouwang/Documents/projects/6G-Data-process/6GDALI_Datasets/KUL/nomadic_dataset_ULA_static/subcarriers_as_features_real

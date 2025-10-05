@@ -1,4 +1,0 @@
-{"file": "6GDALI_Datasets/EUR/6907619/amf-performance.csv", "header": ["time", "ram_limit", "cpu_limit", "ram_usage", "cpu_usage", "n", "mean", "lat50", "lat75", "lat80", "lat90", "lat95", "lat98", "lat99", "lat100"]}
-{"file": "6GDALI_Datasets/EUR/6907619/golang-web-server-performance.csv", "header": ["time", "ram_limit", "cpu_limit", "ram_usage", "cpu_usage", "n", "c", "lat50", "lat66", "lat75", "lat80", "lat90", "lat95", "lat98", "lat99", "lat100"]}
-{"file": "6GDALI_Datasets/EUR/6907619/python-web-server-performance.csv", "header": ["time", "ram_limit", "cpu_limit", "ram_usage", "cpu_usage", "n", "c", "lat50", "lat66", "lat75", "lat80", "lat90", "lat95", "lat98", "lat99", "lat100"]}
-{"file": "6GDALI_Datasets/EUR/6907619/rabbitmq-performance.csv", "header": ["time", "ram_limit", "cpu_limit", "ram_usage", "cpu_usage", "n", "min", "lat50", "lat75", "lat95", "lat99"]}
