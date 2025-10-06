@@ -77,9 +77,9 @@ files_pattern: nomadic_dataset_ULA_static/csi_as_features/user_*_sample_*_antenn
 
 real: Real component of the channel state information for the selected subcarrier.
 imaginary: Imaginary component of the channel state information for the selected subcarrier.
-key_user_position: User position label associated with the sampled CSI vector; matches the "user position" column from the antennas-as-features tables.
-key_subcarriers_*: Patterned columns listing the subcarrier indices used to generate the CSI slice; each value aligns with the canonical subcarrier index catalogue.
-key_antennas_*: Patterned columns identifying the antenna index associated with the CSI slice, reusing the same antenna keys as the subcarriers-as-features exports.
+key_user_position: User position label associated with the sampled CSI vector.
+key_subcarriers_*: Patterned columns listing the subcarrier indices used to generate the CSI slice.
+key_antennas_*: Patterned columns identifying the antenna index associated with the CSI slice.
 
 Nomadic dataset (ULA static) – subcarriers as features
 
@@ -185,6 +185,6 @@ subcarrier 97: Channel response value for OFDM subcarrier 97. Complex exports en
 subcarrier 98: Channel response value for OFDM subcarrier 98. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
 subcarrier 99: Channel response value for OFDM subcarrier 99. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
 subcarrier 100: Channel response value for OFDM subcarrier 100. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-key_user_position: User position label associated with the measured subcarrier vector; foreign key to the "user position" label in antennas-as-features tables.
-key_antennas_*: Patterned columns identifying the antenna element for which the subcarrier vector was captured, sharing identifiers with the CSI slice exports.
+key_user_position: User position label associated with the measured subcarrier vector.
+key_antennas_*: Patterned columns identifying the antenna element for which the subcarrier vector was captured.
 

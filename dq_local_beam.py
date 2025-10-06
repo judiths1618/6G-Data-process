@@ -652,42 +652,14 @@ def load_config(path: str) -> Dict[str, Any]:
         if metadata_by_file:
             rr["metadata_by_file"] = metadata_by_file
             rr["metadata_base_dir"] = metadata_base_dir
+            # 将元数据列合并进 required_cols，避免遗漏
+            meta_cols = sorted({col for cols in metadata_by_file.values() for col in cols.keys()})
+            for col in meta_cols:
+                if col not in rr["required_cols"]:
+                    rr["required_cols"].append(col)
         else:
             rr["metadata_by_file"] = {}
             rr["metadata_base_dir"] = metadata_base_dir
-
-        ref_raw = rr.get("reference_keys")
-        if isinstance(ref_raw, dict):
-            ref_entries = [ref_raw]
-        elif isinstance(ref_raw, list):
-            ref_entries = [entry for entry in ref_raw if entry]
-        else:
-            ref_entries = []
-        rr["reference_keys"] = ref_entries
-        ref_sets: Dict[str, set] = {}
-        canonical_ref_sets: Dict[str, set] = {}
-        for entry in ref_entries:
-            path = entry.get("path")
-            column = entry.get("column")
-            target_col = entry.get("target_col")
-            if not (path and column and target_col):
-                continue
-            cache_key = (path, column)
-            if cache_key not in reference_cache:
-                reference_cache[cache_key] = load_reference_keys(path, column)
-            ref_sets[target_col] = reference_cache[cache_key]
-            canonical_ref_sets[_canonicalize_column_name(target_col)] = reference_cache[cache_key]
-        rr["_reference_sets"] = ref_sets
-        rr["_legacy_reference_target"] = ref_entries[0].get("target_col") if ref_entries else None
-        rr["_canonical_reference_sets"] = canonical_ref_sets
-        rr["_header_cache"] = {}
-        rr["_canonical_ranges"] = {
-            _canonicalize_column_name(col): bounds for col, bounds in (rr.get("ranges", {}) or {}).items()
-        }
-        rr["_canonical_enums"] = {
-            _canonicalize_column_name(col): {str(v) for v in (values if isinstance(values, (list, tuple, set)) else [values])}
-            for col, values in (rr.get("enums", {}) or {}).items()
-        }
         norm.append(rr)
     return {"rules": norm}
 
@@ -733,83 +705,6 @@ def _resolve_metadata_columns(rule: Dict[str, Any], path: str) -> Optional[Dict[
                 return cols
 
     return None
-
-
-def _prepare_header_alias(header: List[str]) -> Tuple[Dict[str, str], List[str]]:
-    alias: Dict[str, str] = {}
-    canonical: List[str] = []
-    for raw in header:
-        cleaned = (raw or "").strip()
-        canon = _canonicalize_column_name(cleaned)
-        canonical.append(canon)
-        if canon not in alias:
-            alias[canon] = cleaned
-    return alias, canonical
-
-
-def _ensure_header_state(rule: Dict[str, Any], path: str, header: List[str]) -> Dict[str, Any]:
-    cache: Dict[str, Dict[str, Any]] = rule.setdefault("_header_cache", {})
-    cached = cache.get(path)
-    if cached is not None:
-        return cached
-
-    alias, canonical_list = _prepare_header_alias(header)
-    canonical_set = set(canonical_list)
-
-    if not header:
-        state = {
-            "valid": False,
-            "issues": [],
-            "alias": alias,
-            "metadata_columns": {},
-            "metadata_canonical": {},
-            "reported": False,
-            "canonical_header": canonical_list,
-        }
-        cache[path] = state
-        return state
-
-    metadata_cols = _resolve_metadata_columns(rule, path) or {}
-    metadata_canonical = {
-        _canonicalize_column_name(col): col for col in metadata_cols.keys()
-    }
-
-    issues: List[Dict[str, Any]] = []
-
-    for canon, original in metadata_canonical.items():
-        if not canon:
-            continue
-        if canon not in canonical_set:
-            issues.append({"file": path, "row": 0, "reason": f"missing_metadata_column:{original}"})
-
-    for col in rule.get("required_cols", []):
-        canon = _canonicalize_column_name(col)
-        if not canon:
-            continue
-        if canon in metadata_canonical:
-            continue
-        if canon not in canonical_set:
-            issues.append({"file": path, "row": 0, "reason": f"missing_required_column:{col}"})
-
-    canonical_header_for_prefix = [c for c in canonical_list if c]
-    for prefix in rule.get("required_col_prefixes", []):
-        prefix_canon = _canonicalize_column_name(prefix)
-        if not prefix_canon:
-            continue
-        if not any(col.startswith(prefix_canon) for col in canonical_header_for_prefix):
-            issues.append({"file": path, "row": 0, "reason": f"missing_required_prefix:{prefix}"})
-
-    state = {
-        "valid": not issues,
-        "issues": issues,
-        "alias": alias,
-        "metadata_columns": metadata_cols,
-        "metadata_canonical": metadata_canonical,
-        "reported": False,
-        "canonical_header": canonical_list,
-    }
-    cache[path] = state
-    return state
 
 def pick_rule(rules: List[Dict[str, Any]], path: str) -> Dict[str, Any]:
     for r in rules:
@@ -1011,27 +906,34 @@ def validate_row_against_rule(
     issues: List[Dict[str, Any]] = []
     data = rc.data
 
-    header_state = _ensure_header_state(rule, rc.file, rc.header)
-    alias = header_state.get("alias") or {}
-    setattr(rc, "_dq_header_alias", alias)
+    meta_cols = _resolve_metadata_columns(rule, rc.file)
+    if meta_cols:
+        missing = [col for col in meta_cols.keys() if col not in rc.header]
+        if missing:
+            for col in missing:
+                inc("metadata_mismatch")
+                issues.append(
+                    {
+                        "file": rc.file,
+                        "row": 0,
+                        "reason": f"missing_metadata_column:{col}",
+                    }
+                )
+            return None, issues
 
-    if not header_state.get("valid", True):
-        if not header_state.get("reported") and header_state.get("issues"):
-            header_state["reported"] = True
-            for issue in header_state["issues"]:
-                reason = issue.get("reason", "")
-                if isinstance(reason, str) and reason.startswith("missing_metadata_column"):
-                    inc("metadata_mismatch")
-            return None, list(header_state["issues"])
-        return None, []
+    for col in rule["required_cols"]:
+        if col not in rc.header:
+            issues.append(
+                {
+                    "file": rc.file,
+                    "row": 0,
+                    "reason": f"missing_required_column:{col}",
+                }
+            )
+            return None, issues
 
-    for col in rule.get("required_cols", []):
-        canon = _canonicalize_column_name(col)
-        actual_col = alias.get(canon)
-        if not actual_col:
-            continue
-        val = data.get(actual_col)
-        if _is_missing_value(val):
+    for col in rule["required_cols"]:
+        if data.get(col) in (None, "", "NaN"):
             inc("nulls")
             issues.append(
                 {
@@ -1042,11 +944,19 @@ def validate_row_against_rule(
             )
             return None, issues
 
-    canonical_ranges = rule.get("_canonical_ranges", {}) or {}
-    for col in rule.get("numeric_cols", []):
-        canon = _canonicalize_column_name(col)
-        actual_col = alias.get(canon)
-        if not actual_col:
+    for prefix in rule.get("required_col_prefixes", []):
+        if not any(col.startswith(prefix) for col in rc.header):
+            issues.append(
+                {
+                    "file": rc.file,
+                    "row": 0,
+                    "reason": f"missing_required_prefix:{prefix}",
+                }
+            )
+            return None, issues
+
+    for col in rule["numeric_cols"]:
+        if col not in rc.header:
             continue
         val = data.get(actual_col, "")
         try:
