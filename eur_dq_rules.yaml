@@ -1,0 +1,202 @@
+rules:
+  - patterns: ["6GDALI_Datasets/EUR/6907619/(golang|python)-web-server-performance\\.csv$"]
+    metadata_path: "6GDALI_Datasets/EUR/metadata.txt"
+    metadata_targets:
+      - golang-web-server-performance.csv
+      - python-web-server-performance.csv
+
+    required_cols:
+      - time
+      - ram_limit
+      - cpu_limit
+      - ram_usage
+      - cpu_usage
+      - n
+      - c
+      - lat50
+      - lat66
+      - lat75
+      - lat80
+      - lat90
+      - lat95
+      - lat98
+      - lat99
+      - lat100
+
+    numeric_cols:
+      - cpu_limit
+      - cpu_usage
+      - ram_limit
+      - ram_usage
+      - n
+      - c
+      - lat50
+      - lat66
+      - lat75
+      - lat80
+      - lat90
+      - lat95
+      - lat98
+      - lat99
+      - lat100
+
+    numeric_unit_parsers:
+      ram_limit:
+        type: mem
+        base: 1024
+        out_unit: MiB
+
+    ranges:
+      cpu_limit: [0, null]
+      cpu_usage: [0, 100]
+      ram_limit: [0, null]
+      ram_usage: [0, null]
+      n: [0, null]
+      c: [0, null]
+      lat50: [0, null]
+      lat66: [0, null]
+      lat75: [0, null]
+      lat80: [0, null]
+      lat90: [0, null]
+      lat95: [0, null]
+      lat98: [0, null]
+      lat99: [0, null]
+      lat100: [0, null]
+
+    enums: {}
+
+    event_time_col: "time"
+    event_time_format: "epoch_s"
+    freshness_slo_hours: 24
+    max_future_hours: 1
+    time_epoch_bounds: {min: 946684800, max: 4102444800}
+
+    primary_key: null
+
+  - patterns: ["6GDALI_Datasets/EUR/6907619/amf-performance\\.csv$"]
+    metadata_path: "6GDALI_Datasets/EUR/metadata.txt"
+    metadata_targets:
+      - amf-performance.csv
+
+    required_cols:
+      - time
+      - ram_limit
+      - cpu_limit
+      - ram_usage
+      - cpu_usage
+      - n
+      - mean
+      - lat50
+      - lat75
+      - lat80
+      - lat90
+      - lat95
+      - lat98
+      - lat99
+      - lat100
+
+    numeric_cols:
+      - cpu_limit
+      - cpu_usage
+      - ram_limit
+      - ram_usage
+      - n
+      - mean
+      - lat50
+      - lat75
+      - lat80
+      - lat90
+      - lat95
+      - lat98
+      - lat99
+      - lat100
+
+    numeric_unit_parsers:
+      ram_limit:
+        type: mem
+        base: 1024
+        out_unit: MiB
+
+    ranges:
+      cpu_limit: [0, null]
+      cpu_usage: [0, 100]
+      ram_limit: [0, null]
+      ram_usage: [0, null]
+      n: [0, null]
+      mean: [0, null]
+      lat50: [0, null]
+      lat75: [0, null]
+      lat80: [0, null]
+      lat90: [0, null]
+      lat95: [0, null]
+      lat98: [0, null]
+      lat99: [0, null]
+      lat100: [0, null]
+
+    enums: {}
+
+    event_time_col: "time"
+    event_time_format: "epoch_s"
+    freshness_slo_hours: 24
+    max_future_hours: 1
+    time_epoch_bounds: {min: 946684800, max: 4102444800}
+
+    primary_key: null
+
+  - patterns: ["6GDALI_Datasets/EUR/6907619/rabbitmq-performance\\.csv$"]
+    metadata_path: "6GDALI_Datasets/EUR/metadata.txt"
+    metadata_targets:
+      - rabbitmq-performance.csv
+
+    required_cols:
+      - time
+      - ram_limit
+      - cpu_limit
+      - ram_usage
+      - cpu_usage
+      - n
+      - min
+      - lat50
+      - lat75
+      - lat95
+      - lat99
+
+    numeric_cols:
+      - cpu_limit
+      - cpu_usage
+      - ram_limit
+      - ram_usage
+      - n
+      - min
+      - lat50
+      - lat75
+      - lat95
+      - lat99
+
+    numeric_unit_parsers:
+      ram_limit:
+        type: mem
+        base: 1024
+        out_unit: MiB
+
+    ranges:
+      cpu_limit: [0, null]
+      cpu_usage: [0, 100]
+      ram_limit: [0, null]
+      ram_usage: [0, null]
+      n: [0, null]
+      min: [0, null]
+      lat50: [0, null]
+      lat75: [0, null]
+      lat95: [0, null]
+      lat99: [0, null]
+
+    enums: {}
+
+    event_time_col: "time"
+    event_time_format: "epoch_s"
+    freshness_slo_hours: 24
+    max_future_hours: 1
+    time_epoch_bounds: {min: 946684800, max: 4102444800}
+
+    primary_key: null
