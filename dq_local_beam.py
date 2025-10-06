@@ -112,6 +112,31 @@ DIMENSION_DESCRIPTIONS = {
 }
 
 
+def _canonicalize_column_name(name: Optional[str]) -> str:
+    """Normalize a column identifier for case-insensitive comparisons."""
+
+    if name is None:
+        return ""
+    text = str(name).strip().lower()
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text)
+
+
+def _is_missing_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return True
+        if stripped.lower() == "nan":
+            return True
+    return False
+
+
 def complete_issue_dimensions(issue_summary: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Ensure that all predefined data quality dimensions are represented."""
 
@@ -165,12 +190,73 @@ DEFAULT_RULE = {
     "freshness_slo_hours": None,
     "max_future_hours": None,
     "time_epoch_bounds": None,       # {"min": <epoch_s>, "max": <epoch_s>}
-    "reference_keys": {},            # {"path": "...csv", "column": "...", "target_col": "..."}
+    "reference_keys": None,          # legacy dict or list of {"path": ..., "column": ..., "target_col": ...}
     "numeric_unit_parsers": {},      # 列 -> {type:'mem', base:1024, out_unit:'MiB'}
     "metadata_path": None,
     "metadata_targets": [],          # 文件名（或相对路径）列表，用于从元数据中提取列说明
     "metadata_base_dir": None,
 }
+
+PRIMARY_KEY_FILE_TOKEN = "__file__"
+PRIMARY_KEY_ROWNUM_TOKEN = "__rownum__"
+
+
+def _normalize_primary_key_columns(value: Any) -> Tuple[str, ...]:
+    if value is None:
+        return tuple()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        cols: List[str] = []
+        for col in value:
+            if col is None:
+                continue
+            if isinstance(col, str):
+                cols.append(col)
+            else:
+                cols.append(str(col))
+        return tuple(cols)
+    return (str(value),)
+
+
+def _get_primary_key_columns(rule: Dict[str, Any]) -> Tuple[str, ...]:
+    cached = rule.get("_primary_key_columns")
+    if isinstance(cached, tuple):
+        return cached
+    cols = _normalize_primary_key_columns(rule.get("primary_key"))
+    rule["_primary_key_columns"] = cols
+    return cols
+
+
+def _primary_key_value(rule: Dict[str, Any], rc: RowCtx) -> Optional[str]:
+    columns = _get_primary_key_columns(rule)
+    if not columns:
+        return None
+    values: List[str] = []
+    alias = getattr(rc, "_dq_header_alias", None)
+    for col in columns:
+        if col == PRIMARY_KEY_FILE_TOKEN:
+            values.append(rc.file)
+            continue
+        if col == PRIMARY_KEY_ROWNUM_TOKEN:
+            values.append(str(rc.rownum))
+            continue
+        actual_col = None
+        if isinstance(alias, dict):
+            actual_col = alias.get(_canonicalize_column_name(col))
+        if not actual_col and col in rc.header:
+            actual_col = col
+        if not actual_col:
+            return None
+        values.append(rc.data.get(actual_col))
+    normalized: List[str] = []
+    for val in values:
+        if _is_missing_value(val):
+            return None
+        normalized.append(str(val))
+    if len(normalized) == 1:
+        return normalized[0]
+    return json.dumps(normalized, ensure_ascii=False)
 
 _VISUALIZATION_FILE_LIMIT_ENV = "DQ_VISUALIZATION_MAX_FILE_BYTES"
 _VISUALIZATION_TOTAL_LIMIT_ENV = "DQ_VISUALIZATION_MAX_TOTAL_BYTES"
@@ -506,6 +592,7 @@ def load_config(path: str) -> Dict[str, Any]:
         rules = [cfg]
     norm: List[Dict[str, Any]] = []
     metadata_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
+    reference_cache: Dict[Tuple[str, str], set] = {}
     for r in rules:
         rr = dict(DEFAULT_RULE)
         if r:
@@ -852,7 +939,7 @@ def validate_row_against_rule(
                 {
                     "file": rc.file,
                     "row": rc.rownum,
-                    "reason": f"null_required:{col}",
+                    "reason": f"null_required:{actual_col}",
                 }
             )
             return None, issues
@@ -871,20 +958,20 @@ def validate_row_against_rule(
     for col in rule["numeric_cols"]:
         if col not in rc.header:
             continue
-        val = data.get(col, "")
+        val = data.get(actual_col, "")
         try:
-            parsed_val = parse_numeric_with_units(val, col, rule)
+            parsed_val = parse_numeric_with_units(val, actual_col, rule)
         except Exception:
             inc("bad_numeric")
             issues.append(
                 {
                     "file": rc.file,
                     "row": rc.rownum,
-                    "reason": f"bad_numeric:{col}={val}",
+                    "reason": f"bad_numeric:{actual_col}={val}",
                 }
             )
             return None, issues
-        rng = rule["ranges"].get(col)
+        rng = canonical_ranges.get(canon)
         if rng:
             lo, hi = rng
             if (lo is not None and parsed_val < lo) or (hi is not None and parsed_val > hi):
@@ -893,47 +980,84 @@ def validate_row_against_rule(
                     {
                         "file": rc.file,
                         "row": rc.rownum,
-                        "reason": f"out_of_range:{col}={parsed_val} not [{lo},{hi}]",
+                        "reason": f"out_of_range:{actual_col}={parsed_val} not [{lo},{hi}]",
                     }
                 )
                 return None, issues
 
-    for col, allowed in rule["enums"].items():
-        if col not in rc.header:
+    canonical_enums = rule.get("_canonical_enums", {}) or {}
+    for canon_col, allowed in canonical_enums.items():
+        actual_col = alias.get(canon_col)
+        if not actual_col:
             continue
-        val = data.get(col, "")
-        if val != "" and val not in allowed:
+        raw_val = data.get(actual_col)
+        val = "" if raw_val is None else raw_val
+        if isinstance(val, str):
+            candidate = val.strip()
+        else:
+            candidate = str(val)
+        if candidate == "":
+            continue
+        if candidate not in allowed:
             inc("bad_enum")
             issues.append(
                 {
                     "file": rc.file,
                     "row": rc.rownum,
-                    "reason": f"bad_enum:{col}={val}",
+                    "reason": f"bad_enum:{actual_col}={candidate}",
                 }
             )
             return None, issues
 
-    rconf = rule.get("reference_keys") or {}
-    target_col = rconf.get("target_col")
-    if target_col and refset is not None and target_col in rc.header:
-        val = data.get(target_col)
-        if val not in refset:
+    ref_entries = rule.get("reference_keys") or []
+    if isinstance(ref_entries, dict):
+        ref_entries = [ref_entries]
+    ref_map: Dict[str, set] = {}
+    cached_sets = rule.get("_canonical_reference_sets") or {}
+    if isinstance(cached_sets, dict):
+        ref_map.update(cached_sets)
+    if isinstance(refset, dict):
+        for key, values in refset.items():
+            ref_map[_canonicalize_column_name(key)] = values
+    elif isinstance(refset, set):
+        legacy_target = rule.get("_legacy_reference_target")
+        if legacy_target:
+            ref_map.setdefault(_canonicalize_column_name(legacy_target), refset)
+    for entry in ref_entries:
+        target_col = entry.get("target_col") if isinstance(entry, dict) else None
+        if not target_col:
+            continue
+        canon_target = _canonicalize_column_name(target_col)
+        actual_col = alias.get(canon_target)
+        if not actual_col:
+            continue
+        ref_values = ref_map.get(canon_target)
+        if ref_values is None:
+            continue
+        val = data.get(actual_col)
+        candidate = ("" if val is None else str(val).strip())
+        if candidate not in ref_values:
             inc("bad_ref")
             issues.append(
                 {
                     "file": rc.file,
                     "row": rc.rownum,
-                    "reason": f"fk_missing:{target_col}={val}",
+                    "reason": f"fk_missing:{actual_col}={candidate}",
                 }
             )
             return None, issues
 
     et_col = rule.get("event_time_col")
     slo_h = rule.get("freshness_slo_hours")
-    if et_col and et_col in rc.header and (
+    actual_et_col = None
+    if et_col:
+        actual_et_col = alias.get(_canonicalize_column_name(et_col)) or (
+            et_col if et_col in rc.header else None
+        )
+    if actual_et_col and (
         slo_h or rule.get("max_future_hours") or rule.get("time_epoch_bounds")
     ):
-        val = data.get(et_col)
+        val = data.get(actual_et_col)
         try:
             et_fmt = (rule.get("event_time_format") or "auto").lower()
             ts = parse_event_time(val, et_fmt)
@@ -947,7 +1071,7 @@ def validate_row_against_rule(
                         {
                             "file": rc.file,
                             "row": rc.rownum,
-                            "reason": f"stale_event:{et_col} age_h={age_h:.2f} slo_h={slo_h}",
+                            "reason": f"stale_event:{actual_et_col} age_h={age_h:.2f} max={slo_h}",
                         }
                     )
                     return None, issues
@@ -961,7 +1085,7 @@ def validate_row_against_rule(
                         {
                             "file": rc.file,
                             "row": rc.rownum,
-                            "reason": f"future_event:{et_col} future_h={future_h:.2f} max={mf}",
+                            "reason": f"future_event:{actual_et_col} future_h={future_h:.2f} max={mf}",
                         }
                     )
                     return None, issues
@@ -993,7 +1117,7 @@ def validate_row_against_rule(
                 {
                     "file": rc.file,
                     "row": rc.rownum,
-                    "reason": f"bad_timestamp:{et_col}={val}",
+                    "reason": f"bad_timestamp:{actual_et_col}={val}",
                 }
             )
             return None, issues
@@ -1027,6 +1151,27 @@ if _HAVE_BEAM:
             for issue in issues:
                 yield beam.pvalue.TaggedOutput(BAD_TAG, issue)
 
+    class ValidateHeader(beam.DoFn):  # type: ignore[attr-defined]
+        metadata_mismatch = Metrics.counter("dq", "metadata_mismatch")
+
+        def __init__(self, rules: List[Dict[str, Any]]):
+            self.rules = rules
+
+        def process(self, info: Dict[str, Any]):
+            path = info.get("file")
+            header = info.get("header") or []
+            if not path:
+                return
+            rule = pick_rule(self.rules, path)
+            state = _ensure_header_state(rule, path, header)
+            if state.get("issues") and not state.get("reported"):
+                state["reported"] = True
+                for issue in state["issues"]:
+                    reason = issue.get("reason", "")
+                    if isinstance(reason, str) and reason.startswith("missing_metadata_column"):
+                        self.metadata_mismatch.inc()
+                    yield issue
+
 # -----------------------------
 # 工具
 # -----------------------------
@@ -1051,14 +1196,21 @@ def numeric_profiles_from_pairs(pairs_pcoll, col: str):
     """
     def cast_with_rule(pair):
         rc, rule = pair
-        numeric_cols = rule.get("numeric_cols") or []
-        if numeric_cols and col not in numeric_cols:
+        header_state = _ensure_header_state(rule, rc.file, rc.header)
+        alias = header_state.get("alias") or {}
+        setattr(rc, "_dq_header_alias", alias)
+        canon = _canonicalize_column_name(col)
+        numeric_cols = {_canonicalize_column_name(c) for c in (rule.get("numeric_cols") or [])}
+        if numeric_cols and canon not in numeric_cols:
             return None
-        v = rc.data.get(col)
-        if v in (None, "", "NaN"):
+        actual_col = alias.get(canon) or (col if col in rc.header else None)
+        if not actual_col:
+            return None
+        v = rc.data.get(actual_col)
+        if _is_missing_value(v):
             return None
         try:
-            return parse_numeric_with_units(v, col, rule)
+            return parse_numeric_with_units(v, actual_col, rule)
         except Exception:
             return None
 
@@ -1268,20 +1420,25 @@ def _accumulate_numeric_values(
     per_file_values: Optional[Dict[str, Dict[str, List[float]]]] = None,
     file_path: Optional[str] = None,
 ) -> None:
+    alias = getattr(rc, "_dq_header_alias", None)
     for col in rule.get("numeric_cols", []):
-        if col not in rc.header:
+        canon = _canonicalize_column_name(col)
+        actual_col = alias.get(canon) if isinstance(alias, dict) else None
+        if not actual_col and col in rc.header:
+            actual_col = col
+        if not actual_col:
             continue
-        val = rc.data.get(col)
-        if val in (None, "", "NaN"):
+        val = rc.data.get(actual_col)
+        if _is_missing_value(val):
             continue
         try:
-            parsed_val = parse_numeric_with_units(val, col, rule)
+            parsed_val = parse_numeric_with_units(val, actual_col, rule)
         except Exception:
             continue
         if global_values is not None:
-            global_values.setdefault(col, []).append(parsed_val)
+            global_values.setdefault(actual_col, []).append(parsed_val)
         if per_file_values is not None and file_path is not None:
-            per_file_values.setdefault(file_path, {}).setdefault(col, []).append(parsed_val)
+            per_file_values.setdefault(file_path, {}).setdefault(actual_col, []).append(parsed_val)
 
 
 def _format_stat_value(value: Optional[float]) -> str:
@@ -1532,9 +1689,14 @@ def collect_numeric_values_by_file(
 ) -> Dict[str, Dict[str, List[float]]]:
     per_file: Dict[str, Dict[str, List[float]]] = {}
     for path in files:
-        _, rows, _ = read_csv_file(path)
+        header, rows, _ = read_csv_file(path)
         rule = pick_rule(rules, path)
+        header_state = _ensure_header_state(rule, path, header)
+        if not header_state.get("valid", True):
+            continue
+        alias = header_state.get("alias") or {}
         for rc in rows:
+            setattr(rc, "_dq_header_alias", alias)
             _accumulate_numeric_values(rc, rule, None, per_file, path)
     return per_file
 
@@ -1674,14 +1836,6 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
     if not matched_files:
         raise FileNotFoundError(f"No files matched input pattern: {input_pattern}")
 
-    # 外键集合（可按需扩展为多集合 keyed side input）
-    refset_local: Optional[set] = None
-    for r in rules:
-        rconf = r.get("reference_keys") or {}
-        if rconf.get("path") and rconf.get("column"):
-            refset_local = load_reference_keys(rconf["path"], rconf["column"])
-            break
-
     opts = PipelineOptions(runner="DirectRunner", save_main_session=True, streaming=False)
     with beam.Pipeline(options=opts) as p:
         files = (
@@ -1722,37 +1876,23 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
                                                   file_name_suffix=".json", num_shards=1)
         )
 
+        header_issues = parsed.headers | "ValidateHeaders" >> beam.ParDo(ValidateHeader(rules))
+
         with_rules = parsed.good | "AttachRule" >> beam.Map(lambda rc: (rc, pick_rule(rules, rc.file)))
 
-        # side input for FK
-        if refset_local is not None:
-            ref_pc = p | "CreateRefSet" >> beam.Create([refset_local])
-            ref_view = beam.pvalue.AsSingleton(ref_pc)
-        else:
-            ref_view = None
-
         class ValidateWrapper(beam.DoFn):
-            def process(self, pair, refset=None):
+            def process(self, pair):
                 rc, rule = pair
                 validator = ValidateRow(rule)
-                if refset is None:
-                    yield from validator.process(rc, None)
-                else:
-                    yield from validator.process(rc, refset)
+                yield from validator.process(rc, None)
 
-        if ref_view is None:
-            validated = (
-                with_rules
-                | "ValidateRows" >> beam.ParDo(ValidateWrapper()).with_outputs(BAD_TAG, main="good")
-            )
-        else:
-            validated = (
-                with_rules
-                | "ValidateRows" >> beam.ParDo(ValidateWrapper(), refset=ref_view).with_outputs(BAD_TAG, main="good")
-            )
+        validated = (
+            with_rules
+            | "ValidateRows" >> beam.ParDo(ValidateWrapper()).with_outputs(BAD_TAG, main="good")
+        )
 
         # BAD 输出（JSONL）
-        bad = (parsed.bad, validated.bad) | "FlattenBad" >> beam.Flatten()
+        bad = (parsed.bad, validated.bad, header_issues) | "FlattenBad" >> beam.Flatten()
         _ = (
             bad
             | "ToJSON" >> beam.Map(json.dumps, ensure_ascii=False)
@@ -1776,15 +1916,16 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
 
         # 主键重复统计（若配置）
         dup_issue_pairs = p | "EmptyDupIssues" >> beam.Create([])
-        if any(r.get("primary_key") for r in rules):
+        if any(_get_primary_key_columns(r) for r in rules):
             def pk_pairs(pair: Tuple[RowCtx, Dict[str, Any]]):
                 rc, rule = pair
-                pk = rule.get("primary_key")
-                if not pk or pk not in rc.header:
+                cols = _get_primary_key_columns(rule)
+                if not cols:
                     return
-                key = rc.data.get(pk)
-                if key not in (None, "", "NaN"):
-                    yield (key, rc.file)
+                key = _primary_key_value(rule, rc)
+                if key is None:
+                    return
+                yield ((cols, key), rc.file)
 
             pkp = with_rules | "PKPairs" >> beam.FlatMap(pk_pairs)
             dup_keys = (
@@ -1805,9 +1946,13 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
                         "Duplication",
                         {
                             "dimension": "Duplication",
-                            "reason": f"duplicate_primary_key:{kv[0]}",
+                            "reason": f"duplicate_primary_key:{kv[0][1]}",
                             "scenario": "Duplicate primary key values detected",
-                            "detail": {"primary_key": kv[0], "occurrences": kv[1]},
+                            "detail": {
+                                "primary_key_columns": list(kv[0][0]),
+                                "key_value": kv[0][1],
+                                "occurrences": kv[1],
+                            },
                             "occurrence_count": max(kv[1] - 1, 1),
                         },
                     )
@@ -1922,13 +2067,6 @@ def _run_without_beam(
     rules = cfg["rules"]
     column_descriptions = gather_column_descriptions(rules)
 
-    refset_local: Optional[set] = None
-    for r in rules:
-        rconf = r.get("reference_keys") or {}
-        if rconf.get("path") and rconf.get("column"):
-            refset_local = load_reference_keys(rconf["path"], rconf["column"])
-            break
-
     matched_files = sorted(glob.glob(input_pattern, recursive=True))
     if not matched_files:
         raise FileNotFoundError(f"No files matched input pattern: {input_pattern}")
@@ -1943,7 +2081,7 @@ def _run_without_beam(
     bad_issues: List[Dict[str, Any]] = []
     per_file_counts: Dict[str, int] = {}
     per_file_numeric_values: Dict[str, Dict[str, List[float]]] = {}
-    pk_counts: Dict[str, int] = {}
+    pk_counts: Dict[Tuple[Tuple[str, ...], str], int] = {}
 
     for path in matched_files:
         header, rows, parse_issues = read_csv_file(path)
@@ -1963,8 +2101,15 @@ def _run_without_beam(
 
         rule = pick_rule(rules, path)
 
+        header_state = _ensure_header_state(rule, path, header)
+        if header_state.get("issues") and not header_state.get("reported"):
+            bad_issues.extend(header_state["issues"])
+            header_state["reported"] = True
+        if not header_state.get("valid", True):
+            continue
+
         for rc in rows:
-            valid, issues = validate_row_against_rule(rc, rule, refset_local)
+            valid, issues = validate_row_against_rule(rc, rule, None)
             if issues:
                 bad_issues.extend(issues)
 
@@ -1982,11 +2127,12 @@ def _run_without_beam(
 
             per_file_counts[path] = per_file_counts.get(path, 0) + 1
 
-            pk = rule.get("primary_key")
-            if pk and pk in valid.header:
-                key_val = valid.data.get(pk)
-                if key_val not in (None, "", "NaN"):
-                    pk_counts[key_val] = pk_counts.get(key_val, 0) + 1
+            pk_cols = _get_primary_key_columns(rule)
+            if pk_cols:
+                key_val = _primary_key_value(rule, valid)
+                if key_val is not None:
+                    pk_key = (pk_cols, key_val)
+                    pk_counts[pk_key] = pk_counts.get(pk_key, 0) + 1
 
     header_intersection = header_intersection or set()
 
@@ -2005,18 +2151,23 @@ def _run_without_beam(
 
     issue_pairs = [attach_dimension(issue) for issue in bad_issues]
 
-    has_primary_key = any(r.get("primary_key") for r in rules)
+    has_primary_key = any(_get_primary_key_columns(r) for r in rules)
     if has_primary_key:
         dup_keys = {k: v for k, v in pk_counts.items() if v > 1}
         for key, occ in sorted(dup_keys.items()):
+            columns, key_value = key
             issue_pairs.append(
                 (
                     "Duplication",
                     {
                         "dimension": "Duplication",
-                        "reason": f"duplicate_primary_key:{key}",
+                        "reason": f"duplicate_primary_key:{key_value}",
                         "scenario": "Duplicate primary key values detected",
-                        "detail": {"primary_key": key, "occurrences": occ},
+                        "detail": {
+                            "primary_key_columns": list(columns),
+                            "key_value": key_value,
+                            "occurrences": occ,
+                        },
                         "occurrence_count": max(occ - 1, 1),
                     },
                 )

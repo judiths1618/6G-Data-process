@@ -2,6 +2,9 @@ Nomadic dataset (ULA static) – antennas represented as features
 
 files: nomadic_dataset_ULA_static/antennas_as_features/user_0.csv, nomadic_dataset_ULA_static/antennas_as_features/user_1.csv, nomadic_dataset_ULA_static/antennas_as_features/user_2.csv, nomadic_dataset_ULA_static/antennas_as_features/user_3.csv
 
+index: Unnamed CSV index column capturing the 0-based timestep for the recorded user trajectory.
+primary key: Combination of the index column and user position.
+
 antenna 1: Complex channel coefficient captured by antenna element 1 of the 64-element uniform linear array. Values are stored as complex strings.
 antenna 2: Complex channel coefficient captured by antenna element 2 of the 64-element uniform linear array. Values are stored as complex strings.
 antenna 3: Complex channel coefficient captured by antenna element 3 of the 64-element uniform linear array. Values are stored as complex strings.
