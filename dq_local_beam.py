@@ -16,8 +16,9 @@ import json
 import datetime as dt
 import math
 import shutil
+import fnmatch
 from dataclasses import dataclass
-from typing import Dict, Any, List, Optional, Tuple, Iterable
+from typing import Dict, Any, List, Optional, Tuple, Iterable, Set
 
 import glob
 
@@ -154,6 +155,7 @@ class RowCtx:
 DEFAULT_RULE = {
     "patterns": [".*"],
     "required_cols": [],
+    "required_col_prefixes": [],
     "numeric_cols": [],
     "enums": {},
     "ranges": {},
@@ -167,6 +169,7 @@ DEFAULT_RULE = {
     "numeric_unit_parsers": {},      # 列 -> {type:'mem', base:1024, out_unit:'MiB'}
     "metadata_path": None,
     "metadata_targets": [],          # 文件名（或相对路径）列表，用于从元数据中提取列说明
+    "metadata_base_dir": None,
 }
 
 _VISUALIZATION_FILE_LIMIT_ENV = "DQ_VISUALIZATION_MAX_FILE_BYTES"
@@ -258,14 +261,49 @@ def _visualizations_allowed(file_paths: Iterable[str]) -> Tuple[bool, Optional[s
 # -----------------------------
 # 元数据解析
 # -----------------------------
-_COLUMN_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
+_COLUMN_NAME_RE = re.compile(r"^[A-Za-z0-9_ ]+$")
 
 
 def _parse_metadata_text(lines: Iterable[str]) -> Dict[str, Dict[str, str]]:
-    """解析元数据文本，返回 {文件名: {列名: 描述}}。列名统一为小写。"""
+    """解析元数据文本，返回 {文件名或模式: {列名: 描述}}。列名统一为小写。"""
 
-    files: List[str] = []
     mapping: Dict[str, Dict[str, str]] = {}
+    current_keys: List[str] = []
+    current_key_set: Set[str] = set()
+
+    def _register_literal(target: str) -> None:
+        normalized = target.strip().replace("\\", "/").lower()
+        if not normalized:
+            return
+        group = mapping.setdefault(normalized, {})
+        if normalized not in current_key_set:
+            current_keys.append(normalized)
+            current_key_set.add(normalized)
+        base = os.path.basename(normalized)
+        if base and base not in mapping:
+            mapping[base] = group
+        if base and base not in current_key_set:
+            current_keys.append(base)
+            current_key_set.add(base)
+
+    def _register_pattern(target: str) -> None:
+        normalized = target.strip().replace("\\", "/").lower()
+        if not normalized:
+            return
+        pattern_key = f"__pattern__:{normalized}"
+        group = mapping.setdefault(pattern_key, {})
+        if pattern_key not in current_key_set:
+            current_keys.append(pattern_key)
+            current_key_set.add(pattern_key)
+        base = os.path.basename(normalized)
+        if base:
+            base_key = f"__pattern__:{base}"
+            if base_key not in mapping:
+                mapping[base_key] = group
+            if base_key not in current_key_set:
+                current_keys.append(base_key)
+                current_key_set.add(base_key)
+
     for raw in lines:
         line = raw.strip()
         if not line:
@@ -278,13 +316,23 @@ def _parse_metadata_text(lines: Iterable[str]) -> Dict[str, Dict[str, str]]:
         lower_key = key.lower()
 
         if lower_key in {"file", "files"}:
-            files = [os.path.basename(part.strip()) for part in value.split(",") if part.strip()]
-            for f in files:
-                mapping.setdefault(f, {})
+            current_keys = []
+            current_key_set = set()
+            parts = [part for part in (p.strip() for p in value.split(",")) if part]
+            for part in parts:
+                _register_literal(part)
             continue
 
-        if not files:
-            # 还未遇到 file(s) 说明，此处多为段落描述
+        if lower_key in {"file_pattern", "files_pattern", "pattern", "patterns"}:
+            current_keys = []
+            current_key_set = set()
+            parts = [part for part in (p.strip() for p in value.split(",")) if part]
+            for part in parts:
+                _register_pattern(part)
+            continue
+
+        if not current_keys:
+            # 还未遇到 file(s) / pattern(s) 说明，此处多为段落描述
             continue
 
         if not value:
@@ -296,8 +344,8 @@ def _parse_metadata_text(lines: Iterable[str]) -> Dict[str, Dict[str, str]]:
             continue
 
         col_name = key.strip().lower()
-        for f in files:
-            mapping.setdefault(f, {})[col_name] = value
+        for tgt in current_keys:
+            mapping.setdefault(tgt, {})[col_name] = value
 
     return mapping
 
@@ -465,6 +513,7 @@ def load_config(path: str) -> Dict[str, Any]:
         pats = rr.get("patterns") or rr.get("pattern") or [".*"]
         rr["patterns"] = [pats] if isinstance(pats, str) else list(pats)
         rr["required_cols"] = rr.get("required_cols", []) or []
+        rr["required_col_prefixes"] = rr.get("required_col_prefixes", []) or []
         rr["numeric_cols"]  = rr.get("numeric_cols", [])  or []
         rr["enums"]         = rr.get("enums", {})         or {}
         rr["ranges"]        = rr.get("ranges", {})        or {}
@@ -473,17 +522,49 @@ def load_config(path: str) -> Dict[str, Any]:
         meta_path = rr.get("metadata_path")
         targets = rr.get("metadata_targets") or []
         metadata_by_file: Dict[str, Dict[str, str]] = {}
+        metadata_base_dir: Optional[str] = None
         if meta_path:
             if meta_path not in metadata_cache:
                 metadata_cache[meta_path] = parse_metadata_descriptions(meta_path)
             meta_map = metadata_cache[meta_path]
+            metadata_base_dir = os.path.abspath(os.path.dirname(meta_path) or ".")
             selected = targets or list(meta_map.keys())
             for target in selected:
-                base = os.path.basename(target)
-                if base in meta_map:
-                    metadata_by_file[base] = meta_map[base]
+                if not target:
+                    continue
+                if target.startswith("__pattern__:") and target in meta_map:
+                    metadata_by_file[target] = meta_map[target]
+                    continue
+                normalized = target.strip().replace("\\", "/").lower()
+                candidates: List[str] = []
+                if normalized:
+                    candidates.append(normalized)
+                if metadata_base_dir:
+                    try:
+                        rel = os.path.relpath(os.path.normpath(target), metadata_base_dir)
+                        rel_norm = rel.replace("\\", "/").lower()
+                        if rel_norm:
+                            candidates.append(rel_norm)
+                    except ValueError:
+                        pass
+                base = os.path.basename(normalized)
+                if base:
+                    candidates.append(base)
+                for cand in candidates:
+                    if not cand:
+                        continue
+                    pattern_key = f"__pattern__:{cand}"
+                    if cand in meta_map:
+                        metadata_by_file[cand] = meta_map[cand]
+                    if pattern_key in meta_map:
+                        metadata_by_file[pattern_key] = meta_map[pattern_key]
+            if not targets:
+                for key, cols in meta_map.items():
+                    if key not in metadata_by_file:
+                        metadata_by_file[key] = cols
         if metadata_by_file:
             rr["metadata_by_file"] = metadata_by_file
+            rr["metadata_base_dir"] = metadata_base_dir
             # 将元数据列合并进 required_cols，避免遗漏
             meta_cols = sorted({col for cols in metadata_by_file.values() for col in cols.keys()})
             for col in meta_cols:
@@ -491,8 +572,52 @@ def load_config(path: str) -> Dict[str, Any]:
                     rr["required_cols"].append(col)
         else:
             rr["metadata_by_file"] = {}
+            rr["metadata_base_dir"] = metadata_base_dir
         norm.append(rr)
     return {"rules": norm}
+
+
+def _resolve_metadata_columns(rule: Dict[str, Any], path: str) -> Optional[Dict[str, str]]:
+    metadata_by_file: Dict[str, Dict[str, str]] = rule.get("metadata_by_file") or {}
+    if not metadata_by_file:
+        return None
+
+    base_dir = rule.get("metadata_base_dir")
+    candidates: List[str] = []
+
+    norm_path = path.replace("\\", "/").lower()
+    candidates.append(norm_path)
+
+    if base_dir:
+        try:
+            rel = os.path.relpath(path, base_dir)
+            rel_norm = rel.replace("\\", "/").lower()
+            candidates.append(rel_norm)
+        except ValueError:
+            pass
+
+    base = os.path.basename(norm_path)
+    if base:
+        candidates.append(base)
+
+    seen: Set[str] = set()
+    for cand in candidates:
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        cols = metadata_by_file.get(cand)
+        if cols:
+            return cols
+
+    for key, cols in metadata_by_file.items():
+        if not key.startswith("__pattern__:"):
+            continue
+        pattern = key.split(":", 1)[1]
+        for cand in candidates:
+            if cand and fnmatch.fnmatch(cand, pattern):
+                return cols
+
+    return None
 
 def pick_rule(rules: List[Dict[str, Any]], path: str) -> Dict[str, Any]:
     for r in rules:
@@ -694,8 +819,7 @@ def validate_row_against_rule(
     issues: List[Dict[str, Any]] = []
     data = rc.data
 
-    metadata_by_file = rule.get("metadata_by_file") or {}
-    meta_cols = metadata_by_file.get(os.path.basename(rc.file))
+    meta_cols = _resolve_metadata_columns(rule, rc.file)
     if meta_cols:
         missing = [col for col in meta_cols.keys() if col not in rc.header]
         if missing:
@@ -729,6 +853,17 @@ def validate_row_against_rule(
                     "file": rc.file,
                     "row": rc.rownum,
                     "reason": f"null_required:{col}",
+                }
+            )
+            return None, issues
+
+    for prefix in rule.get("required_col_prefixes", []):
+        if not any(col.startswith(prefix) for col in rc.header):
+            issues.append(
+                {
+                    "file": rc.file,
+                    "row": 0,
+                    "reason": f"missing_required_prefix:{prefix}",
                 }
             )
             return None, issues
@@ -1448,6 +1583,8 @@ def classify_issue(reason: str) -> Tuple[str, str]:
         return "Completeness", "Required column missing from header"
     if r.startswith("missing_metadata_column"):
         return "Completeness", "Column listed in metadata is missing from header"
+    if r.startswith("missing_required_prefix"):
+        return "Completeness", "Required column prefix missing from header"
     if r.startswith("null_required"):
         return "Completeness", "Required field is empty"
     if r.startswith("bad_enum"):
