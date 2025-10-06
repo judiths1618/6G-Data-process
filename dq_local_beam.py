@@ -614,6 +614,10 @@ def _parse_csv_text(path: str, text: str) -> Tuple[List[str], List[RowCtx], List
     sample = buf.read(2048)
     buf.seek(0)
     try:
+        # dialect = csv.Sniffer().sniff(sample)
+        # Restrict sniffed delimiters so that spaces inside column names (e.g. "abc 12")
+        # are not misinterpreted as separators.
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
         # Restrict sniffed delimiters so that spaces inside column names (e.g. "abc 12")
         # are not misinterpreted as separators.
         dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")

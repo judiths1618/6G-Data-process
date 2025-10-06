@@ -547,7 +547,7 @@ rules:
       - 'key_user_position'
 
     numeric_cols:
-      - key_antennas_0
+      # - key_antennas_0
 
     numeric_unit_parsers: {}
 
