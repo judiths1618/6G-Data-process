@@ -1,0 +1,136 @@
+rules:
+  - patterns: ["6GDALI_Datasets/KUL/nomadic_dataset_ULA_static/antennas_as_features/user_\\d+\\.csv$"]
+    metadata_path: "6GDALI_Datasets/KUL/metadata.txt"
+    metadata_targets:
+      - nomadic_dataset_ULA_static/antennas_as_features/user_0.csv
+      - nomadic_dataset_ULA_static/antennas_as_features/user_1.csv
+      - nomadic_dataset_ULA_static/antennas_as_features/user_2.csv
+      - nomadic_dataset_ULA_static/antennas_as_features/user_3.csv
+
+    required_cols:
+      - "user position"
+    required_col_prefixes:
+      - "antenna "
+
+    numeric_cols: []
+    enums: {}
+    ranges: {}
+
+    event_time_col: null
+    event_time_format: "auto"
+    freshness_slo_hours: null
+    max_future_hours: null
+    time_epoch_bounds: null
+
+    primary_key:
+      - "__file__"
+      - ""
+    reference_keys:
+      - path: "6GDALI_Datasets/KUL/reference/kul_user_positions.csv"
+        column: "key_user_position"
+        target_col: "user position"
+
+  - patterns: ["6GDALI_Datasets/KUL/nomadic_dataset_ULA_static/csi_as_features/user_\\d+_sample_\\d+_antenna_\\d+\\.csv$"]
+    metadata_path: "6GDALI_Datasets/KUL/metadata.txt"
+    metadata_targets:
+      - nomadic_dataset_ULA_static/csi_as_features/user_*_sample_*_antenna_*.csv
+
+    required_cols:
+      - "real"
+      - "imaginary"
+      - "key_subcarriers_0_0"
+      - "key_antennas_0_0"
+      - "key_user_position"
+    required_col_prefixes:
+      - key_subcarriers_
+      - key_antennas_
+
+    numeric_cols: []
+    enums: {}
+    ranges: {}
+
+    event_time_col: null
+    event_time_format: "auto"
+    freshness_slo_hours: null
+    max_future_hours: null
+    time_epoch_bounds: null
+
+    primary_key:
+      - "__file__"
+      - "key_subcarriers_0_0"
+    reference_keys:
+      - path: "6GDALI_Datasets/KUL/reference/kul_user_positions.csv"
+        column: "key_user_position"
+        target_col: "key_user_position"
+      - path: "6GDALI_Datasets/KUL/reference/kul_antenna_indices.csv"
+        column: "key_antennas"
+        target_col: "key_antennas_0_0"
+      - path: "6GDALI_Datasets/KUL/reference/kul_subcarrier_indices.csv"
+        column: "key_subcarriers"
+        target_col: "key_subcarriers_0_0"
+
+  - patterns: ["6GDALI_Datasets/KUL/nomadic_dataset_ULA_static/subcarriers_as_features_complex/user_\\d+_sample_\\d+\\.csv$"]
+    metadata_path: "6GDALI_Datasets/KUL/metadata.txt"
+    metadata_targets:
+      - nomadic_dataset_ULA_static/subcarriers_as_features_*/user_*_sample_*.csv
+
+    required_cols:
+      - "key_antennas_0"
+      - "key_user_position"
+    required_col_prefixes:
+      - key_antennas_
+      - subcarrier 
+
+    numeric_cols: []
+    enums: {}
+    ranges: {}
+
+    event_time_col: null
+    event_time_format: "auto"
+    freshness_slo_hours: null
+    max_future_hours: null
+    time_epoch_bounds: null
+
+    primary_key:
+      - "__file__"
+      - "key_antennas_0"
+    reference_keys:
+      - path: "6GDALI_Datasets/KUL/reference/kul_user_positions.csv"
+        column: "key_user_position"
+        target_col: "key_user_position"
+      - path: "6GDALI_Datasets/KUL/reference/kul_antenna_indices.csv"
+        column: "key_antennas"
+        target_col: "key_antennas_0"
+
+  - patterns: ["6GDALI_Datasets/KUL/nomadic_dataset_ULA_static/subcarriers_as_features_real/user_\\d+_sample_\\d+\\.csv$"]
+    metadata_path: "6GDALI_Datasets/KUL/metadata.txt"
+    metadata_targets:
+      - nomadic_dataset_ULA_static/subcarriers_as_features_*/user_*_sample_*.csv
+
+    required_cols:
+      - "key_antennas_0"
+      - "key_user_position"
+    required_col_prefixes:
+      - key_antennas_
+      - subcarrier 
+
+    numeric_cols: []
+    enums: {}
+    ranges: {}
+
+    event_time_col: null
+    event_time_format: "auto"
+    freshness_slo_hours: null
+    max_future_hours: null
+    time_epoch_bounds: null
+
+    primary_key:
+      - "__file__"
+      - "key_antennas_0"
+    reference_keys:
+      - path: "6GDALI_Datasets/KUL/reference/kul_user_positions.csv"
+        column: "key_user_position"
+        target_col: "key_user_position"
+      - path: "6GDALI_Datasets/KUL/reference/kul_antenna_indices.csv"
+        column: "key_antennas"
+        target_col: "key_antennas_0"
