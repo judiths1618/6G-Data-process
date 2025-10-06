@@ -169,6 +169,92 @@ DEFAULT_RULE = {
     "metadata_targets": [],          # 文件名（或相对路径）列表，用于从元数据中提取列说明
 }
 
+_VISUALIZATION_FILE_LIMIT_ENV = "DQ_VISUALIZATION_MAX_FILE_BYTES"
+_VISUALIZATION_TOTAL_LIMIT_ENV = "DQ_VISUALIZATION_MAX_TOTAL_BYTES"
+_DEFAULT_VISUALIZATION_MAX_FILE_BYTES = 200 * 1024 * 1024  # 200 MiB
+_DEFAULT_VISUALIZATION_MAX_TOTAL_BYTES = 500 * 1024 * 1024  # 500 MiB
+
+
+def _parse_size_limit(raw_value: Optional[str], default: Optional[int]) -> Optional[int]:
+    if raw_value is None:
+        return default
+    text = raw_value.strip()
+    if not text:
+        return None
+    multiplier = 1
+    suffix_multipliers = {
+        "k": 1024,
+        "m": 1024 ** 2,
+        "g": 1024 ** 3,
+        "t": 1024 ** 4,
+    }
+    suffix = text[-1].lower()
+    if suffix in suffix_multipliers and text[:-1].strip():
+        multiplier = suffix_multipliers[suffix]
+        text = text[:-1]
+    try:
+        value = float(text)
+    except ValueError:
+        return default
+    limit = int(value * multiplier)
+    if limit <= 0:
+        return None
+    return limit
+
+
+def _format_size(num_bytes: float) -> str:
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    value = float(num_bytes)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TiB"
+
+
+def _visualizations_allowed(file_paths: Iterable[str]) -> Tuple[bool, Optional[str]]:
+    file_limit = _parse_size_limit(
+        os.environ.get(_VISUALIZATION_FILE_LIMIT_ENV),
+        _DEFAULT_VISUALIZATION_MAX_FILE_BYTES,
+    )
+    total_limit = _parse_size_limit(
+        os.environ.get(_VISUALIZATION_TOTAL_LIMIT_ENV),
+        _DEFAULT_VISUALIZATION_MAX_TOTAL_BYTES,
+    )
+
+    total_size = 0
+    largest_size = 0
+    largest_path: Optional[str] = None
+
+    for path in file_paths:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        total_size += size
+        if size > largest_size:
+            largest_size = size
+            largest_path = path
+
+    if file_limit is not None and largest_path and largest_size > file_limit:
+        note = (
+            "Visualizations skipped because "
+            f"{os.path.basename(largest_path)} is {_format_size(largest_size)} "
+            f"which exceeds the per-file limit of {_format_size(file_limit)}."
+        )
+        return False, note
+
+    if total_limit is not None and total_size > total_limit:
+        note = (
+            "Visualizations skipped because total input size "
+            f"{_format_size(total_size)} exceeds the limit of {_format_size(total_limit)}."
+        )
+        return False, note
+
+    return True, None
+
 # -----------------------------
 # 元数据解析
 # -----------------------------
@@ -528,7 +614,9 @@ def _parse_csv_text(path: str, text: str) -> Tuple[List[str], List[RowCtx], List
     sample = buf.read(2048)
     buf.seek(0)
     try:
-        dialect = csv.Sniffer().sniff(sample)
+        # Restrict sniffed delimiters so that spaces inside column names (e.g. "abc 12")
+        # are not misinterpreted as separators.
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
     except Exception:
         dialect = csv.excel
 
@@ -1644,10 +1732,17 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
     _, bad_issue_samples = _load_jsonl(bad_path, limit=10)
     bad_issue_count = sum(entry.get("issue_count", 0) for entry in issue_summary)
 
-    per_file_numeric_values = collect_numeric_values_by_file(matched_files, rules)
-    visualization_index, visualization_note = create_feature_visualizations(
-        per_file_numeric_values, dq_out, column_descriptions
-    )
+    per_file_numeric_values: Dict[str, Dict[str, List[float]]] = {}
+    visualization_index: Dict[str, Dict[str, str]] = {}
+    visualization_note: Optional[str] = None
+    visualizations_enabled, size_note = _visualizations_allowed(matched_files)
+    if not visualizations_enabled:
+        visualization_note = size_note
+    else:
+        per_file_numeric_values = collect_numeric_values_by_file(matched_files, rules)
+        visualization_index, visualization_note = create_feature_visualizations(
+            per_file_numeric_values, dq_out, column_descriptions
+        )
     write_execution_log(
         dq_out,
         input_pattern,
@@ -1703,6 +1798,8 @@ def _run_without_beam(
 
     os.makedirs(dq_out, exist_ok=True)
 
+    visualizations_enabled, visualization_note = _visualizations_allowed(matched_files)
+
     headers_info: List[Dict[str, Any]] = []
     header_union: set = set()
     header_intersection: Optional[set] = None
@@ -1734,13 +1831,14 @@ def _run_without_beam(
             if issues:
                 bad_issues.extend(issues)
 
-            _accumulate_numeric_values(
-                rc,
-                rule,
-                global_values=None,
-                per_file_values=per_file_numeric_values,
-                file_path=path,
-            )
+            if visualizations_enabled:
+                _accumulate_numeric_values(
+                    rc,
+                    rule,
+                    global_values=None,
+                    per_file_values=per_file_numeric_values,
+                    file_path=path,
+                )
 
             if valid is None:
                 continue
@@ -1811,9 +1909,11 @@ def _run_without_beam(
     bad_issue_count = sum(entry.get("issue_count", 0) for entry in issue_summary)
     bad_issue_samples = bad_issues[:10]
 
-    visualization_index, visualization_note = create_feature_visualizations(
-        per_file_numeric_values, dq_out, column_descriptions
-    )
+    visualization_index: Dict[str, Dict[str, str]] = {}
+    if visualizations_enabled:
+        visualization_index, visualization_note = create_feature_visualizations(
+            per_file_numeric_values, dq_out, column_descriptions
+        )
     write_execution_log(
         dq_out,
         input_pattern,
