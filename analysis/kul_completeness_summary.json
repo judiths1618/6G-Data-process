@@ -1,0 +1,569 @@
+{
+  "antennas_as_features": {
+    "files_scanned": 4,
+    "rows_scanned": 960,
+    "rows_with_missing": 0,
+    "files_with_missing": 0,
+    "columns_with_missing": {},
+    "header_variant_count": 1,
+    "header_variants": [
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "antenna 1",
+          "antenna 2",
+          "antenna 3",
+          "antenna 4"
+        ],
+        "last_columns": [
+          "antenna 61",
+          "antenna 62",
+          "antenna 63",
+          "antenna 64",
+          "user position"
+        ]
+      }
+    ]
+  },
+  "csi_as_features": {
+    "files_scanned": 61440,
+    "rows_scanned": 6144000,
+    "rows_with_missing": 0,
+    "files_with_missing": 0,
+    "columns_with_missing": {},
+    "header_variant_count": 15360,
+    "header_variants": [
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "real",
+          "imaginary",
+          "key_subcarriers_0_0",
+          "key_antennas_0_0"
+        ],
+        "last_columns": [
+          "real",
+          "imaginary",
+          "key_subcarriers_0_0",
+          "key_antennas_0_0",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "real",
+          "imaginary",
+          "key_subcarriers_0_1",
+          "key_antennas_0_1"
+        ],
+        "last_columns": [
+          "real",
+          "imaginary",
+          "key_subcarriers_0_1",
+          "key_antennas_0_1",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "real",
+          "imaginary",
+          "key_subcarriers_0_10",
+          "key_antennas_0_10"
+        ],
+        "last_columns": [
+          "real",
+          "imaginary",
+          "key_subcarriers_0_10",
+          "key_antennas_0_10",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "real",
+          "imaginary",
+          "key_subcarriers_0_11",
+          "key_antennas_0_11"
+        ],
+        "last_columns": [
+          "real",
+          "imaginary",
+          "key_subcarriers_0_11",
+          "key_antennas_0_11",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "real",
+          "imaginary",
+          "key_subcarriers_0_12",
+          "key_antennas_0_12"
+        ],
+        "last_columns": [
+          "real",
+          "imaginary",
+          "key_subcarriers_0_12",
+          "key_antennas_0_12",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "real",
+          "imaginary",
+          "key_subcarriers_0_13",
+          "key_antennas_0_13"
+        ],
+        "last_columns": [
+          "real",
+          "imaginary",
+          "key_subcarriers_0_13",
+          "key_antennas_0_13",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "real",
+          "imaginary",
+          "key_subcarriers_0_14",
+          "key_antennas_0_14"
+        ],
+        "last_columns": [
+          "real",
+          "imaginary",
+          "key_subcarriers_0_14",
+          "key_antennas_0_14",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "real",
+          "imaginary",
+          "key_subcarriers_0_15",
+          "key_antennas_0_15"
+        ],
+        "last_columns": [
+          "real",
+          "imaginary",
+          "key_subcarriers_0_15",
+          "key_antennas_0_15",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "real",
+          "imaginary",
+          "key_subcarriers_0_16",
+          "key_antennas_0_16"
+        ],
+        "last_columns": [
+          "real",
+          "imaginary",
+          "key_subcarriers_0_16",
+          "key_antennas_0_16",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "real",
+          "imaginary",
+          "key_subcarriers_0_17",
+          "key_antennas_0_17"
+        ],
+        "last_columns": [
+          "real",
+          "imaginary",
+          "key_subcarriers_0_17",
+          "key_antennas_0_17",
+          "key_user_position"
+        ]
+      }
+    ]
+  },
+  "subcarriers_as_features_complex": {
+    "files_scanned": 960,
+    "rows_scanned": 61440,
+    "rows_with_missing": 0,
+    "files_with_missing": 0,
+    "columns_with_missing": {},
+    "header_variant_count": 240,
+    "header_variants": [
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_0",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_1",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_10",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_100",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_101",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_102",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_103",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_104",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_105",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_106",
+          "key_user_position"
+        ]
+      }
+    ]
+  },
+  "subcarriers_as_features_real": {
+    "files_scanned": 960,
+    "rows_scanned": 61440,
+    "rows_with_missing": 0,
+    "files_with_missing": 0,
+    "columns_with_missing": {},
+    "header_variant_count": 240,
+    "header_variants": [
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_0",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_1",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_10",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_100",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_101",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_102",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_103",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_104",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_105",
+          "key_user_position"
+        ]
+      },
+      {
+        "count": 4,
+        "first_columns": [
+          "",
+          "subcarrier 1",
+          "subcarrier 2",
+          "subcarrier 3",
+          "subcarrier 4"
+        ],
+        "last_columns": [
+          "subcarrier 98",
+          "subcarrier 99",
+          "subcarrier 100",
+          "key_antennas_106",
+          "key_user_position"
+        ]
+      }
+    ]
+  }
+}
