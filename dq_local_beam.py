@@ -921,8 +921,18 @@ def validate_row_against_rule(
                 )
             return None, issues
 
-    for col in rule["required_cols"]:
-        if col not in rc.header:
+    alias = getattr(rc, "_dq_header_alias", None)
+    alias_map: Dict[str, str] = alias if isinstance(alias, dict) else {}
+
+    resolved_required: Dict[str, str] = {}
+    for col in rule.get("required_cols", []):
+        actual_col: Optional[str] = None
+        canon = _canonicalize_column_name(col)
+        if canon:
+            actual_col = alias_map.get(canon)
+        if not actual_col and isinstance(col, str) and col in rc.header:
+            actual_col = col
+        if not actual_col:
             issues.append(
                 {
                     "file": rc.file,
@@ -931,9 +941,10 @@ def validate_row_against_rule(
                 }
             )
             return None, issues
+        resolved_required[col] = actual_col
 
-    for col in rule["required_cols"]:
-        if data.get(col) in (None, "", "NaN"):
+    for actual_col in resolved_required.values():
+        if _is_missing_value(data.get(actual_col)):
             inc("nulls")
             issues.append(
                 {
