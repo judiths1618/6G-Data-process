@@ -419,11 +419,11 @@ rules:
       - 'subcarrier 98'
       - 'subcarrier 99'
       - 'subcarrier 100'
-      - 'key_antennas_0'
+      # - 'key_antennas_0'
       - 'key_user_position'
 
     numeric_cols:
-      - key_antennas_0
+      # - key_antennas_0
 
     numeric_unit_parsers: {}
 
