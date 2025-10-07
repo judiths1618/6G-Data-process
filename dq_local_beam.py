@@ -706,6 +706,84 @@ def _resolve_metadata_columns(rule: Dict[str, Any], path: str) -> Optional[Dict[
 
     return None
 
+
+def _prepare_header_alias(header: List[str]) -> Tuple[Dict[str, str], List[str]]:
+    alias: Dict[str, str] = {}
+    canonical: List[str] = []
+    for raw in header:
+        cleaned = (raw or "").strip()
+        canon = _canonicalize_column_name(cleaned)
+        canonical.append(canon)
+        if canon not in alias:
+            alias[canon] = cleaned
+    return alias, canonical
+
+
+def _ensure_header_state(rule: Dict[str, Any], path: str, header: List[str]) -> Dict[str, Any]:
+    cache: Dict[str, Dict[str, Any]] = rule.setdefault("_header_cache", {})
+    cached = cache.get(path)
+    if cached is not None:
+        return cached
+
+    alias, canonical_list = _prepare_header_alias(header)
+    canonical_set = set(canonical_list)
+
+    if not header:
+        state = {
+            "valid": False,
+            "issues": [],
+            "alias": alias,
+            "metadata_columns": {},
+            "metadata_canonical": {},
+            "reported": False,
+            "canonical_header": canonical_list,
+        }
+        cache[path] = state
+        return state
+
+    metadata_cols = _resolve_metadata_columns(rule, path) or {}
+    metadata_canonical = {
+        _canonicalize_column_name(col): col for col in metadata_cols.keys()
+    }
+
+    issues: List[Dict[str, Any]] = []
+
+    for canon, original in metadata_canonical.items():
+        if not canon:
+            continue
+        if canon not in canonical_set:
+            issues.append({"file": path, "row": 0, "reason": f"missing_metadata_column:{original}"})
+
+    for col in rule.get("required_cols", []):
+        canon = _canonicalize_column_name(col)
+        if not canon:
+            continue
+        if canon in metadata_canonical:
+            continue
+        if canon not in canonical_set:
+            issues.append({"file": path, "row": 0, "reason": f"missing_required_column:{col}"})
+
+    canonical_header_for_prefix = [c for c in canonical_list if c]
+    for prefix in rule.get("required_col_prefixes", []):
+        prefix_canon = _canonicalize_column_name(prefix)
+        if not prefix_canon:
+            continue
+        if not any(col.startswith(prefix_canon) for col in canonical_header_for_prefix):
+            issues.append({"file": path, "row": 0, "reason": f"missing_required_prefix:{prefix}"})
+
+    state = {
+        "valid": not issues,
+        "issues": issues,
+        "alias": alias,
+        "metadata_columns": metadata_cols,
+        "metadata_canonical": metadata_canonical,
+        "reported": False,
+        "canonical_header": canonical_list,
+    }
+    cache[path] = state
+    return state
+
+
 def pick_rule(rules: List[Dict[str, Any]], path: str) -> Dict[str, Any]:
     for r in rules:
         if any(re.search(p, path) for p in r["patterns"]):
@@ -906,42 +984,38 @@ def validate_row_against_rule(
     issues: List[Dict[str, Any]] = []
     data = rc.data
 
-    meta_cols = _resolve_metadata_columns(rule, rc.file)
-    if meta_cols:
-        missing = [col for col in meta_cols.keys() if col not in rc.header]
-        if missing:
-            for col in missing:
-                inc("metadata_mismatch")
-                issues.append(
-                    {
-                        "file": rc.file,
-                        "row": 0,
-                        "reason": f"missing_metadata_column:{col}",
-                    }
-                )
-            return None, issues
+    header_state = _ensure_header_state(rule, rc.file, rc.header)
+    alias_map: Dict[str, str] = header_state.get("alias") or {}
+    setattr(rc, "_dq_header_alias", alias_map)
 
-    alias = getattr(rc, "_dq_header_alias", None)
-    alias_map: Dict[str, str] = alias if isinstance(alias, dict) else {}
+    if not header_state.get("valid", True):
+        if not header_state.get("reported") and header_state.get("issues"):
+            header_state["reported"] = True
+            for issue in header_state["issues"]:
+                reason = issue.get("reason", "")
+                if isinstance(reason, str) and reason.startswith("missing_metadata_column"):
+                    inc("metadata_mismatch")
+            return None, list(header_state["issues"])
+        return None, []
+
+    def _resolve_actual_column(col: str) -> Tuple[str, Optional[str]]:
+        canon = _canonicalize_column_name(col)
+        actual = alias_map.get(canon)
+        if not actual and isinstance(col, str) and col in rc.header:
+            actual = col
+        if not actual:
+            for candidate in rc.header:
+                if _canonicalize_column_name(candidate) == canon:
+                    actual = candidate
+                    break
+        return canon, actual
 
     resolved_required: Dict[str, str] = {}
     for col in rule.get("required_cols", []):
-        actual_col: Optional[str] = None
-        canon = _canonicalize_column_name(col)
-        if canon:
-            actual_col = alias_map.get(canon)
-        if not actual_col and isinstance(col, str) and col in rc.header:
-            actual_col = col
+        canon, actual_col = _resolve_actual_column(col)
         if not actual_col:
-            issues.append(
-                {
-                    "file": rc.file,
-                    "row": 0,
-                    "reason": f"missing_required_column:{col}",
-                }
-            )
-            return None, issues
-        resolved_required[col] = actual_col
+            continue
+        resolved_required[canon or col] = actual_col
 
     for actual_col in resolved_required.values():
         if _is_missing_value(data.get(actual_col)):
@@ -955,19 +1029,10 @@ def validate_row_against_rule(
             )
             return None, issues
 
-    for prefix in rule.get("required_col_prefixes", []):
-        if not any(col.startswith(prefix) for col in rc.header):
-            issues.append(
-                {
-                    "file": rc.file,
-                    "row": 0,
-                    "reason": f"missing_required_prefix:{prefix}",
-                }
-            )
-            return None, issues
-
-    for col in rule["numeric_cols"]:
-        if col not in rc.header:
+    canonical_ranges = rule.get("_canonical_ranges", {}) or {}
+    for col in rule.get("numeric_cols", []):
+        canon, actual_col = _resolve_actual_column(col)
+        if not actual_col:
             continue
         val = data.get(actual_col, "")
         try:
@@ -998,7 +1063,12 @@ def validate_row_against_rule(
 
     canonical_enums = rule.get("_canonical_enums", {}) or {}
     for canon_col, allowed in canonical_enums.items():
-        actual_col = alias.get(canon_col)
+        actual_col = alias_map.get(canon_col)
+        if not actual_col:
+            for candidate in rc.header:
+                if _canonicalize_column_name(candidate) == canon_col:
+                    actual_col = candidate
+                    break
         if not actual_col:
             continue
         raw_val = data.get(actual_col)
@@ -1038,8 +1108,7 @@ def validate_row_against_rule(
         target_col = entry.get("target_col") if isinstance(entry, dict) else None
         if not target_col:
             continue
-        canon_target = _canonicalize_column_name(target_col)
-        actual_col = alias.get(canon_target)
+        canon_target, actual_col = _resolve_actual_column(target_col)
         if not actual_col:
             continue
         ref_values = ref_map.get(canon_target)
@@ -1062,9 +1131,7 @@ def validate_row_against_rule(
     slo_h = rule.get("freshness_slo_hours")
     actual_et_col = None
     if et_col:
-        actual_et_col = alias.get(_canonicalize_column_name(et_col)) or (
-            et_col if et_col in rc.header else None
-        )
+        _, actual_et_col = _resolve_actual_column(et_col)
     if actual_et_col and (
         slo_h or rule.get("max_future_hours") or rule.get("time_epoch_bounds")
     ):

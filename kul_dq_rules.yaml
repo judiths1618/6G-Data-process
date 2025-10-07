@@ -45,7 +45,9 @@ rules:
       - key_subcarriers_
       - key_antennas_
 
-    numeric_cols: []
+    numeric_cols:
+      - real
+      - imaginary
     enums: {}
     ranges: {}
 
@@ -93,7 +95,7 @@ rules:
 
     primary_key:
       - "__file__"
-      - "key_antennas_0"
+      - ""
     reference_keys:
       - path: "6GDALI_Datasets/KUL/reference/kul_user_positions.csv"
         column: "key_user_position"
@@ -126,7 +128,7 @@ rules:
 
     primary_key:
       - "__file__"
-      - "key_antennas_0"
+      - ""
     reference_keys:
       - path: "6GDALI_Datasets/KUL/reference/kul_user_positions.csv"
         column: "key_user_position"
