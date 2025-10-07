@@ -1,190 +1,76 @@
-Nomadic dataset (ULA static) – antennas represented as features
+Nomadic dataset (ULA static) – antennas_as_features
 
-files: nomadic_dataset_ULA_static/antennas_as_features/user_0.csv, nomadic_dataset_ULA_static/antennas_as_features/user_1.csv, nomadic_dataset_ULA_static/antennas_as_features/user_2.csv, nomadic_dataset_ULA_static/antennas_as_features/user_3.csv
+Overview
+- Each CSV contains the complete trajectory for a single user sampled over time.
+- Every row corresponds to one timestep of the trajectory.
+- Each antenna column stores the full 100-subcarrier complex vector captured by that antenna at the timestep.
+- The "user position" column encodes the ground-truth position used as the prediction target for ML models.
 
-index: Unnamed CSV index column capturing the 0-based timestep for the recorded user trajectory.
-primary key: Combination of the index column and user position.
+Columns
+- (index): Unnamed index column with the 0-based timestep for the user trajectory.
+- user position: User position label repeated for every timestep of the file.
+- antenna 1 … antenna 64: Complex subcarrier vectors (length 100) for the respective antenna elements of the 64-element ULA. Values are serialized as numpy-style complex arrays.
 
-antenna 1: Complex channel coefficient captured by antenna element 1 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 2: Complex channel coefficient captured by antenna element 2 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 3: Complex channel coefficient captured by antenna element 3 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 4: Complex channel coefficient captured by antenna element 4 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 5: Complex channel coefficient captured by antenna element 5 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 6: Complex channel coefficient captured by antenna element 6 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 7: Complex channel coefficient captured by antenna element 7 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 8: Complex channel coefficient captured by antenna element 8 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 9: Complex channel coefficient captured by antenna element 9 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 10: Complex channel coefficient captured by antenna element 10 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 11: Complex channel coefficient captured by antenna element 11 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 12: Complex channel coefficient captured by antenna element 12 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 13: Complex channel coefficient captured by antenna element 13 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 14: Complex channel coefficient captured by antenna element 14 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 15: Complex channel coefficient captured by antenna element 15 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 16: Complex channel coefficient captured by antenna element 16 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 17: Complex channel coefficient captured by antenna element 17 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 18: Complex channel coefficient captured by antenna element 18 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 19: Complex channel coefficient captured by antenna element 19 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 20: Complex channel coefficient captured by antenna element 20 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 21: Complex channel coefficient captured by antenna element 21 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 22: Complex channel coefficient captured by antenna element 22 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 23: Complex channel coefficient captured by antenna element 23 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 24: Complex channel coefficient captured by antenna element 24 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 25: Complex channel coefficient captured by antenna element 25 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 26: Complex channel coefficient captured by antenna element 26 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 27: Complex channel coefficient captured by antenna element 27 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 28: Complex channel coefficient captured by antenna element 28 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 29: Complex channel coefficient captured by antenna element 29 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 30: Complex channel coefficient captured by antenna element 30 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 31: Complex channel coefficient captured by antenna element 31 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 32: Complex channel coefficient captured by antenna element 32 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 33: Complex channel coefficient captured by antenna element 33 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 34: Complex channel coefficient captured by antenna element 34 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 35: Complex channel coefficient captured by antenna element 35 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 36: Complex channel coefficient captured by antenna element 36 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 37: Complex channel coefficient captured by antenna element 37 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 38: Complex channel coefficient captured by antenna element 38 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 39: Complex channel coefficient captured by antenna element 39 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 40: Complex channel coefficient captured by antenna element 40 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 41: Complex channel coefficient captured by antenna element 41 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 42: Complex channel coefficient captured by antenna element 42 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 43: Complex channel coefficient captured by antenna element 43 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 44: Complex channel coefficient captured by antenna element 44 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 45: Complex channel coefficient captured by antenna element 45 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 46: Complex channel coefficient captured by antenna element 46 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 47: Complex channel coefficient captured by antenna element 47 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 48: Complex channel coefficient captured by antenna element 48 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 49: Complex channel coefficient captured by antenna element 49 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 50: Complex channel coefficient captured by antenna element 50 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 51: Complex channel coefficient captured by antenna element 51 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 52: Complex channel coefficient captured by antenna element 52 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 53: Complex channel coefficient captured by antenna element 53 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 54: Complex channel coefficient captured by antenna element 54 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 55: Complex channel coefficient captured by antenna element 55 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 56: Complex channel coefficient captured by antenna element 56 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 57: Complex channel coefficient captured by antenna element 57 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 58: Complex channel coefficient captured by antenna element 58 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 59: Complex channel coefficient captured by antenna element 59 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 60: Complex channel coefficient captured by antenna element 60 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 61: Complex channel coefficient captured by antenna element 61 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 62: Complex channel coefficient captured by antenna element 62 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 63: Complex channel coefficient captured by antenna element 63 of the 64-element uniform linear array. Values are stored as complex strings.
-antenna 64: Complex channel coefficient captured by antenna element 64 of the 64-element uniform linear array. Values are stored as complex strings.
-user position: Discrete user position label represented as a three-element integer vector [x y z].
+Primary key
+- Combination of the source file path ("__file__") and the unnamed index column.
 
-Nomadic dataset (ULA static) – per-antenna CSI slices
+---
 
-files_pattern: nomadic_dataset_ULA_static/csi_as_features/user_*_sample_*_antenna_*.csv
+Nomadic dataset (ULA static) – subcarriers_as_features_complex
 
-real: Real component of the channel state information for the selected subcarrier.
-imaginary: Imaginary component of the channel state information for the selected subcarrier.
-key_user_position: User position label associated with the sampled CSI vector.
-key_subcarriers_*: Patterned columns listing the subcarrier indices used to generate the CSI slice.
-key_antennas_*: Patterned columns identifying the antenna index associated with the CSI slice.
+Overview
+- Each CSV contains one sample for a single user captured across all antennas.
+- Rows enumerate the antennas that contributed to the sample.
+- Columns "subcarrier 1" … "subcarrier 100" hold the complex coefficient for the respective OFDM subcarrier.
+- Keys identify the user and antenna associated with the row.
 
-Nomadic dataset (ULA static) – subcarriers as features
+Columns
+- (index): Unnamed index column with the antenna index within the sample.
+- subcarrier 1 … subcarrier 100: Complex channel coefficients for the corresponding subcarrier measured for the antenna represented by the row.
+- key_antennas_*: Patterned columns that repeat the antenna identifier for compatibility with consumers expecting explicit keys.
+- key_user_position: User position label associated with the captured sample.
 
-files_pattern: nomadic_dataset_ULA_static/subcarriers_as_features_*/user_*_sample_*.csv
+Primary key
+- Combination of the source file path ("__file__") and the unnamed index column.
 
-subcarrier 1: Channel response value for OFDM subcarrier 1. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 2: Channel response value for OFDM subcarrier 2. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 3: Channel response value for OFDM subcarrier 3. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 4: Channel response value for OFDM subcarrier 4. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 5: Channel response value for OFDM subcarrier 5. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 6: Channel response value for OFDM subcarrier 6. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 7: Channel response value for OFDM subcarrier 7. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 8: Channel response value for OFDM subcarrier 8. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 9: Channel response value for OFDM subcarrier 9. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 10: Channel response value for OFDM subcarrier 10. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 11: Channel response value for OFDM subcarrier 11. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 12: Channel response value for OFDM subcarrier 12. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 13: Channel response value for OFDM subcarrier 13. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 14: Channel response value for OFDM subcarrier 14. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 15: Channel response value for OFDM subcarrier 15. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 16: Channel response value for OFDM subcarrier 16. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 17: Channel response value for OFDM subcarrier 17. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 18: Channel response value for OFDM subcarrier 18. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 19: Channel response value for OFDM subcarrier 19. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 20: Channel response value for OFDM subcarrier 20. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 21: Channel response value for OFDM subcarrier 21. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 22: Channel response value for OFDM subcarrier 22. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 23: Channel response value for OFDM subcarrier 23. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 24: Channel response value for OFDM subcarrier 24. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 25: Channel response value for OFDM subcarrier 25. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 26: Channel response value for OFDM subcarrier 26. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 27: Channel response value for OFDM subcarrier 27. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 28: Channel response value for OFDM subcarrier 28. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 29: Channel response value for OFDM subcarrier 29. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 30: Channel response value for OFDM subcarrier 30. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 31: Channel response value for OFDM subcarrier 31. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 32: Channel response value for OFDM subcarrier 32. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 33: Channel response value for OFDM subcarrier 33. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 34: Channel response value for OFDM subcarrier 34. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 35: Channel response value for OFDM subcarrier 35. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 36: Channel response value for OFDM subcarrier 36. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 37: Channel response value for OFDM subcarrier 37. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 38: Channel response value for OFDM subcarrier 38. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 39: Channel response value for OFDM subcarrier 39. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 40: Channel response value for OFDM subcarrier 40. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 41: Channel response value for OFDM subcarrier 41. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 42: Channel response value for OFDM subcarrier 42. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 43: Channel response value for OFDM subcarrier 43. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 44: Channel response value for OFDM subcarrier 44. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 45: Channel response value for OFDM subcarrier 45. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 46: Channel response value for OFDM subcarrier 46. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 47: Channel response value for OFDM subcarrier 47. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 48: Channel response value for OFDM subcarrier 48. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 49: Channel response value for OFDM subcarrier 49. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 50: Channel response value for OFDM subcarrier 50. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 51: Channel response value for OFDM subcarrier 51. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 52: Channel response value for OFDM subcarrier 52. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 53: Channel response value for OFDM subcarrier 53. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 54: Channel response value for OFDM subcarrier 54. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 55: Channel response value for OFDM subcarrier 55. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 56: Channel response value for OFDM subcarrier 56. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 57: Channel response value for OFDM subcarrier 57. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 58: Channel response value for OFDM subcarrier 58. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 59: Channel response value for OFDM subcarrier 59. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 60: Channel response value for OFDM subcarrier 60. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 61: Channel response value for OFDM subcarrier 61. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 62: Channel response value for OFDM subcarrier 62. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 63: Channel response value for OFDM subcarrier 63. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 64: Channel response value for OFDM subcarrier 64. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 65: Channel response value for OFDM subcarrier 65. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 66: Channel response value for OFDM subcarrier 66. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 67: Channel response value for OFDM subcarrier 67. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 68: Channel response value for OFDM subcarrier 68. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 69: Channel response value for OFDM subcarrier 69. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 70: Channel response value for OFDM subcarrier 70. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 71: Channel response value for OFDM subcarrier 71. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 72: Channel response value for OFDM subcarrier 72. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 73: Channel response value for OFDM subcarrier 73. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 74: Channel response value for OFDM subcarrier 74. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 75: Channel response value for OFDM subcarrier 75. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 76: Channel response value for OFDM subcarrier 76. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 77: Channel response value for OFDM subcarrier 77. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 78: Channel response value for OFDM subcarrier 78. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 79: Channel response value for OFDM subcarrier 79. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 80: Channel response value for OFDM subcarrier 80. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 81: Channel response value for OFDM subcarrier 81. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 82: Channel response value for OFDM subcarrier 82. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 83: Channel response value for OFDM subcarrier 83. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 84: Channel response value for OFDM subcarrier 84. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 85: Channel response value for OFDM subcarrier 85. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 86: Channel response value for OFDM subcarrier 86. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 87: Channel response value for OFDM subcarrier 87. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 88: Channel response value for OFDM subcarrier 88. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 89: Channel response value for OFDM subcarrier 89. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 90: Channel response value for OFDM subcarrier 90. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 91: Channel response value for OFDM subcarrier 91. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 92: Channel response value for OFDM subcarrier 92. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 93: Channel response value for OFDM subcarrier 93. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 94: Channel response value for OFDM subcarrier 94. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 95: Channel response value for OFDM subcarrier 95. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 96: Channel response value for OFDM subcarrier 96. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 97: Channel response value for OFDM subcarrier 97. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 98: Channel response value for OFDM subcarrier 98. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 99: Channel response value for OFDM subcarrier 99. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-subcarrier 100: Channel response value for OFDM subcarrier 100. Complex exports encode values as a+jb strings, while real exports store a two-element [real imag] vector.
-key_user_position: User position label associated with the measured subcarrier vector.
-key_antennas_*: Patterned columns identifying the antenna element for which the subcarrier vector was captured.
+---
 
+Nomadic dataset (ULA static) – subcarriers_as_features_real
+
+Overview
+- Structure matches the complex export above but each subcarrier cell stores a two-element [real imag] vector instead of a complex number.
+- Each CSV contains one sample for a single user, with rows enumerating antennas and columns enumerating subcarriers.
+- Key columns mirror those present in the complex export to keep antenna and user identifiers aligned across tables.
+
+Columns
+- (index): Unnamed index column with the antenna index within the sample.
+- subcarrier 1 … subcarrier 100: Real-valued two-element arrays [real, imag] holding the channel coefficients for the corresponding subcarrier.
+- key_antennas_*: Patterned columns mirroring the antenna identifier for the row.
+- key_user_position: User position label associated with the captured sample.
+
+Primary key
+- Combination of the source file path ("__file__") and the unnamed index column.
+
+---
+
+Nomadic dataset (ULA static) – csi_as_features
+
+Overview
+- Each CSV captures a single antenna from a user sample with one row per subcarrier.
+- Real and imaginary parts of the channel coefficient are split into separate numeric columns.
+- Key columns identify the user, antenna, and subcarrier represented by the row.
+
+Columns
+- (index): Unnamed index column matching the subcarrier index within the antenna capture.
+- real / imaginary: Floating-point components of the complex channel coefficient.
+- key_subcarriers_*: Patterned columns providing the explicit subcarrier identifier.
+- key_antennas_*: Patterned columns identifying the antenna that generated the measurements.
+- key_user_position: User position label associated with the measurement.
+
+Primary key
+- Combination of the source file path ("__file__") and the key_subcarriers_* column for the row.
+
+Key alignment across tables
+- key_user_position values are shared across all exports, allowing samples to be mapped back to the user trajectory metadata.
+- key_antennas_* values are reused wherever the same antenna appears, enabling joins between antenna- and subcarrier-oriented layouts.
+- key_subcarriers_* values align the subcarrier indices between the csi_as_features tables and the subcarrier reference file.
