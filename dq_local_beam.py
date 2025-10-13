@@ -1417,6 +1417,7 @@ def summarize_numeric_values(values: List[float]) -> Dict[str, Any]:
                 "upper": None,
             },
             "outlier_count": 0,
+            "histogram": {"edges": [], "counts": []},
         }
 
     count = len(values)
@@ -1439,6 +1440,36 @@ def summarize_numeric_values(values: List[float]) -> Dict[str, Any]:
             if (lower is not None and v < lower) or (upper is not None and v > upper):
                 outlier_count += 1
 
+    def _histogram_from_values() -> Dict[str, Any]:
+        bin_count = 20
+        if min_val == max_val:
+            return {"edges": [], "counts": []}
+        span = max_val - min_val
+        if span <= 0:
+            return {"edges": [], "counts": []}
+        step = span / bin_count
+        if step <= 0:
+            return {"edges": [], "counts": []}
+        edges = [min_val + i * step for i in range(bin_count + 1)]
+        counts = [0 for _ in range(bin_count)]
+        for value in values:
+            if value is None:
+                continue
+            try:
+                position = (value - min_val) / step
+            except (TypeError, ValueError):
+                continue
+            if position < 0:
+                index = 0
+            elif position >= bin_count:
+                index = bin_count - 1
+            else:
+                index = int(position)
+            counts[index] += 1
+        return {"edges": edges, "counts": counts}
+
+    histogram = _histogram_from_values()
+
     return {
         "count": count,
         "min": min_val,
@@ -1455,6 +1486,7 @@ def summarize_numeric_values(values: List[float]) -> Dict[str, Any]:
             "upper": upper,
         },
         "outlier_count": outlier_count,
+        "histogram": histogram,
     }
 
 
@@ -2229,6 +2261,7 @@ def write_quality_report(
                 "mean": stats.get("mean"),
                 "stddev": stats.get("stddev"),
                 "quantiles": stats.get("quantiles"),
+                "distribution": stats.get("histogram"),
                 "outliers": {
                     "count": stats.get("outlier_count"),
                     "lower_fence": outlier_bounds.get("lower"),
