@@ -1728,6 +1728,10 @@ def _render_combined_outlier_dashboard(payload: Dict[str, Any], output_path: str
       padding: 1.5rem;
       background: #f6f8fa;
       color: #24292f;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
     }
     h1 {
       margin-top: 0;
@@ -1739,7 +1743,10 @@ def _render_combined_outlier_dashboard(payload: Dict[str, Any], output_path: str
       border-radius: 8px;
       padding: 1rem;
       box-shadow: 0 1px 2px rgba(27, 31, 35, 0.05);
-      margin-bottom: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      min-height: 0;
     }
     .toolbar {
       display: flex;
@@ -1775,7 +1782,6 @@ def _render_combined_outlier_dashboard(payload: Dict[str, Any], output_path: str
     table {
       width: 100%;
       border-collapse: collapse;
-      margin-top: 1.5rem;
       background: #fff;
       border-radius: 8px;
       overflow: hidden;
@@ -1795,55 +1801,88 @@ def _render_combined_outlier_dashboard(payload: Dict[str, Any], output_path: str
       background: #f9fbfc;
     }
     .note {
-      margin-top: 1rem;
       font-size: 0.85rem;
       color: #57606a;
-    }
-    iframe {
-      width: 100%;
-      border: none;
     }
     h2 {
       font-size: 1.35rem;
-      margin: 0 0 1rem 0;
+      margin: 0;
     }
     .feature-note {
-      margin-top: 0.75rem;
       font-size: 0.85rem;
       color: #57606a;
+    }
+    .viz-layout {
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 1.5rem;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    .chart-container {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+    }
+    .chart {
+      width: 100%;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    .table-wrapper {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+    }
+    .table-wrapper table {
+      margin-top: 0;
+    }
+    .note {
+      margin: 0;
+    }
+    .feature-note {
+      margin: 0;
     }
   </style>
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
   <h1>$page_title</h1>
-  <div class="section" id="distribution-section">
-    <h2>Distribution overview</h2>
-    <div id="distribution-chart" style="height: ${chart_height}px;"></div>
-    <ul class="feature-list" id="feature-list"></ul>
-    <div class="note" id="sampling-note"></div>
-    <table>
-      <thead>
-        <tr>
-          <th>Feature</th>
-          <th>Statistics</th>
-        </tr>
-      </thead>
-      <tbody id="stats-body"></tbody>
-    </table>
-  </div>
-  <div class="section" id="outlier-section">
-    <h2>Outlier analysis</h2>
-    <div class="toolbar">
-      <label>Scale
-        <select id="scale-mode">
-          <option value="raw">Raw values</option>
-          <option value="normalized">Z-score (mean ± std)</option>
-        </select>
-      </label>
+  <div class="viz-layout">
+    <div class="section" id="distribution-section">
+      <h2>Statistics overview</h2>
+      <div class="chart-container">
+        <div class="chart" id="distribution-chart" style="min-height: ${chart_height}px;"></div>
+      </div>
+      <ul class="feature-list" id="feature-list"></ul>
+      <div class="note" id="sampling-note"></div>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Feature</th>
+              <th>Statistics</th>
+            </tr>
+          </thead>
+          <tbody id="stats-body"></tbody>
+        </table>
+      </div>
     </div>
-    <div id="outlier-chart" style="height: ${chart_height}px;"></div>
-    <div class="feature-note">Use the checkboxes above to toggle columns in both charts.</div>
+    <div class="section" id="outlier-section">
+      <h2>Outlier analysis</h2>
+      <div class="toolbar">
+        <label>Scale
+          <select id="scale-mode">
+            <option value="raw">Raw values</option>
+            <option value="normalized">Z-score (mean ± std)</option>
+          </select>
+        </label>
+      </div>
+      <div class="chart-container">
+        <div class="chart" id="outlier-chart" style="min-height: ${chart_height}px;"></div>
+      </div>
+      <div class="feature-note">Use the checkboxes above to toggle columns in both charts.</div>
+    </div>
   </div>
   <script>
     const payload = $payload_json;
