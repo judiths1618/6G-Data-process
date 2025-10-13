@@ -18,6 +18,7 @@ import datetime as dt
 import math
 import shutil
 import fnmatch
+import statistics
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple, Iterable, Set
 from string import Template
@@ -25,13 +26,9 @@ from string import Template
 import glob
 
 try:
-    import matplotlib  # type: ignore
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt  # type: ignore
+    import plotly.graph_objects as go  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
-    matplotlib = None  # type: ignore
-    plt = None  # type: ignore
+    go = None  # type: ignore
 
 try:
     import apache_beam as beam  # type: ignore
@@ -1539,21 +1536,57 @@ def _format_stat_value(value: Optional[float]) -> str:
 def _plot_histogram(values: List[float], output_path: str, title: str, xlabel: str) -> None:
     if not values:
         return
-    if plt is None:
+    if go is None:
         raise RuntimeError(
-            "matplotlib is required to generate visualizations. Install matplotlib to enable this feature."
+            "Plotly is required to generate visualizations. Install plotly to enable this feature."
         )
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    fig, ax = plt.subplots(figsize=(8, 4.5))
     bins = max(10, min(50, int(math.sqrt(len(values)))))
-    ax.hist(values, bins=bins, color="#2a9d8f", edgecolor="black", alpha=0.75)
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Frequency")
-    ax.grid(True, linestyle="--", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
+    mean_val = statistics.fmean(values)
+    median_val = statistics.median(values)
+
+    fig = go.Figure(
+        data=[
+            go.Histogram(
+                x=values,
+                nbinsx=bins,
+                marker=dict(color="#2a9d8f", line=dict(color="#0b3d3f", width=0.6)),
+                opacity=0.85,
+                hovertemplate="Value: %{x}<br>Frequency: %{y}<extra></extra>",
+            )
+        ]
+    )
+    fig.update_layout(
+        title=title,
+        xaxis_title=xlabel,
+        yaxis_title="Frequency",
+        bargap=0.05,
+        template="plotly_white",
+        margin=dict(l=60, r=40, t=60, b=60),
+    )
+    fig.add_vline(
+        x=mean_val,
+        line=dict(color="#e76f51", dash="dash"),
+        annotation=dict(
+            text="Mean",
+            showarrow=False,
+            xanchor="left",
+            yanchor="bottom",
+            bgcolor="rgba(231,111,81,0.1)",
+        ),
+    )
+    fig.add_vline(
+        x=median_val,
+        line=dict(color="#264653", dash="dot"),
+        annotation=dict(
+            text="Median",
+            showarrow=False,
+            xanchor="right",
+            yanchor="top",
+            bgcolor="rgba(38,70,83,0.1)",
+        ),
+    )
+    fig.write_html(output_path, include_plotlyjs="cdn", full_html=True)
 
 
 def _plot_boxplot(
@@ -1565,9 +1598,9 @@ def _plot_boxplot(
 ) -> None:
     if not values:
         return
-    if plt is None:
+    if go is None:
         raise RuntimeError(
-            "matplotlib is required to generate visualizations. Install matplotlib to enable this feature."
+            "Plotly is required to generate visualizations. Install plotly to enable this feature."
         )
 
     bounds = summary.get("outlier_bounds", {}) if summary else {}
@@ -1581,38 +1614,64 @@ def _plot_boxplot(
     ]
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.boxplot(
-        values,
-        vert=False,
-        patch_artist=True,
-        boxprops={"facecolor": "#2a9d8f", "alpha": 0.6},
-        medianprops={"color": "#e76f51", "linewidth": 2},
-        whiskerprops={"color": "#264653"},
-        capprops={"color": "#264653"},
-        flierprops={
-            "marker": "o",
-            "markerfacecolor": "#e76f51",
-            "markeredgecolor": "#264653",
-            "alpha": 0.6,
-        },
+    fig = go.Figure()
+    fig.add_trace(
+        go.Box(
+            x=values,
+            orientation="h",
+            name="distribution",
+            boxpoints="outliers",
+            marker=dict(color="#2a9d8f", opacity=0.7),
+            line=dict(color="#264653"),
+            hovertemplate="Value: %{x}<extra></extra>",
+        )
     )
-    ax.set_title(f"{title} – outlier analysis")
-    ax.set_xlabel(xlabel)
-    ax.grid(True, axis="x", linestyle="--", alpha=0.3)
-    ax.text(
-        0.98,
-        0.02,
-        "\n".join(text_lines),
-        transform=ax.transAxes,
-        ha="right",
-        va="bottom",
-        fontsize=9,
-        bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.8},
+    lower = bounds.get("lower")
+    upper = bounds.get("upper")
+    if lower is not None:
+        fig.add_vline(
+            x=lower,
+            line=dict(color="#e9c46a", dash="dash"),
+            annotation=dict(
+                text="Lower fence",
+                showarrow=False,
+                bgcolor="rgba(233,196,106,0.15)",
+                xanchor="right",
+            ),
+        )
+    if upper is not None:
+        fig.add_vline(
+            x=upper,
+            line=dict(color="#e9c46a", dash="dash"),
+            annotation=dict(
+                text="Upper fence",
+                showarrow=False,
+                bgcolor="rgba(233,196,106,0.15)",
+                xanchor="left",
+            ),
+        )
+
+    fig.update_layout(
+        title=f"{title} – outlier analysis",
+        xaxis_title=xlabel,
+        template="plotly_white",
+        margin=dict(l=60, r=200, t=60, b=60),
+        showlegend=False,
     )
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
+    fig.add_annotation(
+        x=1.02,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        text="<br>".join(text_lines),
+        showarrow=False,
+        align="left",
+        bgcolor="rgba(248,250,252,0.95)",
+        bordercolor="#d0d7de",
+        borderwidth=1,
+        font=dict(size=11),
+    )
+    fig.write_html(output_path, include_plotlyjs="cdn", full_html=True)
 
 
 def _sample_for_interactive(values: List[float], limit: int = 1000) -> List[float]:
@@ -1921,8 +1980,8 @@ def create_feature_visualizations(
 ) -> Tuple[Dict[str, Dict[str, str]], Optional[str]]:
     if not per_file_numeric_values:
         return {}, "No numeric columns detected; skipping feature visualizations."
-    if plt is None:
-        return {}, "matplotlib is not installed; feature visualizations were skipped."
+    if go is None:
+        return {}, "Plotly is not installed; feature visualizations were skipped."
 
     visualization_root = os.path.join(dq_out, "visualizations")
     generated: Dict[str, Dict[str, str]] = {}
@@ -1939,13 +1998,13 @@ def create_feature_visualizations(
             desc = column_descriptions.get(col)
             if desc:
                 title = f"{title}\n{desc}"
-            output_path = os.path.join(visualization_root, safe_file, f"{safe_col}.png")
+            output_path = os.path.join(visualization_root, safe_file, f"{safe_col}.html")
             summary = summarize_numeric_values(values)
             _plot_histogram(values, output_path, title, col)
             generated.setdefault(file_path, {})[col] = os.path.relpath(output_path, dq_out)
 
             outlier_path = os.path.join(
-                visualization_root, safe_file, f"{safe_col}_outliers.png"
+                visualization_root, safe_file, f"{safe_col}_outliers.html"
             )
             _plot_boxplot(values, outlier_path, title, col, summary)
             generated[file_path][f"{col}_outliers"] = os.path.relpath(outlier_path, dq_out)
