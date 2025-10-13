@@ -4,6 +4,8 @@ import unittest
 
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+print(sys.path)
+
 
 from dq_local_beam import (
     DEFAULT_RULE,
