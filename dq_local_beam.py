@@ -1733,12 +1733,13 @@ def _render_combined_outlier_dashboard(payload: Dict[str, Any], output_path: str
       margin-top: 0;
       font-size: 1.75rem;
     }
-    .chart-container {
+    .section {
       border: 1px solid #d0d7de;
       background: #fff;
       border-radius: 8px;
       padding: 1rem;
       box-shadow: 0 1px 2px rgba(27, 31, 35, 0.05);
+      margin-bottom: 1.5rem;
     }
     .toolbar {
       display: flex;
@@ -1802,12 +1803,37 @@ def _render_combined_outlier_dashboard(payload: Dict[str, Any], output_path: str
       width: 100%;
       border: none;
     }
+    h2 {
+      font-size: 1.35rem;
+      margin: 0 0 1rem 0;
+    }
+    .feature-note {
+      margin-top: 0.75rem;
+      font-size: 0.85rem;
+      color: #57606a;
+    }
   </style>
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
   <h1>$page_title</h1>
-  <div class="chart-container">
+  <div class="section" id="distribution-section">
+    <h2>Distribution overview</h2>
+    <div id="distribution-chart" style="height: ${chart_height}px;"></div>
+    <ul class="feature-list" id="feature-list"></ul>
+    <div class="note" id="sampling-note"></div>
+    <table>
+      <thead>
+        <tr>
+          <th>Feature</th>
+          <th>Statistics</th>
+        </tr>
+      </thead>
+      <tbody id="stats-body"></tbody>
+    </table>
+  </div>
+  <div class="section" id="outlier-section">
+    <h2>Outlier analysis</h2>
     <div class="toolbar">
       <label>Scale
         <select id="scale-mode">
@@ -1817,21 +1843,12 @@ def _render_combined_outlier_dashboard(payload: Dict[str, Any], output_path: str
       </label>
     </div>
     <div id="outlier-chart" style="height: ${chart_height}px;"></div>
-    <ul class="feature-list" id="feature-list"></ul>
-    <div class="note" id="sampling-note"></div>
+    <div class="feature-note">Use the checkboxes above to toggle columns in both charts.</div>
   </div>
-  <table>
-    <thead>
-      <tr>
-        <th>Feature</th>
-        <th>Statistics</th>
-      </tr>
-    </thead>
-    <tbody id="stats-body"></tbody>
-  </table>
   <script>
     const payload = $payload_json;
     const chartId = 'outlier-chart';
+    const distributionChartId = 'distribution-chart';
     const featureList = document.getElementById('feature-list');
     const statsBody = document.getElementById('stats-body');
     const scaleSelect = document.getElementById('scale-mode');
@@ -1855,6 +1872,30 @@ def _render_combined_outlier_dashboard(payload: Dict[str, Any], output_path: str
       }
       return String(value);
     }
+
+    const distributionTraces = payload.columns.map((column, index) => {
+      const label = column.description ? (column.name + ' — ' + column.description) : column.name;
+      return {
+        type: 'histogram',
+        name: label,
+        x: column.samples.raw,
+        opacity: 0.65,
+        marker: { color: colors[index % colors.length] },
+        hovertemplate: label + '<br>value=%{x}<br>count=%{y}<extra></extra>'
+      };
+    });
+
+    const distributionLayout = {
+      barmode: 'overlay',
+      margin: { l: 80, r: 40, t: 10, b: 60 },
+      hovermode: 'closest',
+      xaxis: { title: 'Value', zeroline: true, zerolinecolor: '#adb5bd' },
+      yaxis: { title: 'Frequency', automargin: true },
+      paper_bgcolor: '#ffffff',
+      plot_bgcolor: '#ffffff'
+    };
+
+    Plotly.newPlot(distributionChartId, distributionTraces, distributionLayout, { displaylogo: false, responsive: true });
 
     const traces = payload.columns.map((column, index) => {
       const label = column.description ? (column.name + ' — ' + column.description) : column.name;
@@ -1905,6 +1946,7 @@ def _render_combined_outlier_dashboard(payload: Dict[str, Any], output_path: str
       checkbox.checked = true;
       checkbox.addEventListener('change', () => {
         Plotly.restyle(chartId, { visible: checkbox.checked ? true : 'legendonly' }, [index]);
+        Plotly.restyle(distributionChartId, { visible: checkbox.checked ? true : 'legendonly' }, [index]);
       });
       const text = document.createElement('span');
       text.textContent = column.name;
