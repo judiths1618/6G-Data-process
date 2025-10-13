@@ -13,12 +13,14 @@ import io
 import csv
 import re
 import json
+import html
 import datetime as dt
 import math
 import shutil
 import fnmatch
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple, Iterable, Set
+from string import Template
 
 import glob
 
@@ -1407,6 +1409,7 @@ def summarize_numeric_values(values: List[float]) -> Dict[str, Any]:
             "min": None,
             "max": None,
             "mean": None,
+            "stddev": None,
             "quantiles": [],
             "outlier_bounds": {
                 "quantiles": [],
@@ -1423,6 +1426,8 @@ def summarize_numeric_values(values: List[float]) -> Dict[str, Any]:
     min_val = min(values)
     max_val = max(values)
     mean_val = sum(values) / count
+    variance = sum((v - mean_val) ** 2 for v in values) / count if count > 0 else 0.0
+    stddev = math.sqrt(variance)
     quantiles = _quantiles_from_values(values)
 
     q1 = quantiles[1] if len(quantiles) >= 4 else None
@@ -1442,6 +1447,7 @@ def summarize_numeric_values(values: List[float]) -> Dict[str, Any]:
         "min": min_val,
         "max": max_val,
         "mean": mean_val,
+        "stddev": stddev,
         "quantiles": quantiles,
         "outlier_bounds": {
             "quantiles": quantiles,
@@ -1609,6 +1615,305 @@ def _plot_boxplot(
     plt.close(fig)
 
 
+def _sample_for_interactive(values: List[float], limit: int = 1000) -> List[float]:
+    if not values:
+        return []
+    sorted_values = sorted(values)
+    if len(sorted_values) <= limit:
+        return list(sorted_values)
+    step = len(sorted_values) / float(limit)
+    sampled: List[float] = []
+    cursor = 0.0
+    while len(sampled) < limit and int(cursor) < len(sorted_values):
+        sampled.append(sorted_values[int(cursor)])
+        cursor += step
+    if sampled[-1] != sorted_values[-1]:
+        sampled[-1] = sorted_values[-1]
+    return sampled
+
+
+def _collect_outlier_examples(
+    values: List[float], lower: Optional[float], upper: Optional[float], limit: int = 15
+) -> List[float]:
+    if not values:
+        return []
+    if lower is None and upper is None:
+        return []
+    examples: List[float] = []
+    for val in sorted(values):
+        if (lower is not None and val < lower) or (upper is not None and val > upper):
+            examples.append(val)
+            if len(examples) >= limit:
+                break
+    return examples
+
+
+def _render_combined_outlier_dashboard(payload: Dict[str, Any], output_path: str) -> None:
+    if not payload.get("columns"):
+        return
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    page_title = f"Outlier overview – {payload.get('file_label', 'dataset')}"
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    chart_height = max(300, 80 * len(payload.get("columns", [])))
+    template = Template(
+        """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>$page_title</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 1.5rem;
+      background: #f6f8fa;
+      color: #24292f;
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 1.75rem;
+    }
+    .chart-container {
+      border: 1px solid #d0d7de;
+      background: #fff;
+      border-radius: 8px;
+      padding: 1rem;
+      box-shadow: 0 1px 2px rgba(27, 31, 35, 0.05);
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      margin-bottom: 1rem;
+    }
+    select {
+      padding: 0.35rem 0.5rem;
+      border-radius: 4px;
+      border: 1px solid #d0d7de;
+      font-size: 0.95rem;
+    }
+    .feature-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin: 1rem 0;
+      padding: 0;
+      list-style: none;
+    }
+    .feature-list label {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      background: #e9f5f2;
+      border: 1px solid #b7e4d9;
+      border-radius: 6px;
+      padding: 0.35rem 0.6rem;
+      cursor: pointer;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 1.5rem;
+      background: #fff;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 1px 2px rgba(27, 31, 35, 0.05);
+    }
+    th, td {
+      padding: 0.6rem 0.75rem;
+      border-bottom: 1px solid #d8dee4;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f1f5f9;
+      width: 12rem;
+    }
+    tbody tr:nth-child(odd) td {
+      background: #f9fbfc;
+    }
+    .note {
+      margin-top: 1rem;
+      font-size: 0.85rem;
+      color: #57606a;
+    }
+    iframe {
+      width: 100%;
+      border: none;
+    }
+  </style>
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+<body>
+  <h1>$page_title</h1>
+  <div class="chart-container">
+    <div class="toolbar">
+      <label>Scale
+        <select id="scale-mode">
+          <option value="raw">Raw values</option>
+          <option value="normalized">Z-score (mean ± std)</option>
+        </select>
+      </label>
+    </div>
+    <div id="outlier-chart" style="height: ${chart_height}px;"></div>
+    <ul class="feature-list" id="feature-list"></ul>
+    <div class="note" id="sampling-note"></div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Feature</th>
+        <th>Statistics</th>
+      </tr>
+    </thead>
+    <tbody id="stats-body"></tbody>
+  </table>
+  <script>
+    const payload = $payload_json;
+    const chartId = 'outlier-chart';
+    const featureList = document.getElementById('feature-list');
+    const statsBody = document.getElementById('stats-body');
+    const scaleSelect = document.getElementById('scale-mode');
+    const samplingNote = document.getElementById('sampling-note');
+
+    const colors = ['#2a9d8f', '#264653', '#e76f51', '#f4a261', '#457b9d', '#ef476f', '#118ab2', '#073b4c'];
+
+    function formatNumber(value) {
+      if (value === null || value === undefined || Number.isNaN(value)) {
+        return 'N/A';
+      }
+      if (typeof value === 'number') {
+        const magnitude = Math.abs(value);
+        if (magnitude === 0) {
+          return '0';
+        }
+        if (magnitude >= 1000 || magnitude < 0.01) {
+          return value.toExponential(3);
+        }
+        return value.toFixed(3);
+      }
+      return String(value);
+    }
+
+    const traces = payload.columns.map((column, index) => {
+      const label = column.description ? (column.name + ' — ' + column.description) : column.name;
+      return {
+        type: 'box',
+        name: label,
+        x: column.samples.raw,
+        orientation: 'h',
+        boxpoints: 'outliers',
+        jitter: 0.4,
+        whiskerwidth: 0.2,
+        marker: { color: colors[index % colors.length], opacity: 0.7 },
+        line: { color: '#264653' },
+        hovertemplate: label + '<br>value=%{x}<extra></extra>'
+      };
+    });
+
+    const layout = {
+      margin: { l: 120, r: 40, t: 20, b: 60 },
+      showlegend: false,
+      hovermode: 'closest',
+      xaxis: { title: 'Value', zeroline: true, zerolinecolor: '#adb5bd' },
+      yaxis: { automargin: true },
+      paper_bgcolor: '#ffffff',
+      plot_bgcolor: '#ffffff'
+    };
+
+    Plotly.newPlot(chartId, traces, layout, { displaylogo: false, responsive: true });
+
+    function applyScale(mode) {
+      payload.columns.forEach((column, index) => {
+        const values = mode === 'normalized' ? column.samples.normalized : column.samples.raw;
+        Plotly.restyle(chartId, { x: [values] }, [index]);
+      });
+      const xTitle = mode === 'normalized' ? 'Z-score (mean = 0, std = 1)' : 'Value';
+      Plotly.relayout(chartId, { 'xaxis.title': xTitle });
+    }
+
+    scaleSelect.addEventListener('change', (event) => {
+      applyScale(event.target.value);
+    });
+
+    payload.columns.forEach((column, index) => {
+      const item = document.createElement('li');
+      const label = document.createElement('label');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = true;
+      checkbox.addEventListener('change', () => {
+        Plotly.restyle(chartId, { visible: checkbox.checked ? true : 'legendonly' }, [index]);
+      });
+      const text = document.createElement('span');
+      text.textContent = column.name;
+      label.appendChild(checkbox);
+      label.appendChild(text);
+      if (column.description) {
+        const desc = document.createElement('small');
+        desc.textContent = ' ' + column.description;
+        desc.style.fontSize = '0.75rem';
+        desc.style.color = '#4b5563';
+        label.appendChild(desc);
+      }
+      item.appendChild(label);
+      featureList.appendChild(item);
+
+      const statsRow = document.createElement('tr');
+      const featureCell = document.createElement('th');
+      featureCell.textContent = column.name;
+      if (column.description) {
+        const desc = document.createElement('div');
+        desc.textContent = column.description;
+        desc.style.fontSize = '0.8rem';
+        desc.style.color = '#4b5563';
+        featureCell.appendChild(desc);
+      }
+      const statsCell = document.createElement('td');
+      const statsLines = [
+        'Count: ' + column.stats.count,
+        'Min: ' + formatNumber(column.stats.min),
+        'Max: ' + formatNumber(column.stats.max),
+        'Mean: ' + formatNumber(column.stats.mean),
+        'Std dev: ' + formatNumber(column.stats.stddev),
+        'Q1: ' + formatNumber(column.stats.q1),
+        'Median: ' + formatNumber(column.stats.q2),
+        'Q3: ' + formatNumber(column.stats.q3),
+        'IQR: ' + formatNumber(column.stats.iqr),
+        'Lower fence: ' + formatNumber(column.stats.lower),
+        'Upper fence: ' + formatNumber(column.stats.upper),
+        'Outliers detected: ' + column.stats.outlier_count
+      ];
+      if (column.outliers.examples.length) {
+        statsLines.push('Outlier samples: ' + column.outliers.examples.map(formatNumber).join(', '));
+      }
+      statsCell.textContent = statsLines.join('\n');
+      statsCell.style.whiteSpace = 'pre-line';
+      statsRow.appendChild(featureCell);
+      statsRow.appendChild(statsCell);
+      statsBody.appendChild(statsRow);
+    });
+
+    if (payload.notes && payload.notes.sampled) {
+      samplingNote.textContent = payload.notes.sampled;
+    }
+
+    applyScale('raw');
+  </script>
+</body>
+</html>
+"""
+    )
+    html_doc = template.safe_substitute(
+        page_title=html.escape(page_title),
+        chart_height=chart_height,
+        payload_json=payload_json,
+    )
+    with open(output_path, "w", encoding="utf-8") as fp:
+        fp.write(html_doc)
+
 def create_feature_visualizations(
     per_file_numeric_values: Dict[str, Dict[str, List[float]]],
     dq_out: str,
@@ -1624,6 +1929,8 @@ def create_feature_visualizations(
 
     for file_path, col_values in sorted(per_file_numeric_values.items()):
         safe_file = _safe_component_name(file_path)
+        interactive_columns: List[Dict[str, Any]] = []
+        sampled_flag = False
         for col, values in sorted(col_values.items()):
             if not values:
                 continue
@@ -1642,6 +1949,65 @@ def create_feature_visualizations(
             )
             _plot_boxplot(values, outlier_path, title, col, summary)
             generated[file_path][f"{col}_outliers"] = os.path.relpath(outlier_path, dq_out)
+
+            samples_raw = _sample_for_interactive(values)
+            if samples_raw and len(samples_raw) < len(values):
+                sampled_flag = True
+            stddev = summary.get("stddev") or 0.0
+            mean_val = summary.get("mean") or 0.0
+            if stddev:
+                samples_norm = [(v - mean_val) / stddev for v in samples_raw]
+            else:
+                samples_norm = [0.0 for _ in samples_raw]
+            bounds = summary.get("outlier_bounds", {}) if summary else {}
+            outlier_examples = _collect_outlier_examples(
+                values, bounds.get("lower"), bounds.get("upper")
+            )
+            interactive_columns.append(
+                {
+                    "name": col,
+                    "description": desc,
+                    "samples": {"raw": samples_raw, "normalized": samples_norm},
+                    "stats": {
+                        "count": summary.get("count"),
+                        "min": summary.get("min"),
+                        "max": summary.get("max"),
+                        "mean": summary.get("mean"),
+                        "stddev": summary.get("stddev"),
+                        "q1": bounds.get("q1"),
+                        "q2": (summary.get("quantiles") or [None, None, None])[2]
+                        if summary.get("quantiles")
+                        else None,
+                        "q3": bounds.get("q3"),
+                        "iqr": bounds.get("iqr"),
+                        "lower": bounds.get("lower"),
+                        "upper": bounds.get("upper"),
+                        "outlier_count": summary.get("outlier_count", 0),
+                    },
+                    "outliers": {
+                        "examples": outlier_examples,
+                    },
+                }
+            )
+
+        if interactive_columns:
+            dashboard_payload: Dict[str, Any] = {
+                "file": file_path,
+                "file_label": os.path.basename(file_path) or file_path,
+                "columns": interactive_columns,
+                "notes": {},
+            }
+            if sampled_flag:
+                dashboard_payload["notes"][
+                    "sampled"
+                ] = "Interactive view shows an evenly spaced sample of up to 1,000 values per feature."
+            dashboard_path = os.path.join(
+                visualization_root, safe_file, "combined_outliers.html"
+            )
+            _render_combined_outlier_dashboard(dashboard_payload, dashboard_path)
+            generated.setdefault(file_path, {})[
+                "combined_outliers_dashboard"
+            ] = os.path.relpath(dashboard_path, dq_out)
 
     return generated, None
 
@@ -1721,6 +2087,7 @@ def write_quality_report(
                 "min": stats.get("min"),
                 "max": stats.get("max"),
                 "mean": stats.get("mean"),
+                "stddev": stats.get("stddev"),
                 "quantiles": stats.get("quantiles"),
                 "outliers": {
                     "count": stats.get("outlier_count"),

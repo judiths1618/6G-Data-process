@@ -27,6 +27,29 @@ The sequential engine produces the same outputs (good rows, rejected rows,
 and data-quality profiles) without requiring any Beam dependencies, although
 it runs in a single process so very large datasets may take longer to finish.
 
+## Interactive quality dashboard
+
+To generate a browsable HTML report that consolidates the feature
+distributions and outlier analysis for each input table, use the
+`quality_dashboard.py` helper. The script runs the data-quality pipeline using
+the requested engine and then assembles an interactive dashboard that includes
+per-feature histograms, unified outlier visualizations, and the structured
+quality summary.
+
+```
+python quality_dashboard.py \
+  --input_pattern "6GDALI_Datasets/EUR/6907619/*.csv" \
+  --config eur_dq_rules.yaml \
+  --output_root out/dashboard/eur6907619 \
+  --engine sequential \
+  --open-browser
+```
+
+The dashboard is saved as `interactive_report.html` inside the data-quality
+output directory (for example `out/dashboard/eur6907619/dq`). Passing the
+`--open-browser` flag automatically opens the resulting report in the default
+browser once generation completes.
+
 ## Benchmarking the engines
 
 To compare the runtime of the sequential fallback against the Apache Beam
