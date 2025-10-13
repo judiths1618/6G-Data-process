@@ -56,10 +56,14 @@ def _build_issue_summary(issue_summary: List[Dict[str, Any]]) -> str:
     return "\n".join(rows)
 
 
-def _summarize_numeric_columns(numeric_columns: Dict[str, Any]) -> str:
+def _summarize_numeric_columns(
+    numeric_columns: Dict[str, Any],
+    visualization_links: Dict[str, str] | None = None,
+) -> str:
     if not numeric_columns:
         return "<p>No numeric features detected.</p>"
 
+    visualization_links = visualization_links or {}
     rows: List[str] = [
         "<table class=\"features\">",
         "  <thead><tr><th>Feature</th><th>Stats</th><th>Outliers</th><th>Visualization</th></tr></thead>",
@@ -98,14 +102,16 @@ def _summarize_numeric_columns(numeric_columns: Dict[str, Any]) -> str:
                 header=header,
                 profile=html.escape("\n".join(profile)),
                 fences=html.escape(fences),
-                viz=_render_distribution_viz(stats),
+                viz=_render_distribution_viz(name, stats, visualization_links),
             )
         )
     rows.extend(["  </tbody>", "</table>"])
     return "\n".join(rows)
 
 
-def _render_distribution_viz(stats: Dict[str, Any]) -> str:
+def _render_distribution_viz(
+    feature_name: str, stats: Dict[str, Any], visualization_links: Dict[str, str]
+) -> str:
     min_val = stats.get("min")
     max_val = stats.get("max")
     if min_val is None or max_val is None:
@@ -255,10 +261,27 @@ def _render_distribution_viz(stats: Dict[str, Any]) -> str:
     if histogram_elements:
         classes.append("sparkline-wrapper--split")
 
+    distribution_href = visualization_links.get(feature_name)
+    outlier_href = visualization_links.get(f"{feature_name}_outliers")
+
+    hist_block = "".join(histogram_elements)
+    if hist_block and distribution_href:
+        hist_block = "<a class=\"sparkline-link\" href=\"{href}\" target=\"_blank\" rel=\"noopener\" title=\"Open interactive distribution\">{content}</a>".format(
+            href=html.escape(distribution_href, quote=True),
+            content=hist_block,
+        )
+
+    box_block = "".join(elements)
+    if box_block and outlier_href:
+        box_block = "<a class=\"sparkline-link\" href=\"{href}\" target=\"_blank\" rel=\"noopener\" title=\"Open interactive outlier view\">{content}</a>".format(
+            href=html.escape(outlier_href, quote=True),
+            content=box_block,
+        )
+
     return "<div class=\"{classes}\">{hist}{box}{badge}</div>".format(
         classes=" ".join(classes),
-        hist="".join(histogram_elements),
-        box="".join(elements),
+        hist=hist_block,
+        box=box_block,
         badge=badge,
     )
 
@@ -270,6 +293,8 @@ def _relpath(from_path: str, to_path: str) -> str:
 def _build_dashboard(report: Dict[str, Any], dq_out: str) -> str:
     index_path = os.path.join(dq_out, "interactive_report.html")
     os.makedirs(os.path.dirname(index_path), exist_ok=True)
+
+    feature_registry: List[Dict[str, Any]] = []
 
     lines: List[str] = [
         "<!DOCTYPE html>",
@@ -306,6 +331,36 @@ def _build_dashboard(report: Dict[str, Any], dq_out: str) -> str:
         "    .sparkline-median { stroke: #1d4ed8; stroke-width: 2; }",
         "    .sparkline-fence { stroke: #f97316; stroke-width: 1.5; stroke-dasharray: 4 3; }",
         "    .sparkline-meta { font-size: 0.8rem; color: #475569; }",
+        "    .sparkline-link { display: block; border-radius: 8px; padding: 0.2rem 0.25rem; transition: box-shadow 0.15s ease, transform 0.15s ease; text-decoration: none; color: inherit; }",
+        "    .sparkline-link:hover { box-shadow: 0 0 0 3px rgba(37,99,235,0.2); transform: translateY(-1px); }",
+        "    .sparkline-link:focus { outline: none; box-shadow: 0 0 0 3px rgba(37,99,235,0.35); }",
+        "    .overview { margin-top: 2.5rem; }",
+        "    .overview-card { background: #fff; border-radius: 12px; padding: 1.5rem; box-shadow: 0 1px 3px rgba(15,23,42,0.1); }",
+        "    .overview-card h2 { margin-top: 0; }",
+        "    .overview-intro { margin: 0 0 1rem 0; color: #475569; }",
+        "    .overview-layout { display: grid; gap: 1.5rem; grid-template-columns: minmax(240px, 320px) 1fr; align-items: stretch; }",
+        "    .feature-library { border: 1px solid #d8dee4; border-radius: 10px; background: #f8fafc; padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem; max-height: 420px; overflow: auto; }",
+        "    .feature-library h3 { margin: 0; font-size: 1rem; color: #1f2937; }",
+        "    .feature-library p { margin: 0; font-size: 0.85rem; color: #475569; }",
+        "    .feature-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.6rem; }",
+        "    .feature-item { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.55rem 0.75rem; cursor: grab; display: flex; flex-direction: column; gap: 0.2rem; transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease; }",
+        "    .feature-item strong { font-size: 0.95rem; color: #1f2937; }",
+        "    .feature-item span { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: #475569; }",
+        "    .feature-item__desc { font-size: 0.75rem; color: #64748b; }",
+        "    .feature-item:hover { border-color: #94a3b8; box-shadow: 0 6px 14px rgba(148,163,184,0.25); transform: translateY(-1px); }",
+        "    .feature-item--dragging { opacity: 0.6; }",
+        "    .comparison-dropzone { border: 2px dashed #cbd5f5; border-radius: 12px; background: #f1f5f9; padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.85rem; min-height: 420px; transition: border-color 0.2s ease, background 0.2s ease; }",
+        "    .comparison-dropzone h3 { margin: 0; font-size: 1.05rem; }",
+        "    .comparison-dropzone p { margin: 0; font-size: 0.85rem; color: #475569; }",
+        "    .comparison-dropzone--hover { border-color: #2563eb; background: #e0ecff; }",
+        "    .comparison-dropzone--active { border-style: solid; border-color: #2563eb; background: #eff6ff; }",
+        "    .comparison-selection { display: flex; flex-wrap: wrap; gap: 0.5rem; }",
+        "    .feature-chip { background: #2563eb; color: #fff; border: none; border-radius: 999px; padding: 0.35rem 0.85rem; font-size: 0.8rem; display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer; box-shadow: 0 4px 10px rgba(37,99,235,0.25); }",
+        "    .feature-chip__remove { font-weight: 600; font-size: 1.05rem; line-height: 1; }",
+        "    .feature-chip:hover { background: #1d4ed8; }",
+        "    .comparison-chart { flex: 1; min-height: 320px; border-radius: 10px; background: #fff; box-shadow: inset 0 0 0 1px #e2e8f0; overflow: hidden; }",
+        "    .comparison-placeholder { color: #64748b; display: flex; align-items: center; justify-content: center; height: 100%; font-size: 0.95rem; text-align: center; padding: 1rem; }",
+        "    @media (max-width: 900px) { .overview-layout { grid-template-columns: 1fr; } .feature-library { max-height: none; } .comparison-dropzone { min-height: 360px; } }",
         "    iframe { width: 100%; min-height: 420px; border: none; box-shadow: 0 1px 3px rgba(15,23,42,0.1); border-radius: 10px; margin-top: 1rem; background: #fff; }",
         "    .viz-links { margin-top: 0.75rem; display: flex; flex-wrap: wrap; gap: 0.75rem; }",
         "    .viz-links a { background: #e9f5f2; border: 1px solid #b7e4d9; border-radius: 6px; padding: 0.4rem 0.6rem; text-decoration: none; color: #1f2933; font-size: 0.9rem; }",
@@ -331,6 +386,29 @@ def _build_dashboard(report: Dict[str, Any], dq_out: str) -> str:
         "    </div>",
         "  </header>",
         "  <main>",
+        "    <section class=\"overview\">",
+        "      <div class=\"overview-card\">",
+        "        <h2>Overview comparison lab</h2>",
+        "        <p class=\"overview-intro\">Drag important numeric features into the comparison board to explore multi-feature distribution overlays. Click a chip to remove it.</p>",
+        "        <div class=\"overview-layout\">",
+        "          <div class=\"feature-library\">",
+        "            <h3>Feature library</h3>",
+        "            <p>Select and drag features into the board.</p>",
+        "            <ul class=\"feature-list\" id=\"feature-library-list\"></ul>",
+        "          </div>",
+        "          <div class=\"comparison-dropzone\" id=\"comparison-dropzone\">",
+        "            <div>",
+        "              <h3>Comparison board</h3>",
+        "              <p>Drop features here to build interactive comparisons.</p>",
+        "            </div>",
+        "            <div class=\"comparison-selection\" id=\"comparison-selection\"></div>",
+        "            <div class=\"comparison-chart\" id=\"comparison-chart\">",
+        "              <div class=\"comparison-placeholder\">Drag features into the board to compare their distributions.</div>",
+        "            </div>",
+        "          </div>",
+        "        </div>",
+        "      </div>",
+        "    </section>",
         "    <section>",
         "      <h2>Issue summary</h2>",
         _build_issue_summary(report.get("issue_summary", [])),
@@ -339,28 +417,33 @@ def _build_dashboard(report: Dict[str, Any], dq_out: str) -> str:
 
     for file_entry in report.get("per_file", []):
         file_name = file_entry.get("file", "(unknown)")
-        visualizations = file_entry.get("visualizations") or {}
+        raw_visualizations = file_entry.get("visualizations") or {}
+        resolved_visualizations: Dict[str, str] = {}
+        for key, rel_path in raw_visualizations.items():
+            resolved_visualizations[key] = _relpath(index_path, os.path.join(dq_out, rel_path))
         numeric_columns = file_entry.get("numeric_columns") or {}
-        combined_dashboard = visualizations.get("combined_outliers_dashboard")
+        combined_dashboard = resolved_visualizations.get("combined_outliers_dashboard")
         lines.extend(
             [
                 "    <section>",
                 "      <h2>{}</h2>".format(html.escape(str(file_name))),
                 "      <p>Good rows: {}</p>".format(file_entry.get("good_rows", 0)),
-                _summarize_numeric_columns(numeric_columns),
+                _summarize_numeric_columns(numeric_columns, resolved_visualizations),
             ]
         )
         if combined_dashboard:
-            combined_path = os.path.join(dq_out, combined_dashboard)
-            rel = _relpath(index_path, combined_path)
-            lines.append("      <iframe src=\"{}\" title=\"Combined outlier view\"></iframe>".format(rel))
+            lines.append(
+                "      <iframe src=\"{}\" title=\"Combined outlier view\"></iframe>".format(
+                    combined_dashboard
+                )
+            )
         other_links: List[str] = []
-        for feature_name, rel_path in sorted(visualizations.items()):
+        for feature_name, rel_path in sorted(resolved_visualizations.items()):
             if feature_name == "combined_outliers_dashboard":
                 continue
             other_links.append(
                 "<a href=\"{href}\" target=\"_blank\">{label}</a>".format(
-                    href=_relpath(index_path, os.path.join(dq_out, rel_path)),
+                    href=rel_path,
                     label=html.escape(str(feature_name)),
                 )
             )
@@ -368,12 +451,288 @@ def _build_dashboard(report: Dict[str, Any], dq_out: str) -> str:
             lines.append("      <div class=\"viz-links\">{}</div>".format("".join(other_links)))
         lines.append("    </section>")
 
+        for feature_name, stats in sorted(numeric_columns.items()):
+            distribution = stats.get("distribution") or stats.get("histogram") or {}
+            edges = distribution.get("edges") or []
+            counts = distribution.get("counts") or []
+            if not (len(edges) == len(counts) + 1 and counts):
+                continue
+            quantiles = stats.get("quantiles") or []
+            feature_registry.append(
+                {
+                    "id": f"{file_name}::{feature_name}",
+                    "file": file_name,
+                    "file_label": os.path.basename(file_name) or file_name,
+                    "feature": feature_name,
+                    "description": stats.get("description"),
+                    "distribution": distribution,
+                    "stats": {
+                        "count": stats.get("count"),
+                        "min": stats.get("min"),
+                        "max": stats.get("max"),
+                        "mean": stats.get("mean"),
+                        "stddev": stats.get("stddev"),
+                        "q1": quantiles[1] if len(quantiles) >= 4 else None,
+                        "median": quantiles[2] if len(quantiles) >= 3 else None,
+                        "q3": quantiles[3] if len(quantiles) >= 4 else None,
+                        "outliers": (stats.get("outliers") or {}).get("count"),
+                    },
+                    "links": {
+                        "distribution": resolved_visualizations.get(feature_name),
+                        "outliers": resolved_visualizations.get(f"{feature_name}_outliers"),
+                    },
+                }
+            )
+
     lines.extend(
         [
             "  </main>",
             "  <footer>",
             "    Generated by <code>quality_dashboard.py</code>. Re-run the script with a new dataset to refresh this report.",
             "  </footer>",
+        ]
+    )
+
+    feature_registry_json = html.escape(json.dumps(feature_registry), quote=False)
+    comparison_script = textwrap.dedent(
+        """
+        (function() {
+          const registryEl = document.getElementById('feature-registry');
+          if (!registryEl) {
+            return;
+          }
+          let features = [];
+          try {
+            features = JSON.parse(registryEl.textContent || '[]');
+          } catch (error) {
+            console.warn('Unable to parse feature registry', error);
+            return;
+          }
+          if (!Array.isArray(features) || !features.length) {
+            return;
+          }
+          if (typeof Plotly === 'undefined') {
+            console.warn('Plotly library is not available. Feature comparisons are disabled.');
+            return;
+          }
+
+          const libraryList = document.getElementById('feature-library-list');
+          const dropzone = document.getElementById('comparison-dropzone');
+          const selection = document.getElementById('comparison-selection');
+          const chartId = 'comparison-chart';
+          const chartContainer = document.getElementById(chartId);
+          const emptyHtml = '<div class="comparison-placeholder">Drag features into the board to compare their distributions.</div>';
+          const palette = ['#2563eb', '#dc2626', '#16a34a', '#9333ea', '#f97316', '#0f766e', '#1d4ed8', '#a16207', '#0891b2'];
+          const active = new Map();
+
+          function renderLibraryItem(feature) {
+            const item = document.createElement('li');
+            item.className = 'feature-item';
+            item.draggable = true;
+            item.dataset.featureId = feature.id;
+            const title = document.createElement('strong');
+            title.textContent = feature.feature;
+            const origin = document.createElement('span');
+            origin.textContent = feature.file_label;
+            item.appendChild(title);
+            item.appendChild(origin);
+            if (feature.description) {
+              const desc = document.createElement('div');
+              desc.className = 'feature-item__desc';
+              desc.textContent = feature.description;
+              item.appendChild(desc);
+            }
+            item.addEventListener('dragstart', (event) => {
+              item.classList.add('feature-item--dragging');
+              if (event.dataTransfer) {
+                event.dataTransfer.effectAllowed = 'copy';
+                event.dataTransfer.setData('application/json', JSON.stringify(feature));
+                event.dataTransfer.setData('text/plain', feature.id);
+              }
+            });
+            item.addEventListener('dragend', () => {
+              item.classList.remove('feature-item--dragging');
+            });
+            return item;
+          }
+
+          function ensurePlaceholder() {
+            if (!chartContainer) {
+              return;
+            }
+            chartContainer.innerHTML = emptyHtml;
+          }
+
+          function renderSelection() {
+            if (!selection) {
+              return;
+            }
+            selection.innerHTML = '';
+            active.forEach((feature) => {
+              const chip = document.createElement('button');
+              chip.type = 'button';
+              chip.className = 'feature-chip';
+              chip.dataset.featureId = feature.id;
+              chip.textContent = feature.feature + ' • ' + feature.file_label;
+              const remove = document.createElement('span');
+              remove.className = 'feature-chip__remove';
+              remove.setAttribute('aria-hidden', 'true');
+              remove.textContent = '×';
+              chip.appendChild(remove);
+              chip.addEventListener('click', () => {
+                active.delete(feature.id);
+                renderSelection();
+                updateChart();
+              });
+              chip.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  active.delete(feature.id);
+                  renderSelection();
+                  updateChart();
+                }
+              });
+              selection.appendChild(chip);
+            });
+          }
+
+          function updateChart() {
+            if (!chartContainer) {
+              return;
+            }
+            if (!active.size) {
+              Plotly.purge(chartId);
+              ensurePlaceholder();
+              if (dropzone) {
+                dropzone.classList.remove('comparison-dropzone--active');
+              }
+              return;
+            }
+
+            const traces = [];
+            let idx = 0;
+            active.forEach((feature) => {
+              const distribution = feature.distribution || {};
+              const edges = Array.isArray(distribution.edges) ? distribution.edges : [];
+              const counts = Array.isArray(distribution.counts) ? distribution.counts : [];
+              if (!edges.length || edges.length !== counts.length + 1) {
+                return;
+              }
+              const midpoints = [];
+              const normalized = [];
+              let maxCount = 0;
+              counts.forEach((val) => {
+                const parsed = Number(val);
+                if (!Number.isNaN(parsed)) {
+                  maxCount = Math.max(maxCount, parsed);
+                }
+              });
+              if (!maxCount) {
+                return;
+              }
+              for (let i = 0; i < counts.length; i += 1) {
+                const left = Number(edges[i]);
+                const right = Number(edges[i + 1]);
+                if (Number.isNaN(left) || Number.isNaN(right)) {
+                  continue;
+                }
+                midpoints.push((left + right) / 2);
+                normalized.push(Number(counts[i]) / maxCount);
+              }
+              if (!midpoints.length) {
+                return;
+              }
+              traces.push({
+                x: midpoints,
+                y: normalized,
+                mode: 'lines',
+                name: feature.feature + ' (' + feature.file_label + ')',
+                line: { shape: 'spline', width: 2.5, color: palette[idx % palette.length] },
+                hovertemplate: '<b>' + feature.feature + '</b><br>Value=%{x}<br>Normalized count=%{y:.2f}<extra></extra>',
+              });
+              idx += 1;
+            });
+
+            if (!traces.length) {
+              Plotly.purge(chartId);
+              ensurePlaceholder();
+              if (dropzone) {
+                dropzone.classList.remove('comparison-dropzone--active');
+              }
+              return;
+            }
+
+            Plotly.react(
+              chartId,
+              traces,
+              {
+                margin: { l: 60, r: 40, t: 40, b: 60 },
+                hovermode: 'closest',
+                template: 'plotly_white',
+                legend: { orientation: 'h', y: -0.2 },
+                xaxis: { title: 'Value', zeroline: false },
+                yaxis: { title: 'Normalized frequency', rangemode: 'tozero' },
+                paper_bgcolor: '#ffffff',
+                plot_bgcolor: '#ffffff',
+              },
+              { displaylogo: false, responsive: true }
+            );
+            if (dropzone) {
+              dropzone.classList.add('comparison-dropzone--active');
+            }
+          }
+
+          features.forEach((feature) => {
+            if (!libraryList) {
+              return;
+            }
+            libraryList.appendChild(renderLibraryItem(feature));
+          });
+
+          if (dropzone) {
+            dropzone.addEventListener('dragover', (event) => {
+              event.preventDefault();
+              dropzone.classList.add('comparison-dropzone--hover');
+            });
+            dropzone.addEventListener('dragleave', () => {
+              dropzone.classList.remove('comparison-dropzone--hover');
+            });
+            dropzone.addEventListener('drop', (event) => {
+              event.preventDefault();
+              dropzone.classList.remove('comparison-dropzone--hover');
+              let payload = null;
+              if (event.dataTransfer) {
+                payload = event.dataTransfer.getData('application/json');
+              }
+              if (!payload) {
+                return;
+              }
+              try {
+                const feature = JSON.parse(payload);
+                if (!feature || !feature.id || active.has(feature.id)) {
+                  return;
+                }
+                active.set(feature.id, feature);
+                renderSelection();
+                updateChart();
+              } catch (error) {
+                console.warn('Unable to activate feature', error);
+              }
+            });
+          }
+
+          ensurePlaceholder();
+        })();
+        """
+    ).strip()
+
+    lines.extend(
+        [
+            "  <script src=\"https://cdn.plot.ly/plotly-2.27.0.min.js\"></script>",
+            "  <script id=\"feature-registry\" type=\"application/json\">{}</script>".format(
+                feature_registry_json
+            ),
+            "  <script>{}</script>".format(comparison_script),
             "</body>",
             "</html>",
         ]
