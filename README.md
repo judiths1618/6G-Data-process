@@ -16,7 +16,7 @@ pure-Python fallback engine:
 ```
 python dq_local_beam.py \
   --input_pattern "6GDALI_Datasets/EUR/6907619/*.csv" \
-  --config dq_rules.yaml \
+  --config eur_dq_rules.yaml \
   --good_out out/good/eur6907619 \
   --bad_out out/bad/eur6907619 \
   --dq_out out/dq/eur6907619 \
