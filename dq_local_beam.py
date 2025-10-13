@@ -1813,6 +1813,119 @@ def gather_column_descriptions(rules: List[Dict[str, Any]]) -> Dict[str, str]:
     return descriptions
 
 
+def evaluate_metadata_prerequisites(
+    rules: List[Dict[str, Any]], files: List[str]
+) -> Tuple[bool, List[Dict[str, Any]]]:
+    """Validate that every input file has metadata available.
+
+    Returns a tuple of (metadata_complete, notifications). When metadata is
+    missing for any file, ``metadata_complete`` will be ``False`` and
+    ``notifications`` will contain structured messages describing the missing
+    metadata. When all files have metadata definitions the function returns
+    ``(True, [])``.
+    """
+
+    if not files:
+        return True, []
+
+    missing: List[str] = []
+    has_metadata = False
+
+    for path in files:
+        rule = pick_rule(rules, path)
+        metadata_cols = _resolve_metadata_columns(rule, path)
+        if metadata_cols:
+            has_metadata = True
+        else:
+            missing.append(path)
+
+    if not missing:
+        return True, []
+
+    notifications: List[Dict[str, Any]] = []
+
+    if len(missing) == len(files) and not has_metadata:
+        notifications.append(
+            {
+                "type": "missing_metadata",
+                "scope": "dataset",
+                "message": "No metadata descriptions were found for any of the input files.",
+                "files": missing,
+            }
+        )
+    else:
+        for path in missing:
+            notifications.append(
+                {
+                    "type": "missing_metadata",
+                    "scope": "file",
+                    "file": path,
+                    "message": "Metadata description is missing; data quality verification was skipped.",
+                }
+            )
+
+    return False, notifications
+
+
+def _write_metadata_notifications(
+    dq_out: str, notifications: List[Dict[str, Any]]
+) -> Optional[str]:
+    if not notifications:
+        return None
+    os.makedirs(dq_out, exist_ok=True)
+    lines = [json.dumps(note, ensure_ascii=False) for note in notifications]
+    return _write_single_shard(
+        os.path.join(dq_out, "metadata_notifications"),
+        ".jsonl",
+        lines,
+    )
+
+
+def _write_metadata_block_report(
+    dq_out: str,
+    input_pattern: str,
+    matched_files: List[str],
+    notifications: List[Dict[str, Any]],
+) -> None:
+    timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+    _write_metadata_notifications(dq_out, notifications)
+
+    summary = {
+        "input_pattern": input_pattern,
+        "files_processed": 0,
+        "total_good_rows": 0,
+        "total_issue_records": 0,
+        "issue_summary": complete_issue_dimensions([]),
+        "bad_issue_samples": [],
+        "per_file": [],
+        "status": "blocked",
+        "blocked_reason": "missing_metadata",
+        "metadata_notifications": notifications,
+        "generated_at": timestamp,
+    }
+
+    _write_single_shard(
+        os.path.join(dq_out, "quality_report"),
+        ".json",
+        [json.dumps(summary, ensure_ascii=False, indent=2)],
+    )
+
+    execution_log = {
+        "input_pattern": input_pattern,
+        "matched_files": matched_files,
+        "status": "blocked",
+        "blocked_reason": "missing_metadata",
+        "metadata_notifications": notifications,
+        "generated_at": timestamp,
+    }
+
+    _write_single_shard(
+        os.path.join(dq_out, "execution_log"),
+        ".json",
+        [json.dumps(execution_log, ensure_ascii=False, indent=2)],
+    )
+
+
 def classify_issue(reason: str) -> Tuple[str, str]:
     """Map a failure reason to a (dimension, scenario) tuple."""
     if not reason:
@@ -1913,6 +2026,11 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
     matched_files = sorted(glob.glob(input_pattern, recursive=True))
     if not matched_files:
         raise FileNotFoundError(f"No files matched input pattern: {input_pattern}")
+
+    metadata_ready, notifications = evaluate_metadata_prerequisites(rules, matched_files)
+    if not metadata_ready:
+        _write_metadata_block_report(dq_out, input_pattern, matched_files, notifications)
+        return
 
     opts = PipelineOptions(runner="DirectRunner", save_main_session=True, streaming=False)
     with beam.Pipeline(options=opts) as p:
@@ -2148,6 +2266,11 @@ def _run_without_beam(
     matched_files = sorted(glob.glob(input_pattern, recursive=True))
     if not matched_files:
         raise FileNotFoundError(f"No files matched input pattern: {input_pattern}")
+
+    metadata_ready, notifications = evaluate_metadata_prerequisites(rules, matched_files)
+    if not metadata_ready:
+        _write_metadata_block_report(dq_out, input_pattern, matched_files, notifications)
+        return
 
     os.makedirs(dq_out, exist_ok=True)
 
