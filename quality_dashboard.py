@@ -62,7 +62,7 @@ def _summarize_numeric_columns(numeric_columns: Dict[str, Any]) -> str:
 
     rows: List[str] = [
         "<table class=\"features\">",
-        "  <thead><tr><th>Feature</th><th>Stats</th><th>Outliers</th></tr></thead>",
+        "  <thead><tr><th>Feature</th><th>Stats</th><th>Outliers</th><th>Visualization</th></tr></thead>",
         "  <tbody>",
     ]
     for name, stats in sorted(numeric_columns.items()):
@@ -94,14 +94,130 @@ def _summarize_numeric_columns(numeric_columns: Dict[str, Any]) -> str:
             """
         ).strip()
         rows.append(
-            "    <tr><th>{header}</th><td><pre>{profile}</pre></td><td><pre>{fences}</pre></td></tr>".format(
+            "    <tr><th>{header}</th><td><pre>{profile}</pre></td><td><pre>{fences}</pre></td><td>{viz}</td></tr>".format(
                 header=header,
                 profile=html.escape("\n".join(profile)),
                 fences=html.escape(fences),
+                viz=_render_distribution_viz(stats),
             )
         )
     rows.extend(["  </tbody>", "</table>"])
     return "\n".join(rows)
+
+
+def _render_distribution_viz(stats: Dict[str, Any]) -> str:
+    min_val = stats.get("min")
+    max_val = stats.get("max")
+    if min_val is None or max_val is None:
+        return "<div class=\"sparkline-wrapper sparkline-wrapper--empty\">Not available</div>"
+
+    quantiles = stats.get("quantiles") or []
+    q1 = quantiles[1] if len(quantiles) >= 4 else min_val
+    median = quantiles[2] if len(quantiles) >= 3 else (min_val + max_val) / 2 if min_val is not None and max_val is not None else None
+    q3 = quantiles[3] if len(quantiles) >= 4 else max_val
+    outliers = stats.get("outliers") or {}
+    lower_fence = outliers.get("lower_fence")
+    upper_fence = outliers.get("upper_fence")
+    outlier_count = outliers.get("count")
+
+    width = 220
+    height = 36
+    padding = 12
+    span = max(max_val - min_val, 1e-9)
+
+    def _scale(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return padding + (float(value) - float(min_val)) / span * (width - 2 * padding)
+        except (TypeError, ValueError):
+            return None
+
+    x_min = _scale(min_val)
+    x_max = _scale(max_val)
+    x_q1 = _scale(q1)
+    x_median = _scale(median)
+    x_q3 = _scale(q3)
+    x_lower_fence = _scale(lower_fence)
+    x_upper_fence = _scale(upper_fence)
+
+    elements: List[str] = [
+        f"<svg class=\"sparkline\" viewBox=\"0 0 {width} {height}\" preserveAspectRatio=\"none\">",
+    ]
+    center = height / 2
+    whisker_top = center - 6
+    whisker_bottom = center + 6
+
+    if x_lower_fence is not None:
+        elements.append(
+            "  <line class=\"sparkline-fence\" x1=\"{x}\" y1=\"{top}\" x2=\"{x}\" y2=\"{bottom}\" />".format(
+                x=x_lower_fence,
+                top=whisker_top,
+                bottom=whisker_bottom,
+            )
+        )
+    if x_upper_fence is not None:
+        elements.append(
+            "  <line class=\"sparkline-fence\" x1=\"{x}\" y1=\"{top}\" x2=\"{x}\" y2=\"{bottom}\" />".format(
+                x=x_upper_fence,
+                top=whisker_top,
+                bottom=whisker_bottom,
+            )
+        )
+
+    if x_min is not None and x_max is not None:
+        elements.append(
+            "  <line class=\"sparkline-whisker\" x1=\"{x1}\" y1=\"{center}\" x2=\"{x2}\" y2=\"{center}\" />".format(
+                x1=x_min,
+                x2=x_max,
+                center=center,
+            )
+        )
+        elements.append(
+            "  <line class=\"sparkline-cap\" x1=\"{x}\" y1=\"{top}\" x2=\"{x}\" y2=\"{bottom}\" />".format(
+                x=x_min,
+                top=whisker_top,
+                bottom=whisker_bottom,
+            )
+        )
+        elements.append(
+            "  <line class=\"sparkline-cap\" x1=\"{x}\" y1=\"{top}\" x2=\"{x}\" y2=\"{bottom}\" />".format(
+                x=x_max,
+                top=whisker_top,
+                bottom=whisker_bottom,
+            )
+        )
+
+    if x_q1 is not None and x_q3 is not None:
+        box_left = min(x_q1, x_q3)
+        box_width = abs(x_q3 - x_q1)
+        elements.append(
+            "  <rect class=\"sparkline-iqr\" x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"12\" />".format(
+                x=box_left,
+                y=center - 6,
+                w=max(box_width, 2),
+            )
+        )
+
+    if x_median is not None:
+        elements.append(
+            "  <line class=\"sparkline-median\" x1=\"{x}\" y1=\"{top}\" x2=\"{x}\" y2=\"{bottom}\" />".format(
+                x=x_median,
+                top=whisker_top,
+                bottom=whisker_bottom,
+            )
+        )
+
+    elements.append("</svg>")
+
+    badge = ""
+    if outlier_count is not None:
+        badge = "<div class=\"sparkline-meta\">Outliers: {}</div>".format(html.escape(str(outlier_count)))
+
+    return "<div class=\"sparkline-wrapper\">{svg}{badge}</div>".format(
+        svg="".join(elements),
+        badge=badge,
+    )
 
 
 def _relpath(from_path: str, to_path: str) -> str:
@@ -133,6 +249,15 @@ def _build_dashboard(report: Dict[str, Any], dq_out: str) -> str:
         "    .features th { width: 20%; }",
         "    .features pre { background: #f8fafc; border-radius: 6px; padding: 0.5rem; margin: 0; font-size: 0.85rem; }",
         "    .feature-desc { font-size: 0.8rem; color: #475569; font-weight: normal; }",
+        "    .sparkline-wrapper { display: flex; flex-direction: column; gap: 0.35rem; }",
+        "    .sparkline-wrapper--empty { color: #64748b; font-size: 0.85rem; }",
+        "    .sparkline { width: 100%; height: 40px; }",
+        "    .sparkline-whisker { stroke: #94a3b8; stroke-width: 2; }",
+        "    .sparkline-cap { stroke: #94a3b8; stroke-width: 2; }",
+        "    .sparkline-iqr { fill: #bfdbfe; opacity: 0.9; }",
+        "    .sparkline-median { stroke: #1d4ed8; stroke-width: 2; }",
+        "    .sparkline-fence { stroke: #f97316; stroke-width: 1.5; stroke-dasharray: 4 3; }",
+        "    .sparkline-meta { font-size: 0.8rem; color: #475569; }",
         "    iframe { width: 100%; min-height: 420px; border: none; box-shadow: 0 1px 3px rgba(15,23,42,0.1); border-radius: 10px; margin-top: 1rem; background: #fff; }",
         "    .viz-links { margin-top: 0.75rem; display: flex; flex-wrap: wrap; gap: 0.75rem; }",
         "    .viz-links a { background: #e9f5f2; border: 1px solid #b7e4d9; border-radius: 6px; padding: 0.4rem 0.6rem; text-decoration: none; color: #1f2933; font-size: 0.9rem; }",
