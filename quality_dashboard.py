@@ -144,8 +144,39 @@ def _render_distribution_viz(stats: Dict[str, Any]) -> str:
     x_lower_fence = _scale(lower_fence)
     x_upper_fence = _scale(upper_fence)
 
+    histogram_elements: List[str] = []
+    if len(hist_edges) == len(hist_counts) + 1 and hist_counts:
+        max_count = max(hist_counts)
+        if max_count:
+            histogram_elements.append(
+                f"<svg class=\"sparkline sparkline--hist\" viewBox=\"0 0 {width} {height}\" preserveAspectRatio=\"none\">"
+            )
+            histogram_baseline = height - 6
+            histogram_height = max(histogram_baseline - padding, 1)
+            for idx, count in enumerate(hist_counts):
+                if count <= 0:
+                    continue
+                left = _scale(hist_edges[idx])
+                right = _scale(hist_edges[idx + 1])
+                if left is None or right is None:
+                    continue
+                if right <= left:
+                    right = left + 1.0
+                normalized = count / max_count
+                bar_height = max(normalized * histogram_height, 1.0)
+                top = max(histogram_baseline - bar_height, 0.0)
+                histogram_elements.append(
+                    "  <rect class=\"sparkline-hist-bar\" x=\"{x:.2f}\" y=\"{y:.2f}\" width=\"{w:.2f}\" height=\"{h:.2f}\" />".format(
+                        x=left,
+                        y=top,
+                        w=max(right - left, 1.0),
+                        h=bar_height,
+                    )
+                )
+            histogram_elements.append("</svg>")
+
     elements: List[str] = [
-        f"<svg class=\"sparkline\" viewBox=\"0 0 {width} {height}\" preserveAspectRatio=\"none\">",
+        f"<svg class=\"sparkline sparkline--box\" viewBox=\"0 0 {width} {height}\" preserveAspectRatio=\"none\">",
     ]
     center = height / 2
     whisker_top = center - 6
@@ -243,8 +274,14 @@ def _render_distribution_viz(stats: Dict[str, Any]) -> str:
     if outlier_count is not None:
         badge = "<div class=\"sparkline-meta\">Outliers: {}</div>".format(html.escape(str(outlier_count)))
 
-    return "<div class=\"sparkline-wrapper\">{svg}{badge}</div>".format(
-        svg="".join(elements),
+    classes = ["sparkline-wrapper"]
+    if histogram_elements:
+        classes.append("sparkline-wrapper--split")
+
+    return "<div class=\"{classes}\">{hist}{box}{badge}</div>".format(
+        classes=" ".join(classes),
+        hist="".join(histogram_elements),
+        box="".join(elements),
         badge=badge,
     )
 
@@ -279,8 +316,11 @@ def _build_dashboard(report: Dict[str, Any], dq_out: str) -> str:
         "    .features pre { background: #f8fafc; border-radius: 6px; padding: 0.5rem; margin: 0; font-size: 0.85rem; }",
         "    .feature-desc { font-size: 0.8rem; color: #475569; font-weight: normal; }",
         "    .sparkline-wrapper { display: flex; flex-direction: column; gap: 0.35rem; }",
+        "    .sparkline-wrapper--split { gap: 0.6rem; }",
         "    .sparkline-wrapper--empty { color: #64748b; font-size: 0.85rem; }",
         "    .sparkline { width: 100%; height: 40px; }",
+        "    .sparkline--hist { height: 48px; }",
+        "    .sparkline--box { height: 40px; }",
         "    .sparkline-whisker { stroke: #94a3b8; stroke-width: 2; }",
         "    .sparkline-cap { stroke: #94a3b8; stroke-width: 2; }",
         "    .sparkline-iqr { fill: #bfdbfe; opacity: 0.9; }",
