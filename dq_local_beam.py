@@ -727,6 +727,14 @@ def _ensure_header_state(rule: Dict[str, Any], path: str, header: List[str]) -> 
     alias, canonical_list = _prepare_header_alias(header)
     canonical_set = set(canonical_list)
 
+    event_time_actual: Optional[str] = None
+    et_col = rule.get("event_time_col")
+    if et_col:
+        canon_et = _canonicalize_column_name(et_col)
+        event_time_actual = alias.get(canon_et)
+        if not event_time_actual and et_col in header:
+            event_time_actual = et_col
+
     if not header:
         state = {
             "valid": False,
@@ -736,6 +744,7 @@ def _ensure_header_state(rule: Dict[str, Any], path: str, header: List[str]) -> 
             "metadata_canonical": {},
             "reported": False,
             "canonical_header": canonical_list,
+            "event_time_actual": event_time_actual,
         }
         cache[path] = state
         return state
@@ -778,6 +787,7 @@ def _ensure_header_state(rule: Dict[str, Any], path: str, header: List[str]) -> 
         "metadata_canonical": metadata_canonical,
         "reported": False,
         "canonical_header": canonical_list,
+        "event_time_actual": event_time_actual,
     }
     cache[path] = state
     return state
@@ -1532,6 +1542,9 @@ def _accumulate_numeric_values(
     global_values: Optional[Dict[str, List[float]]] = None,
     per_file_values: Optional[Dict[str, Dict[str, List[float]]]] = None,
     file_path: Optional[str] = None,
+    per_file_series: Optional[Dict[str, Dict[str, List[Tuple[dt.datetime, float]]]]] = None,
+    event_time_col: Optional[str] = None,
+    event_time_format: Optional[str] = None,
 ) -> None:
     alias = getattr(rc, "_dq_header_alias", None)
     for col in rule.get("numeric_cols", []):
@@ -1552,6 +1565,17 @@ def _accumulate_numeric_values(
             global_values.setdefault(actual_col, []).append(parsed_val)
         if per_file_values is not None and file_path is not None:
             per_file_values.setdefault(file_path, {}).setdefault(actual_col, []).append(parsed_val)
+        if (
+            per_file_series is not None
+            and file_path is not None
+            and event_time_col
+            and not _is_missing_value(rc.data.get(event_time_col))
+        ):
+            try:
+                ts = parse_event_time(rc.data.get(event_time_col), (event_time_format or "auto").lower())
+            except Exception:
+                continue
+            per_file_series.setdefault(file_path, {}).setdefault(actual_col, []).append((ts, parsed_val))
 
 
 def _format_stat_value(value: Optional[float]) -> str:
@@ -1721,6 +1745,32 @@ def _sample_for_interactive(values: List[float], limit: int = 1000) -> List[floa
     if sampled[-1] != sorted_values[-1]:
         sampled[-1] = sorted_values[-1]
     return sampled
+
+
+def _prepare_time_series_payload(
+    series: List[Tuple[dt.datetime, float]], limit: int = 1000
+) -> Optional[Dict[str, List[Any]]]:
+    if not series:
+        return None
+    valid = [item for item in series if isinstance(item[0], dt.datetime)]
+    if not valid:
+        return None
+    valid.sort(key=lambda item: item[0])
+    if len(valid) > limit:
+        step = len(valid) / float(limit)
+        reduced: List[Tuple[dt.datetime, float]] = []
+        cursor = 0.0
+        while len(reduced) < limit and int(cursor) < len(valid):
+            reduced.append(valid[int(cursor)])
+            cursor += step
+        if reduced[-1] != valid[-1]:
+            reduced[-1] = valid[-1]
+        selected = reduced
+    else:
+        selected = valid
+    times = [ts.isoformat() for ts, _ in selected]
+    values = [float(val) for _, val in selected]
+    return {"time": times, "values": values}
 
 
 def _collect_outlier_examples(
@@ -2240,6 +2290,7 @@ def write_quality_report(
     bad_issue_samples: List[Dict[str, Any]],
     issue_summary: List[Dict[str, Any]],
     per_file_numeric_values: Dict[str, Dict[str, List[float]]],
+    per_file_time_series: Dict[str, Dict[str, List[Tuple[dt.datetime, float]]]],
     column_descriptions: Dict[str, str],
     visualization_index: Dict[str, Dict[str, str]],
     visualization_note: Optional[str],
@@ -2251,6 +2302,7 @@ def write_quality_report(
     per_file_section: List[Dict[str, Any]] = []
     for file_path in matched_files:
         numeric_summary: Dict[str, Any] = {}
+        file_series = per_file_time_series.get(file_path) or {}
         for col, values in sorted((per_file_numeric_values.get(file_path) or {}).items()):
             stats = summarize_numeric_values(values)
             outlier_bounds = stats.get("outlier_bounds") or {}
@@ -2272,6 +2324,9 @@ def write_quality_report(
                 },
                 "description": column_descriptions.get(col),
             }
+            series_payload = _prepare_time_series_payload(file_series.get(col) or [])
+            if series_payload:
+                numeric_summary[col]["time_series"] = series_payload
 
         per_file_section.append(
             {
@@ -2304,8 +2359,12 @@ def write_quality_report(
 
 def collect_numeric_values_by_file(
     files: List[str], rules: List[Dict[str, Any]]
-) -> Dict[str, Dict[str, List[float]]]:
+) -> Tuple[
+    Dict[str, Dict[str, List[float]]],
+    Dict[str, Dict[str, List[Tuple[dt.datetime, float]]]],
+]:
     per_file: Dict[str, Dict[str, List[float]]] = {}
+    per_file_series: Dict[str, Dict[str, List[Tuple[dt.datetime, float]]]] = {}
     for path in files:
         header, rows, _ = read_csv_file(path)
         rule = pick_rule(rules, path)
@@ -2313,10 +2372,21 @@ def collect_numeric_values_by_file(
         if not header_state.get("valid", True):
             continue
         alias = header_state.get("alias") or {}
+        event_time_actual = header_state.get("event_time_actual")
+        event_time_format = rule.get("event_time_format")
         for rc in rows:
             setattr(rc, "_dq_header_alias", alias)
-            _accumulate_numeric_values(rc, rule, None, per_file, path)
-    return per_file
+            _accumulate_numeric_values(
+                rc,
+                rule,
+                None,
+                per_file,
+                path,
+                per_file_series=per_file_series,
+                event_time_col=event_time_actual,
+                event_time_format=event_time_format,
+            )
+    return per_file, per_file_series
 
 
 def _load_jsonl(path: str, limit: Optional[int] = None) -> Tuple[int, List[Dict[str, Any]]]:
@@ -2751,13 +2821,17 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
     bad_issue_count = sum(entry.get("issue_count", 0) for entry in issue_summary)
 
     per_file_numeric_values: Dict[str, Dict[str, List[float]]] = {}
+    per_file_time_series: Dict[str, Dict[str, List[Tuple[dt.datetime, float]]]] = {}
     visualization_index: Dict[str, Dict[str, str]] = {}
     visualization_note: Optional[str] = None
     visualizations_enabled, size_note = _visualizations_allowed(matched_files)
     if not visualizations_enabled:
         visualization_note = size_note
     else:
-        per_file_numeric_values = collect_numeric_values_by_file(matched_files, rules)
+        (
+            per_file_numeric_values,
+            per_file_time_series,
+        ) = collect_numeric_values_by_file(matched_files, rules)
         visualization_index, visualization_note = create_feature_visualizations(
             per_file_numeric_values, dq_out, column_descriptions
         )
@@ -2780,6 +2854,7 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
         bad_issue_samples,
         issue_summary,
         per_file_numeric_values,
+        per_file_time_series,
         column_descriptions,
         visualization_index,
         visualization_note,
@@ -2822,6 +2897,7 @@ def _run_without_beam(
     bad_issues: List[Dict[str, Any]] = []
     per_file_counts: Dict[str, int] = {}
     per_file_numeric_values: Dict[str, Dict[str, List[float]]] = {}
+    per_file_time_series: Dict[str, Dict[str, List[Tuple[dt.datetime, float]]]] = {}
     pk_counts: Dict[Tuple[Tuple[str, ...], str], int] = {}
 
     for path in matched_files:
@@ -2849,6 +2925,9 @@ def _run_without_beam(
         if not header_state.get("valid", True):
             continue
 
+        event_time_actual = header_state.get("event_time_actual")
+        event_time_format = rule.get("event_time_format")
+
         for rc in rows:
             valid, issues = validate_row_against_rule(rc, rule, None)
             if issues:
@@ -2861,6 +2940,9 @@ def _run_without_beam(
                     global_values=None,
                     per_file_values=per_file_numeric_values,
                     file_path=path,
+                    per_file_series=per_file_time_series,
+                    event_time_col=event_time_actual,
+                    event_time_format=event_time_format,
                 )
 
             if valid is None:
@@ -2962,6 +3044,7 @@ def _run_without_beam(
         bad_issue_samples,
         issue_summary,
         per_file_numeric_values,
+        per_file_time_series,
         column_descriptions,
         visualization_index,
         visualization_note,
