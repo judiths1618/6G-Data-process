@@ -71,7 +71,7 @@ rules:
     max_future_hours: 1
     time_epoch_bounds: {min: 946684800, max: 4102444800}
 
-    primary_key: null
+    primary_key: time
 
   - patterns: ["6GDALI_Datasets/EUR/6907619/amf-performance\\.csv$"]
     metadata_path: "6GDALI_Datasets/EUR/metadata.txt"
@@ -141,7 +141,7 @@ rules:
     max_future_hours: 1
     time_epoch_bounds: {min: 946684800, max: 4102444800}
 
-    primary_key: null
+    primary_key: time
 
   - patterns: ["6GDALI_Datasets/EUR/6907619/rabbitmq-performance\\.csv$"]
     metadata_path: "6GDALI_Datasets/EUR/metadata.txt"
