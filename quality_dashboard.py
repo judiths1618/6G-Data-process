@@ -436,6 +436,7 @@ def _build_dashboard(report: Dict[str, Any], dq_out: str) -> str:
                     "feature": feature_name,
                     "description": stats.get("description"),
                     "distribution": distribution,
+                    "time_series": stats.get("time_series"),
                     "stats": {
                         "count": stats.get("count"),
                         "min": stats.get("min"),
@@ -603,8 +604,26 @@ def _build_dashboard(report: Dict[str, Any], dq_out: str) -> str:
             }
 
             const traces = [];
+            let hasTimeSeries = false;
             let idx = 0;
             active.forEach((feature) => {
+              const series = feature.time_series || {};
+              const times = Array.isArray(series.time) ? series.time : [];
+              const values = Array.isArray(series.values) ? series.values : [];
+              if (times.length && times.length === values.length) {
+                hasTimeSeries = true;
+                traces.push({
+                  x: times,
+                  y: values,
+                  mode: 'lines',
+                  name: feature.feature + ' (' + feature.file_label + ')',
+                  line: { shape: 'linear', width: 2.5, color: palette[idx % palette.length] },
+                  hovertemplate: '<b>' + feature.feature + '</b><br>Time=%{x}<br>Value=%{y:.3f}<extra></extra>',
+                });
+                idx += 1;
+                return;
+              }
+
               const distribution = feature.distribution || {};
               const edges = Array.isArray(distribution.edges) ? distribution.edges : [];
               const counts = Array.isArray(distribution.counts) ? distribution.counts : [];
@@ -655,6 +674,13 @@ def _build_dashboard(report: Dict[str, Any], dq_out: str) -> str:
               return;
             }
 
+            const xaxis = hasTimeSeries
+              ? { title: 'Time', type: 'date', zeroline: false }
+              : { title: 'Value', zeroline: false };
+            const yaxis = hasTimeSeries
+              ? { title: 'Value', zeroline: false }
+              : { title: 'Normalized frequency', rangemode: 'tozero' };
+
             Plotly.react(
               chartId,
               traces,
@@ -663,8 +689,8 @@ def _build_dashboard(report: Dict[str, Any], dq_out: str) -> str:
                 hovermode: 'closest',
                 template: 'plotly_white',
                 legend: { orientation: 'h', y: -0.2 },
-                xaxis: { title: 'Value', zeroline: false },
-                yaxis: { title: 'Normalized frequency', rangemode: 'tozero' },
+                xaxis,
+                yaxis,
                 paper_bgcolor: '#ffffff',
                 plot_bgcolor: '#ffffff',
               },
