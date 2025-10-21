@@ -2897,6 +2897,7 @@ def _run_without_beam(
     bad_issues: List[Dict[str, Any]] = []
     per_file_counts: Dict[str, int] = {}
     per_file_numeric_values: Dict[str, Dict[str, List[float]]] = {}
+    per_file_time_series: Dict[str, Dict[str, List[Tuple[dt.datetime, float]]]] = {}
     pk_counts: Dict[Tuple[Tuple[str, ...], str], int] = {}
 
     for path in matched_files:
