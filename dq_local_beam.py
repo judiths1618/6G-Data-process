@@ -1,3 +1,4 @@
+from __future__ import annotations
 # dq_local_beam.py
 # 本地（DirectRunner）CSV 数据质量校验：
 # - 规则驱动（YAML）：必备列/数值/范围/枚举/PK/外键/新鲜度
@@ -20,10 +21,13 @@ import shutil
 import fnmatch
 import statistics
 from dataclasses import dataclass
-from typing import Dict, Any, List, Optional, Tuple, Iterable, Set
+from typing import Dict, Any, List, Optional, Tuple, Iterable, Set, Sequence
 from string import Template
 
 import glob
+
+from augmentation import AUGMENTATION_STRATEGIES, generate_augmented_dataset
+from staleness import staleness_score
 
 try:
     import plotly.graph_objects as go  # type: ignore
@@ -111,6 +115,11 @@ DIMENSION_DESCRIPTIONS = {
 }
 
 
+STALENESS_SCORE_DEFAULT_COLUMN = "staleness_score"
+_NUMERIC_INT_RE = re.compile(r"^[-+]?\d+$")
+_NUMERIC_FLOAT_RE = re.compile(r"^[-+]?\d+\.\d+$")
+
+
 def _canonicalize_column_name(name: Optional[str]) -> str:
     """Normalize a column identifier for case-insensitive comparisons."""
 
@@ -134,6 +143,234 @@ def _is_missing_value(value: Any) -> bool:
         if stripped.lower() == "nan":
             return True
     return False
+
+
+def _resolve_column_from_header(
+    header: Sequence[str], alias_map: Dict[str, str], column_name: Optional[str]
+) -> Optional[str]:
+    if not column_name:
+        return None
+    canon = _canonicalize_column_name(column_name)
+    actual = alias_map.get(canon)
+    if actual:
+        return actual
+    if column_name in header:
+        return column_name
+    for candidate in header:
+        if _canonicalize_column_name(candidate) == canon:
+            return candidate
+    return None
+
+
+def _format_numeric_like(original: Any, value: float) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return ""
+    text = "" if original is None else str(original).strip()
+    if not text:
+        formatted = f"{value:.6f}"
+    elif _NUMERIC_INT_RE.match(text):
+        formatted = str(int(round(value)))
+    elif _NUMERIC_FLOAT_RE.match(text):
+        decimals = len(text.split(".", 1)[1])
+        formatted = f"{value:.{decimals}f}"
+    else:
+        formatted = f"{value:.6f}"
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    if formatted in {"-0", "-0.0"}:
+        formatted = "0"
+    return formatted
+
+
+def _format_event_time_value(timestamp: dt.datetime, fmt: str, original_value: Any) -> str:
+    ts_utc = timestamp.astimezone(dt.timezone.utc)
+    fmt_lower = (fmt or "auto").lower()
+    if fmt_lower == "epoch_s":
+        return str(int(round(ts_utc.timestamp())))
+    if fmt_lower == "epoch_ms":
+        return str(int(round(ts_utc.timestamp() * 1000)))
+    iso_value = ts_utc.isoformat()
+    if iso_value.endswith("+00:00"):
+        iso_value = iso_value[:-6] + "Z"
+    if fmt_lower == "iso":
+        return iso_value
+    text = "" if original_value is None else str(original_value).strip()
+    if not text:
+        return iso_value
+    try:
+        base = float(text)
+    except ValueError:
+        return iso_value
+    magnitude = abs(base)
+    if magnitude >= 1e18:
+        return str(int(round(ts_utc.timestamp() * 1_000_000_000)))
+    if magnitude >= 1e15:
+        return str(int(round(ts_utc.timestamp() * 1_000_000)))
+    if magnitude >= 1e12:
+        return str(int(round(ts_utc.timestamp() * 1_000)))
+    if '.' in text:
+        decimals = text.split('.', 1)[1]
+        trimmed = decimals.rstrip('0')
+        precision = len(trimmed) if trimmed else len(decimals)
+        formatted = f"{ts_utc.timestamp():.{precision}f}"
+        formatted = formatted.rstrip('0').rstrip('.')
+        return formatted or '0'
+    if 'e' in text.lower():
+        formatted = f"{ts_utc.timestamp():.6f}"
+        return formatted.rstrip('0').rstrip('.')
+    return str(int(round(ts_utc.timestamp())))
+
+
+def _shift_staleness_time_columns(
+    row: Dict[str, Any],
+    header: Sequence[str],
+    alias_map: Dict[str, str],
+    staleness_spec: Dict[str, Any],
+    delta_seconds: Optional[float],
+) -> None:
+    if not staleness_spec or delta_seconds is None:
+        return
+    for key, fmt_key in (("input_time_col", "input_time_format"), ("delivery_time_col", "delivery_time_format")):
+        col_name = staleness_spec.get(key)
+        if not col_name:
+            continue
+        actual_col = _resolve_column_from_header(header, alias_map, col_name)
+        if not actual_col:
+            continue
+        raw_value = row.get(actual_col)
+        if _is_missing_value(raw_value):
+            continue
+        fmt = (staleness_spec.get(fmt_key) or "auto").lower()
+        try:
+            base_ts = parse_event_time(raw_value, fmt)
+        except Exception:
+            continue
+        shifted = base_ts + dt.timedelta(seconds=delta_seconds)
+        row[actual_col] = _format_event_time_value(shifted, fmt, raw_value)
+
+
+def _maybe_attach_staleness_metric(
+    rc: RowCtx,
+    rule: Dict[str, Any],
+    alias_map: Dict[str, str],
+    event_time_col: Optional[str],
+    event_time_format: Optional[str],
+    reference_time: Optional[dt.datetime],
+    event_timestamp: Optional[dt.datetime] = None,
+) -> Optional[Tuple[str, float]]:
+    staleness_spec = rule.get("staleness") or {}
+    if not staleness_spec and rule.get("freshness_slo_hours") is None:
+        return None
+    score_col = staleness_spec.get("score_column") or STALENESS_SCORE_DEFAULT_COLUMN
+    computed_metrics = getattr(rc, "_dq_computed_metrics", None)
+    if computed_metrics and score_col in computed_metrics:
+        return score_col, computed_metrics[score_col]
+    header = rc.header or []
+    fmt = (event_time_format or rule.get("event_time_format") or "auto").lower()
+    actual_event_col = event_time_col
+    if not actual_event_col:
+        actual_event_col = _resolve_column_from_header(header, alias_map, rule.get("event_time_col"))
+    if not actual_event_col:
+        return None
+    raw_event = rc.data.get(actual_event_col)
+    if _is_missing_value(raw_event):
+        return None
+    try:
+        event_ts = event_timestamp or parse_event_time(raw_event, fmt)
+    except Exception:
+        return None
+    now = reference_time or dt.datetime.now(dt.timezone.utc)
+    input_time = event_ts
+    input_col = staleness_spec.get("input_time_col")
+    if input_col:
+        actual_input_col = _resolve_column_from_header(header, alias_map, input_col)
+        if actual_input_col:
+            raw_input = rc.data.get(actual_input_col)
+            if raw_input is not None and not _is_missing_value(raw_input):
+                try:
+                    input_fmt = (staleness_spec.get("input_time_format") or "auto").lower()
+                    input_time = parse_event_time(raw_input, input_fmt)
+                except Exception:
+                    input_time = event_ts
+    delivery_time = now
+    delivery_col = staleness_spec.get("delivery_time_col")
+    if delivery_col:
+        actual_delivery_col = _resolve_column_from_header(header, alias_map, delivery_col)
+        if actual_delivery_col:
+            raw_delivery = rc.data.get(actual_delivery_col)
+            if raw_delivery is not None and not _is_missing_value(raw_delivery):
+                try:
+                    delivery_fmt = (staleness_spec.get("delivery_time_format") or "auto").lower()
+                    delivery_time = parse_event_time(raw_delivery, delivery_fmt)
+                except Exception:
+                    delivery_time = now
+    age_seconds: Optional[float] = None
+    age_col = staleness_spec.get("age_col")
+    if age_col:
+        actual_age_col = _resolve_column_from_header(header, alias_map, age_col)
+        if actual_age_col:
+            raw_age = rc.data.get(actual_age_col)
+            if raw_age is not None and not _is_missing_value(raw_age):
+                try:
+                    age_value = float(raw_age)
+                except Exception:
+                    age_value = None
+                if age_value is not None:
+                    unit = (staleness_spec.get("age_unit") or "seconds").lower()
+                    if unit == "hours":
+                        age_seconds = age_value * 3600.0
+                    elif unit == "minutes":
+                        age_seconds = age_value * 60.0
+                    else:
+                        age_seconds = age_value
+    if age_seconds is None:
+        try:
+            age_seconds = max(0.0, (input_time - event_ts).total_seconds())
+        except Exception:
+            age_seconds = None
+    duration_seconds: Optional[float] = None
+    duration_col = staleness_spec.get("validity_duration_col")
+    if duration_col:
+        actual_duration_col = _resolve_column_from_header(header, alias_map, duration_col)
+        if actual_duration_col:
+            raw_duration = rc.data.get(actual_duration_col)
+            if raw_duration is not None and not _is_missing_value(raw_duration):
+                try:
+                    duration_value = float(raw_duration)
+                except Exception:
+                    duration_value = None
+                if duration_value is not None:
+                    unit = (staleness_spec.get("validity_duration_unit") or "hours").lower()
+                    if unit == "seconds":
+                        duration_seconds = duration_value
+                    elif unit == "minutes":
+                        duration_seconds = duration_value * 60.0
+                    else:
+                        duration_seconds = duration_value * 3600.0
+    if duration_seconds is None:
+        validity_hours = staleness_spec.get("validity_duration_hours")
+        if validity_hours is None:
+            validity_hours = rule.get("freshness_slo_hours")
+        if validity_hours is not None:
+            duration_seconds = float(validity_hours) * 3600.0
+    if age_seconds is None or duration_seconds is None or duration_seconds <= 0:
+        return None
+    try:
+        score = staleness_score(
+            age=dt.timedelta(seconds=age_seconds),
+            delivery_time=delivery_time,
+            input_time=input_time,
+            validity_duration=dt.timedelta(seconds=duration_seconds),
+        )
+    except Exception:
+        return None
+    if computed_metrics is None:
+        computed_metrics = {}
+        setattr(rc, "_dq_computed_metrics", computed_metrics)
+    computed_metrics[score_col] = score
+    return score_col, score
 
 
 def complete_issue_dimensions(issue_summary: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -988,6 +1225,7 @@ def validate_row_against_rule(
     rule: Dict[str, Any],
     refset: Optional[set] = None,
     increment: Optional[Any] = None,
+    reference_time: Optional[dt.datetime] = None,
 ) -> Tuple[Optional[RowCtx], List[Dict[str, Any]]]:
     inc = increment or (lambda _name: None)
     issues: List[Dict[str, Any]] = []
@@ -1142,13 +1380,16 @@ def validate_row_against_rule(
     if et_col:
         _, actual_et_col = _resolve_actual_column(et_col)
     if actual_et_col and (
-        slo_h or rule.get("max_future_hours") or rule.get("time_epoch_bounds")
+        slo_h
+        or rule.get("max_future_hours")
+        or rule.get("time_epoch_bounds")
+        or rule.get("staleness")
     ):
         val = data.get(actual_et_col)
         try:
             et_fmt = (rule.get("event_time_format") or "auto").lower()
             ts = parse_event_time(val, et_fmt)
-            now = dt.datetime.now(dt.timezone.utc)
+            now = reference_time or dt.datetime.now(dt.timezone.utc)
 
             if slo_h is not None:
                 age_h = (now - ts).total_seconds() / 3600.0
@@ -1197,6 +1438,16 @@ def validate_row_against_rule(
                         return None, issues
                 except Exception:
                     pass
+
+            _maybe_attach_staleness_metric(
+                rc,
+                rule,
+                alias_map,
+                actual_et_col,
+                rule.get("event_time_format"),
+                reference_time,
+                event_timestamp=ts,
+            )
 
         except Exception:
             inc("bad_numeric")
@@ -1545,11 +1796,13 @@ def _accumulate_numeric_values(
     per_file_series: Optional[Dict[str, Dict[str, List[Tuple[dt.datetime, float]]]]] = None,
     event_time_col: Optional[str] = None,
     event_time_format: Optional[str] = None,
+    reference_time: Optional[dt.datetime] = None,
 ) -> None:
     alias = getattr(rc, "_dq_header_alias", None)
+    alias_map = alias if isinstance(alias, dict) else {}
     for col in rule.get("numeric_cols", []):
         canon = _canonicalize_column_name(col)
-        actual_col = alias.get(canon) if isinstance(alias, dict) else None
+        actual_col = alias_map.get(canon)
         if not actual_col and col in rc.header:
             actual_col = col
         if not actual_col:
@@ -1576,6 +1829,39 @@ def _accumulate_numeric_values(
             except Exception:
                 continue
             per_file_series.setdefault(file_path, {}).setdefault(actual_col, []).append((ts, parsed_val))
+
+    actual_event_col = event_time_col or _resolve_column_from_header(rc.header, alias_map, rule.get("event_time_col"))
+    _maybe_attach_staleness_metric(
+        rc,
+        rule,
+        alias_map,
+        actual_event_col,
+        event_time_format,
+        reference_time,
+    )
+    computed_metrics = getattr(rc, "_dq_computed_metrics", None)
+    if not computed_metrics:
+        return
+    for col_name, raw_value in computed_metrics.items():
+        try:
+            numeric_value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if global_values is not None:
+            global_values.setdefault(col_name, []).append(numeric_value)
+        if per_file_values is not None and file_path is not None:
+            per_file_values.setdefault(file_path, {}).setdefault(col_name, []).append(numeric_value)
+        if (
+            per_file_series is not None
+            and file_path is not None
+            and event_time_col
+            and not _is_missing_value(rc.data.get(event_time_col))
+        ):
+            try:
+                ts = parse_event_time(rc.data.get(event_time_col), (event_time_format or "auto").lower())
+            except Exception:
+                continue
+            per_file_series.setdefault(file_path, {}).setdefault(col_name, []).append((ts, numeric_value))
 
 
 def _format_stat_value(value: Optional[float]) -> str:
@@ -2358,13 +2644,14 @@ def write_quality_report(
 
 
 def collect_numeric_values_by_file(
-    files: List[str], rules: List[Dict[str, Any]]
+    files: List[str], rules: List[Dict[str, Any]], reference_time: Optional[dt.datetime] = None
 ) -> Tuple[
     Dict[str, Dict[str, List[float]]],
     Dict[str, Dict[str, List[Tuple[dt.datetime, float]]]],
 ]:
     per_file: Dict[str, Dict[str, List[float]]] = {}
     per_file_series: Dict[str, Dict[str, List[Tuple[dt.datetime, float]]]] = {}
+    ref_time = reference_time or dt.datetime.now(dt.timezone.utc)
     for path in files:
         header, rows, _ = read_csv_file(path)
         rule = pick_rule(rules, path)
@@ -2385,6 +2672,7 @@ def collect_numeric_values_by_file(
                 per_file_series=per_file_series,
                 event_time_col=event_time_actual,
                 event_time_format=event_time_format,
+                reference_time=ref_time,
             )
     return per_file, per_file_series
 
@@ -2628,8 +2916,10 @@ def attach_dimension(issue: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 # -----------------------------
 # 主流程
 # -----------------------------
-def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_path: str):
-    cfg = load_config(config_path)
+def _run_with_beam(
+    input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_path: str, config: Optional[Dict[str, Any]] = None
+):
+    cfg = config if config is not None else load_config(config_path)
     rules = cfg["rules"]
     column_descriptions = gather_column_descriptions(rules)
 
@@ -2831,13 +3121,13 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
         (
             per_file_numeric_values,
             per_file_time_series,
-        ) = collect_numeric_values_by_file(matched_files, rules)
+        ) = collect_numeric_values_by_file(matched_files, rules, reference_time=reference_time)
         visualization_index, visualization_note = create_feature_visualizations(
             per_file_numeric_values, dq_out, column_descriptions
         )
     write_execution_log(
         dq_out,
-        input_pattern,
+        display_pattern,
         matched_files,
         per_file_counts,
         bad_issue_count,
@@ -2847,7 +3137,7 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
     )
     write_quality_report(
         dq_out,
-        input_pattern,
+        display_pattern,
         matched_files,
         per_file_counts,
         bad_issue_count,
@@ -2872,22 +3162,33 @@ def _run_with_beam(input_pattern: str, good_out: str, bad_out: str, dq_out: str,
 
 
 def _run_without_beam(
-    input_pattern: str, good_out: str, bad_out: str, dq_out: str, config_path: str
+    input_pattern: str,
+    good_out: str,
+    bad_out: str,
+    dq_out: str,
+    config_path: str,
+    config: Optional[Dict[str, Any]] = None,
+    prefetched_files: Optional[List[str]] = None,
+    input_display_pattern: Optional[str] = None,
+    reference_time: Optional[dt.datetime] = None,
 ) -> None:
-    cfg = load_config(config_path)
+    cfg = config if config is not None else load_config(config_path)
     rules = cfg["rules"]
     column_descriptions = gather_column_descriptions(rules)
 
-    matched_files = sorted(glob.glob(input_pattern, recursive=True))
+    display_pattern = input_display_pattern or input_pattern
+    matched_files = prefetched_files if prefetched_files is not None else sorted(glob.glob(input_pattern, recursive=True))
     if not matched_files:
         raise FileNotFoundError(f"No files matched input pattern: {input_pattern}")
 
     metadata_ready, notifications = evaluate_metadata_prerequisites(rules, matched_files)
     if not metadata_ready:
-        _write_metadata_block_report(dq_out, input_pattern, matched_files, notifications)
+        _write_metadata_block_report(dq_out, display_pattern, matched_files, notifications)
         return
 
     os.makedirs(dq_out, exist_ok=True)
+
+    reference_time = reference_time or dt.datetime.now(dt.timezone.utc)
 
     visualizations_enabled, visualization_note = _visualizations_allowed(matched_files)
 
@@ -2929,7 +3230,7 @@ def _run_without_beam(
         event_time_format = rule.get("event_time_format")
 
         for rc in rows:
-            valid, issues = validate_row_against_rule(rc, rule, None)
+            valid, issues = validate_row_against_rule(rc, rule, None, reference_time=reference_time)
             if issues:
                 bad_issues.extend(issues)
 
@@ -2943,6 +3244,7 @@ def _run_without_beam(
                     per_file_series=per_file_time_series,
                     event_time_col=event_time_actual,
                     event_time_format=event_time_format,
+                    reference_time=reference_time,
                 )
 
             if valid is None:
@@ -3058,22 +3360,79 @@ def run(
     dq_out: str,
     config_path: str,
     engine: str = "auto",
+    augmentation_strategy: Optional[str] = None,
+    augmentation_output: Optional[str] = None,
+    augmentation_repeat: int = 1,
+    augmentation_seed: Optional[int] = None,
 ) -> None:
     selected = (engine or "auto").lower()
     if selected not in {"auto", "beam", "sequential"}:
         raise ValueError("engine must be one of 'auto', 'beam', or 'sequential'")
 
+    preloaded_config: Optional[Dict[str, Any]] = None
+    augmented_files: Optional[List[str]] = None
+    display_pattern = input_pattern
+
+    if augmentation_strategy:
+        if augmentation_strategy not in AUGMENTATION_STRATEGIES:
+            raise ValueError(f"Unsupported augmentation strategy: {augmentation_strategy}")
+        if not augmentation_output:
+            raise ValueError("augmentation_output must be provided when augmentation_strategy is specified")
+        if augmentation_repeat <= 0:
+            raise ValueError("augmentation_repeat must be a positive integer")
+
+        preloaded_config = load_config(config_path)
+        rules = preloaded_config["rules"]
+        original_files = sorted(glob.glob(input_pattern, recursive=True))
+        if not original_files:
+            raise FileNotFoundError(f"No files matched input pattern: {input_pattern}")
+        augmented_files = generate_augmented_dataset(
+            original_files,
+            rules,
+            augmentation_output,
+            augmentation_strategy,
+            repeat=max(1, augmentation_repeat),
+            seed=augmentation_seed,
+        )
+        if not augmented_files:
+            raise RuntimeError("Augmentation did not generate any rows; verify the strategy settings.")
+        display_pattern = f"{input_pattern} [augmented:{augmentation_strategy}]"
+        selected = "sequential"
+
     if selected == "beam":
         if not _HAVE_BEAM:
             raise RuntimeError("apache_beam is not installed; cannot run Beam engine")
-        _run_with_beam(input_pattern, good_out, bad_out, dq_out, config_path)
+        _run_with_beam(
+            input_pattern,
+            good_out,
+            bad_out,
+            dq_out,
+            config_path,
+            config=preloaded_config,
+        )
         return
 
     if selected == "sequential" or not _HAVE_BEAM:
-        _run_without_beam(input_pattern, good_out, bad_out, dq_out, config_path)
+        _run_without_beam(
+            input_pattern,
+            good_out,
+            bad_out,
+            dq_out,
+            config_path,
+            config=preloaded_config,
+            prefetched_files=augmented_files,
+            input_display_pattern=display_pattern,
+        )
         return
 
-    _run_with_beam(input_pattern, good_out, bad_out, dq_out, config_path)
+    _run_with_beam(
+        input_pattern,
+        good_out,
+        bad_out,
+        dq_out,
+        config_path,
+        config=preloaded_config,
+    )
 
 
 # -----------------------------
@@ -3094,6 +3453,26 @@ if __name__ == "__main__":
         default="auto",
         help="执行引擎：auto(默认，优先 Beam)、beam(强制 Beam)、sequential(无需 apache-beam)",
     )
+    ap.add_argument(
+        "--augmentation_strategy",
+        choices=sorted(AUGMENTATION_STRATEGIES.keys()),
+        help="可选的数据增强策略，生成合成数据后再执行 DQ",
+    )
+    ap.add_argument(
+        "--augmentation_output",
+        help="当指定增强策略时用于存放增强后 CSV 的目录",
+    )
+    ap.add_argument(
+        "--augmentation_repeat",
+        type=int,
+        default=1,
+        help="每个输入文件生成的增强副本次数（默认 1）",
+    )
+    ap.add_argument(
+        "--augmentation_seed",
+        type=int,
+        help="数据增强的随机种子，便于复现",
+    )
     args, _ = ap.parse_known_args()
     run(
         args.input_pattern,
@@ -3102,4 +3481,8 @@ if __name__ == "__main__":
         args.dq_out,
         args.config,
         engine=args.engine,
+        augmentation_strategy=args.augmentation_strategy,
+        augmentation_output=args.augmentation_output,
+        augmentation_repeat=args.augmentation_repeat,
+        augmentation_seed=args.augmentation_seed,
     )
