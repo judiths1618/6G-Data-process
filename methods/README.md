@@ -36,5 +36,27 @@ metrics = evaluate_time_series_augmentation(
 )
 ```
 
+### Working with the EUR dataset
+
+The helpers also accept directories, so you can point them at a dataset folder
+like the built-in EUR bundle. All ``*.csv`` files inside the directory are
+loaded and aligned automatically:
+
+```python
+from pathlib import Path
+
+from methods.evaluation_pipeline import evaluate_time_series_augmentation
+
+eur_dataset = Path("6GDALI_Datasets/EUR/6907619")
+results = evaluate_time_series_augmentation(
+    [eur_dataset],
+    target_feature="amf-performance_mean",  # choose the metric you want to predict
+    join="outer",  # include rows even if some tables miss the timestamp
+    on_duplicate="last",  # keep the most recent measurement when timestamps repeat
+    regularization=1e-6,  # small ridge term for numerical stability
+)
+print(results)
+```
+
 Refer to the unit tests under `tests/` for additional usage examples or adapt
 the helper functions inside these modules to your pipeline needs.

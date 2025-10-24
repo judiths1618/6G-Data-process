@@ -79,3 +79,58 @@ def test_evaluate_time_series_augmentation_reports_improvement(tmp_path):
     assert results["baseline"] >= results["augmented"]
     assert results["improvement"] >= 0.0
 
+
+def test_evaluate_time_series_augmentation_accepts_directory(tmp_path):
+    dataset_dir = tmp_path / "eur"
+    dataset_dir.mkdir()
+
+    start = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+
+    amf_lines = ["time,target"]
+    python_lines = ["time,load"]
+    for idx in range(20):
+        timestamp = start + dt.timedelta(minutes=idx)
+        amf_lines.append(f"{timestamp.isoformat()},{idx * 2 + (idx % 3)}")
+        python_lines.append(f"{timestamp.isoformat()},{idx * 1.5}")
+
+    (dataset_dir / "amf-performance.csv").write_text("\n".join(amf_lines))
+    (dataset_dir / "python-web-server-performance.csv").write_text("\n".join(python_lines))
+
+    results = evaluate_time_series_augmentation(
+        [dataset_dir],
+        target_feature="amf-performance_target",
+        test_ratio=0.25,
+        on_duplicate="last",
+    )
+
+    assert results["metric"] == "rmse"
+    assert set(results) == {"metric", "baseline", "augmented", "improvement"}
+
+
+def test_evaluate_time_series_handles_missing_target_rows(tmp_path):
+    dataset_dir = tmp_path / "eur"
+    dataset_dir.mkdir()
+
+    start = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+
+    amf_lines = ["time,target"]
+    python_lines = ["time,load"]
+    for idx in range(3):
+        timestamp = start + dt.timedelta(minutes=idx)
+        amf_lines.append(f"{timestamp.isoformat()},{idx * 1.1}")
+    for idx in range(5):
+        timestamp = start + dt.timedelta(minutes=idx)
+        python_lines.append(f"{timestamp.isoformat()},{idx * 0.9}")
+
+    (dataset_dir / "amf-performance.csv").write_text("\n".join(amf_lines))
+    (dataset_dir / "python-web-server-performance.csv").write_text("\n".join(python_lines))
+
+    results = evaluate_time_series_augmentation(
+        [dataset_dir],
+        target_feature="amf-performance_target",
+        join="outer",
+        on_duplicate="last",
+    )
+
+    assert set(results) == {"metric", "baseline", "augmented", "improvement"}
+

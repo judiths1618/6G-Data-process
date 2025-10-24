@@ -95,3 +95,35 @@ def test_load_and_align_time_series_rejects_duplicate_timestamps(tmp_path):
 
     with pytest.raises(ValueError, match="Duplicate timestamp"):
         load_and_align_time_series([path])
+
+
+def test_duplicate_policy_last_keeps_latest_value(tmp_path):
+    table = """time,value\n2024-01-01 00:00:00,1\n2024-01-01 00:00:00,2\n"""
+    path = tmp_path / "duplicate.csv"
+    path.write_text(table)
+
+    rows = load_and_align_time_series([path], on_duplicate="last")
+
+    assert len(rows) == 1
+    assert rows[0]["duplicate_value"] == 2
+
+
+def test_directory_input_is_discovered(tmp_path):
+    dataset_dir = tmp_path / "eur"
+    dataset_dir.mkdir()
+
+    amf = dataset_dir / "amf-performance.csv"
+    amf.write_text(
+        """time,mean\n1636553178,1.0\n1636553188,2.0\n"""
+    )
+    python = dataset_dir / "python-web-server-performance.csv"
+    python.write_text(
+        """time,latency\n1636553178,10\n1636553188,11\n"""
+    )
+
+    rows = augment_with_time([dataset_dir])
+
+    assert len(rows) == 2
+    first_row = rows[0]
+    assert "amf-performance_mean" in first_row
+    assert "python-web-server-performance_latency" in first_row

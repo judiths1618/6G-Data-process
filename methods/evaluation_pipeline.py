@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import List, Mapping, Sequence
 
-from .data_augmentation_beam import augment_with_time, augment_without_time
+from .data_augmentation_beam import DataFrameLike, augment_with_time, augment_without_time
 
 
 NumericRow = Mapping[str, object]
@@ -77,7 +77,8 @@ def _prepare_dataset(
 ) -> _PreparedDataset:
     if not rows:
         raise ValueError("Dataset must contain at least one row")
-    if target_feature not in rows[0]:
+    first_with_target = next((row for row in rows if target_feature in row), None)
+    if first_with_target is None:
         raise ValueError(f"Target feature '{target_feature}' not found in dataset")
 
     features = list(feature_columns) if feature_columns else _detect_numeric_features(rows, target_feature)
@@ -87,9 +88,11 @@ def _prepare_dataset(
     matrix: list[list[float]] = []
     targets: list[float] = []
 
+    skipped = 0
     for row in rows:
         if target_feature not in row:
-            raise ValueError(f"Row is missing target feature '{target_feature}'")
+            skipped += 1
+            continue
         target = _to_float(row[target_feature])
         feature_values: list[float] = []
         for column in features:
@@ -97,6 +100,12 @@ def _prepare_dataset(
             feature_values.append(_to_float(value))
         matrix.append(feature_values)
         targets.append(target)
+
+    if skipped and not matrix:
+        raise ValueError(
+            "All rows were skipped because the target feature was missing; "
+            "consider using an inner join or ensuring the target column exists across tables."
+        )
 
     if not matrix or not matrix[0]:
         raise ValueError("Design matrix must be two-dimensional")
@@ -124,19 +133,37 @@ def _split_train_test(matrix: List[List[float]], target: List[float], test_ratio
     )
 
 
-def _fit_linear_regression(design_matrix: List[List[float]], targets: List[float]) -> List[float]:
+def _fit_linear_regression(
+    design_matrix: List[List[float]],
+    targets: List[float],
+    *,
+    regularization: float,
+) -> List[float]:
     augmented = [[1.0] + row for row in design_matrix]
     size = len(augmented[0])
-    xtx = [[0.0 for _ in range(size)] for _ in range(size)]
+    base_xtx = [[0.0 for _ in range(size)] for _ in range(size)]
     xty = [0.0 for _ in range(size)]
 
     for row, target in zip(augmented, targets):
         for i in range(size):
             xty[i] += row[i] * target
             for j in range(size):
-                xtx[i][j] += row[i] * row[j]
+                base_xtx[i][j] += row[i] * row[j]
 
-    return _solve_linear_system(xtx, xty)
+    lambda_val = regularization
+    attempts = 0
+    while True:
+        xtx = [row[:] for row in base_xtx]
+        if lambda_val > 0.0:
+            for diag in range(size):
+                xtx[diag][diag] += lambda_val
+        try:
+            return _solve_linear_system(xtx, xty)
+        except ValueError:
+            if lambda_val <= 0.0 or attempts >= 5:
+                raise
+            lambda_val *= 10.0
+            attempts += 1
 
 
 def _predict(design_matrix: List[List[float]], coefficients: List[float]) -> List[float]:
@@ -190,6 +217,7 @@ def evaluate_model_improvement(
     augmented_features: Sequence[str] | None = None,
     test_ratio: float = 0.2,
     metric: str = "rmse",
+    regularization: float = 1e-6,
 ) -> Mapping[str, float]:
     """Train simple linear models and compare their performance."""
 
@@ -220,8 +248,16 @@ def evaluate_model_improvement(
         y_test_aug,
     ) = _split_train_test(augmented.design_matrix, augmented.targets, test_ratio)
 
-    coef_base = _fit_linear_regression(X_train_base, y_train_base)
-    coef_aug = _fit_linear_regression(X_train_aug, y_train_aug)
+    coef_base = _fit_linear_regression(
+        X_train_base,
+        y_train_base,
+        regularization=regularization,
+    )
+    coef_aug = _fit_linear_regression(
+        X_train_aug,
+        y_train_aug,
+        regularization=regularization,
+    )
 
     predictions_base = _predict(X_test_base, coef_base)
     predictions_aug = _predict(X_test_aug, coef_aug)
@@ -238,7 +274,7 @@ def evaluate_model_improvement(
 
 
 def evaluate_time_series_augmentation(
-    tables: Sequence[str],
+    tables: Sequence[DataFrameLike],
     *,
     target_feature: str,
     time_column: str = "time",
@@ -247,8 +283,17 @@ def evaluate_time_series_augmentation(
     join: str = "inner",
     test_ratio: float = 0.2,
     metric: str = "rmse",
+    on_duplicate: str = "error",
+    regularization: float = 1e-6,
 ) -> Mapping[str, float]:
-    """Evaluate the benefit of temporal feature engineering for time-series tables."""
+    """Evaluate the benefit of temporal feature engineering for time-series tables.
+
+    ``tables`` may be a list of CSV paths or directories containing CSV files.
+    Duplicate timestamps can be resolved by setting ``on_duplicate`` to
+    ``"first"`` or ``"last"``. Mild ridge regularization is applied by default
+    to keep the regression systems numerically stable when many engineered
+    features are present.
+    """
 
     baseline_rows = augment_without_time(
         tables,
@@ -256,6 +301,7 @@ def evaluate_time_series_augmentation(
         parse_dates=parse_dates,
         time_format=time_format,
         join=join,
+        on_duplicate=on_duplicate,
     )
     augmented_rows = augment_with_time(
         tables,
@@ -263,6 +309,7 @@ def evaluate_time_series_augmentation(
         parse_dates=parse_dates,
         time_format=time_format,
         join=join,
+        on_duplicate=on_duplicate,
     )
 
     return evaluate_model_improvement(
@@ -271,5 +318,6 @@ def evaluate_time_series_augmentation(
         target_feature=target_feature,
         test_ratio=test_ratio,
         metric=metric,
+        regularization=regularization,
     )
 

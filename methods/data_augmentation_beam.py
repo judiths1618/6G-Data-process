@@ -13,10 +13,11 @@ import datetime as dt
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence, Union
+from typing import Dict, Iterable, List, Sequence, Union
 
 
 __all__ = [
+    "DataFrameLike",
     "augment_with_time",
     "augment_without_time",
     "load_and_align_time_series",
@@ -52,6 +53,13 @@ def _parse_timestamp(value: object, *, fmt: str | None = None) -> dt.datetime:
     if fmt:
         return dt.datetime.strptime(text, fmt)
     try:
+        numeric = float(text)
+    except ValueError:
+        numeric = None
+    else:
+        if math.isfinite(numeric):
+            return dt.datetime.fromtimestamp(numeric, tz=dt.timezone.utc)
+    try:
         return dt.datetime.fromisoformat(text)
     except ValueError:
         pass
@@ -81,6 +89,23 @@ def _maybe_convert(value: str) -> object:
         return text
 
 
+def _iter_table_sources(sources: Sequence[DataFrameLike]) -> Iterable[Path]:
+    """Yield concrete CSV files from a mix of file and directory inputs."""
+
+    for source in sources:
+        path = Path(source)
+        if path.is_dir():
+            csv_files = sorted(p for p in path.rglob("*.csv") if p.is_file())
+            if not csv_files:
+                raise ValueError(f"No CSV files found inside directory '{path}'")
+            for csv_file in csv_files:
+                yield csv_file
+        elif path.is_file():
+            yield path
+        else:
+            raise FileNotFoundError(f"Table source '{path}' does not exist or is not a file")
+
+
 def _prepare_table(
     source: DataFrameLike,
     *,
@@ -88,6 +113,7 @@ def _prepare_table(
     parse_dates: bool,
     time_format: str | None,
     index: int,
+    on_duplicate: str,
 ) -> _PreparedTable:
     label = _infer_label(source, index)
     rows: Dict[dt.datetime, Dict[str, object]] = {}
@@ -103,10 +129,19 @@ def _prepare_table(
                 _parse_timestamp(raw_time, fmt=time_format) if parse_dates else str(raw_time).strip()
             )
             if timestamp in rows:
-                raise ValueError(
-                    f"Duplicate timestamp detected in table '{label}' for value {timestamp!r}. "
-                    "Timestamps must be unique per table to align rows predictably."
-                )
+                if on_duplicate == "error":
+                    raise ValueError(
+                        f"Duplicate timestamp detected in table '{label}' for value {timestamp!r}. "
+                        "Timestamps must be unique per table to align rows predictably."
+                    )
+                if on_duplicate == "first":
+                    continue
+                if on_duplicate == "last":
+                    pass
+                else:
+                    raise ValueError(
+                        "Unsupported duplicate handling policy. Use 'error', 'first', or 'last'."
+                    )
             feature_row: Dict[str, object] = {}
             for key, val in raw_row.items():
                 if key == time_column:
@@ -136,13 +171,17 @@ def load_and_align_time_series(
     parse_dates: bool = True,
     time_format: str | None = None,
     join: str = "inner",
+    on_duplicate: str = "error",
 ) -> List[DataRecord]:
     """Load tables and align them on the timestamp column.
 
     Returns a list of dictionaries with the timestamp preserved under
     ``time_column`` and all other fields prefixed by their originating table
     label. Each input table must have unique timestamps so that rows can be
-    matched without ambiguity.
+    matched without ambiguity. ``tables`` may contain individual CSV files or
+    directories. Directories are expanded recursively and every ``*.csv`` file
+    discovered is treated as a separate table. Duplicate timestamps can be
+    handled by choosing ``on_duplicate="first"`` or ``on_duplicate="last"``.
     """
 
     if not tables:
@@ -150,13 +189,14 @@ def load_and_align_time_series(
 
     prepared = [
         _prepare_table(
-            str(table),
+            table,
             time_column=time_column,
             parse_dates=parse_dates,
             time_format=time_format,
             index=index,
+            on_duplicate=on_duplicate,
         )
-        for index, table in enumerate(tables)
+        for index, table in enumerate(_iter_table_sources(tables))
     ]
 
     aligned: List[DataRecord] = []
@@ -186,6 +226,7 @@ def augment_without_time(
     parse_dates: bool = True,
     time_format: str | None = None,
     join: str = "inner",
+    on_duplicate: str = "error",
 ) -> List[DataRecord]:
     """Concatenate feature columns from all tables, excluding the timestamp."""
 
@@ -195,6 +236,7 @@ def augment_without_time(
         parse_dates=parse_dates,
         time_format=time_format,
         join=join,
+        on_duplicate=on_duplicate,
     )
     return [
         {key: value for key, value in row.items() if key != time_column}
@@ -252,6 +294,7 @@ def augment_with_time(
     parse_dates: bool = True,
     time_format: str | None = None,
     join: str = "inner",
+    on_duplicate: str = "error",
 ) -> List[DataRecord]:
     """Augment the dataset with engineered temporal features."""
 
@@ -261,6 +304,7 @@ def augment_with_time(
         parse_dates=parse_dates,
         time_format=time_format,
         join=join,
+        on_duplicate=on_duplicate,
     )
     augmented: List[DataRecord] = []
     for row in aligned:
