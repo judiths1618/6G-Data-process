@@ -585,6 +585,23 @@ def _visualizations_allowed(file_paths: Iterable[str]) -> Tuple[bool, Optional[s
 
     return True, None
 
+
+def _select_numeric_profile_files(
+    rules: List[Dict[str, Any]], file_paths: Iterable[str]
+) -> List[str]:
+    """Return only paths whose rules declare numeric columns for profiling."""
+
+    numeric_files: List[str] = []
+    for path in file_paths:
+        try:
+            rule = pick_rule(rules, path)
+        except Exception:
+            continue
+        if rule.get("numeric_cols"):
+            numeric_files.append(path)
+    return numeric_files
+
+
 # -----------------------------
 # 元数据解析
 # -----------------------------
@@ -757,6 +774,9 @@ def _simple_yaml_parse(lines: List[str], start: int, indent: int) -> Tuple[Any, 
         if current_indent < indent:
             break
         stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            idx += 1
+            continue
         if stripped.startswith("- "):
             if result is None:
                 result = []
@@ -3173,18 +3193,15 @@ def _run_with_beam(
     _, bad_issue_samples = _load_jsonl(bad_path, limit=10)
     bad_issue_count = sum(entry.get("issue_count", 0) for entry in issue_summary)
 
-    per_file_numeric_values: Dict[str, Dict[str, List[float]]] = {}
-    per_file_time_series: Dict[str, Dict[str, List[Tuple[dt.datetime, float]]]] = {}
+    numeric_profile_files = _select_numeric_profile_files(rules, matched_files)
+    (
+        per_file_numeric_values,
+        per_file_time_series,
+    ) = collect_numeric_values_by_file(numeric_profile_files, rules, reference_time=reference_time)
     visualization_index: Dict[str, Dict[str, str]] = {}
-    visualization_note: Optional[str] = None
-    visualizations_enabled, size_note = _visualizations_allowed(matched_files)
-    if not visualizations_enabled:
-        visualization_note = size_note
-    else:
-        (
-            per_file_numeric_values,
-            per_file_time_series,
-        ) = collect_numeric_values_by_file(matched_files, rules, reference_time=reference_time)
+    visualizations_enabled, size_note = _visualizations_allowed(numeric_profile_files)
+    visualization_note: Optional[str] = size_note
+    if visualizations_enabled:
         visualization_index, visualization_note = create_feature_visualizations(
             per_file_numeric_values, dq_out, column_descriptions
         )
@@ -3253,7 +3270,10 @@ def _run_without_beam(
 
     reference_time = reference_time or dt.datetime.now(dt.timezone.utc)
 
-    visualizations_enabled, visualization_note = _visualizations_allowed(matched_files)
+    numeric_profile_files = _select_numeric_profile_files(rules, matched_files)
+    numeric_profile_set = set(numeric_profile_files)
+    visualizations_enabled, size_note = _visualizations_allowed(numeric_profile_files)
+    visualization_note = size_note
 
     headers_info: List[Dict[str, Any]] = []
     header_union: set = set()
@@ -3297,7 +3317,7 @@ def _run_without_beam(
             if issues:
                 bad_issues.extend(issues)
 
-            if visualizations_enabled:
+            if path in numeric_profile_set:
                 _accumulate_numeric_values(
                     rc,
                     rule,
