@@ -12,6 +12,9 @@ free of heavy dependencies so they integrate cleanly with existing workflows.
 - **`evaluation_pipeline.py`** – utilities that fit simple linear models to
   compare baseline and augmented datasets, returning RMSE-based improvement
   metrics.
+- **`wavestitch_imputation.py`** – wraps the WaveStitch diffusion imputer for
+  6G-ready datasets, providing ``train`` and ``impute`` CLI commands that
+  handle preprocessing, checkpointing, and conditional sampling.
 
 ## Using the helpers
 
@@ -56,6 +59,20 @@ results = evaluate_time_series_augmentation(
     regularization=1e-6,  # small ridge term for numerical stability
 )
 print(results)
+```
+
+### Imputing missing values with WaveStitch
+
+To train and apply the diffusion-based imputer on one of the bundled 6G
+datasets:
+
+```bash
+python -m methods.wavestitch_imputation train 6GDALI_Datasets/EUR/6907619 \
+    --output saved_models/eur_wavestitch.pt --window-size 48 --epochs 100 \
+    --device mps  # use "cuda" on NVIDIA GPUs or keep the default "auto"
+
+python -m methods.wavestitch_imputation impute 6GDALI_Datasets/EUR/6907619 \
+    --model saved_models/eur_wavestitch.pt --output out/eur_imputed.csv
 ```
 
 Refer to the unit tests under `tests/` for additional usage examples or adapt
