@@ -13,6 +13,11 @@ datasets = {"WebTraffic": "WebTrafficLAcity/lacity.org-website-traffic.csv",
             "BeijingAirQuality": "BeijingAirQuality/beijing+multi+site+air+quality+data",
             "PanamaEnergy": "PanamaEnergy/continuous dataset.csv"}
 
+sixG_datasets = {
+            "DeepSense-Scen33": "6GDALI_Datasets/DeepSense/Scenario33/scenario33.csv",
+            "DeepSense-Scen42": "6GDALI_Datasets/DeepSense/Scenario42/scenario42.csv",
+            "EUR": "6GDALI_Datasets/EUR/6907619",
+            }
 
 class CyclicEncoder:
 
