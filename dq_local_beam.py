@@ -1108,22 +1108,30 @@ def _strip_brackets(value: str) -> str:
     return text
 
 
-def _parse_deepsense_scen1_time(value: Any) -> dt.datetime:
+def _parse_deepsense_clock_time(value: Any, dataset: str) -> dt.datetime:
     text = "" if value is None else str(value).strip()
     if not text:
         raise ValueError("empty timestamp")
     text = _strip_brackets(text)
     match = _DEEPSENSE_SCEN1_TIME_RE.match(text)
     if not match:
-        raise ValueError(f"invalid deepsense_scen1 timestamp: {value!r}")
+        raise ValueError(f"invalid {dataset} timestamp: {value!r}")
     hour = int(match.group("hour"))
     minute = int(match.group("minute"))
     second = int(match.group("second"))
     fraction = match.group("fraction") or "0"
     fraction = (fraction + "000000")[:6]
     microsecond = int(fraction)
-    base = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+    base = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
     return base.replace(hour=hour, minute=minute, second=second, microsecond=microsecond)
+
+
+def _parse_deepsense_scen1_time(value: Any) -> dt.datetime:
+    return _parse_deepsense_clock_time(value, "deepsense_scen1")
+
+
+def _parse_deepsense_scen42_time(value: Any) -> dt.datetime:
+    return _parse_deepsense_clock_time(value, "deepsense_scen42")
 
 
 def parse_event_time(val, fmt: str = "auto") -> dt.datetime:
@@ -1133,6 +1141,8 @@ def parse_event_time(val, fmt: str = "auto") -> dt.datetime:
     fmt_lower = (fmt or "auto").lower()
     if fmt_lower == "deepsense_scen1":
         return _parse_deepsense_scen1_time(val)
+    if fmt_lower == "deepsense_scen42":
+        return _parse_deepsense_scen42_time(val)
 
     x = 0.0
     try:
