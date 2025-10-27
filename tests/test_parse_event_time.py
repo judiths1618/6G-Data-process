@@ -19,6 +19,11 @@ class ParseEventTimeTest(unittest.TestCase):
         expected = dt.datetime(1970, 1, 1, 0, 42, 15, tzinfo=dt.timezone.utc)
         self.assertEqual(timestamp, expected)
 
+    def test_deepsense_scen42_parses_plain_value(self) -> None:
+        timestamp = parse_event_time("12-00-06.900", "deepsense_scen42")
+        expected = dt.datetime(1970, 1, 1, 12, 0, 6, 900000, tzinfo=dt.timezone.utc)
+        self.assertEqual(timestamp, expected)
+
     def test_formatting_uses_iso_output(self) -> None:
         instant = dt.datetime(2023, 5, 1, 12, 34, 56, 789000, tzinfo=dt.timezone.utc)
         formatted = _format_event_time_value(instant, "deepsense_scen1", "['00-00-00-0']")
