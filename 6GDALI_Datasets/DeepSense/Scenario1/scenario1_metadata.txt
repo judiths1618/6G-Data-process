@@ -1,0 +1,16 @@
+File: scenario1.csv
+index: Sample index within Scenario 1.
+unit1_rgb: Relative path to the Unit 1 RGB image for this sample.
+unit1_pwr_60ghz: Relative path to the Unit 1 60 GHz received-power vector file.
+unit1_loc: Relative path to the Unit 1 GPS reference track used for alignment.
+unit2_loc: Relative path to the Unit 2 GPS track captured for the sample.
+unit1_beam_index: Optimal beam index (1–64) derived from the received-power vector.
+seq_index: Identifier of the drive sequence/run for the sample.
+time_stamp[UTC]: Capture timestamp in hh-mm-ss-ms format within the collection session.
+unit2_direction: Direction of travel for Unit 2 (0 = left-to-right, 1 = right-to-left from Unit 1's perspective).
+unit2_num_sat: Number of satellites connected to Unit 2 at capture time.
+unit2_sat_used: Space vehicle identifiers used in the Unit 2 GNSS solution.
+unit2_fix_type: GNSS fix type reported by Unit 2 (e.g., 2D, 3D, No Fix).
+unit2_DGPS: Indicates whether differential GPS was active for Unit 2 (Yes/No).
+unit2_PDOP: Position dilution of precision reported by Unit 2.
+unit2_HDOP: Horizontal dilution of precision reported by Unit 2.
