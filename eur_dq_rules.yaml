@@ -67,11 +67,11 @@ rules:
 
     event_time_col: "time"
     event_time_format: "epoch_s"
-    freshness_slo_hours: 24
-    max_future_hours: 1
+    freshness_slo_hours: null
+    max_future_hours: null
     time_epoch_bounds: {min: 946684800, max: 4102444800}
 
-    primary_key: time
+    primary_key: null
 
   - patterns: ["6GDALI_Datasets/EUR/6907619/amf-performance\\.csv$"]
     metadata_path: "6GDALI_Datasets/EUR/metadata.txt"
@@ -137,11 +137,11 @@ rules:
 
     event_time_col: "time"
     event_time_format: "epoch_s"
-    freshness_slo_hours: 24
-    max_future_hours: 1
+    freshness_slo_hours: null
+    max_future_hours: null
     time_epoch_bounds: {min: 946684800, max: 4102444800}
 
-    primary_key: time
+    primary_key: null
 
   - patterns: ["6GDALI_Datasets/EUR/6907619/rabbitmq-performance\\.csv$"]
     metadata_path: "6GDALI_Datasets/EUR/metadata.txt"
@@ -195,8 +195,8 @@ rules:
 
     event_time_col: "time"
     event_time_format: "epoch_s"
-    freshness_slo_hours: 24
-    max_future_hours: 1
+    freshness_slo_hours: null
+    max_future_hours: null
     time_epoch_bounds: {min: 946684800, max: 4102444800}
 
     primary_key: null

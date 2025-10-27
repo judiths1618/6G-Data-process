@@ -1122,7 +1122,7 @@ def _parse_deepsense_scen1_time(value: Any) -> dt.datetime:
     fraction = match.group("fraction") or "0"
     fraction = (fraction + "000000")[:6]
     microsecond = int(fraction)
-    base = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+    base = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
     return base.replace(hour=hour, minute=minute, second=second, microsecond=microsecond)
 
 

@@ -1,0 +1,41 @@
+rules:
+  # 1) Main index: scenario42.csv (paths, labels, additional info)
+  - patterns:
+      - "6GDALI_Datasets/DeepSense/Scenario42/scenario42\\.csv$"
+      # - ".*scenario42/scenario42\\.csv$"
+    metadata_path: "6GDALI_Datasets/DeepSense/Scenario42/scenario42_metadata.txt"
+    metadata_targets:
+      - scenario42.csv
+
+    required_cols:
+      # Paths to modalities (as relative paths)
+      - timestamp
+      - unit1_rgb
+      - unit1_lidar
+      - unit1_iq
+      - unit1_iq_comms_bandwidth
+      - unit1_iq_beam
+      - unit1_iq_sweep
+
+    numeric_cols:
+      - unit1_iq_comms_bandwidth
+      - unit1_iq_beam
+      - unit1_iq_sweep
+
+    ranges:
+      unit1_iq_comms_bandwidth: [0.0, 100.0]
+      unit1_iq_beam: [1, null]
+      unit1_iq_sweep: [0, null]
+
+    enums:
+
+
+    # Scenario 42 time stamp is sub-second within session, not epoch
+    event_time_col: "timestamp"
+    event_time_format: "deepsense_scen42"  # Normalize to ISO in the pipeline
+    freshness_slo_hours: null
+    max_future_hours: null
+    time_epoch_bounds: null
+
+    primary_key: null
+
