@@ -1,0 +1,20 @@
+File: scenario33.csv
+index: It represents the sample number
+time_stamp: This represents the time of data capture in “hr-mins-secs-ms” format
+unit1_rgb: Relative path to the Unit 1 RGB image for this sample.
+unit1_pwr_60ghz: Relative path to the Unit 1 60 GHz received-power vector file.
+unit1_lidar: the relative paths to the 3D pointclouds
+unit1_radar: the relative paths to the acquired data. Each radar sample is divided into two matrices, which are saved in a single .mat file. The matrices are:  a) mag_data_static, corresponding to the range-angle data from the samples with zero speed (i.e., zero Doppler shift); and b) mag_data_dynamic, which contains the range-angle data for non-zero-Doppler samples. 
+unit1_loc: Relative path to the Unit 1 GPS reference track used for alignment.
+unit2_loc: Relative path to the Unit 2 GPS track captured for the sample.
+unit1_beam: The phased array of unit 1 utilizes an over-sampled beamforming codebook of N = 64 vectors, which are designed to cover the field of view. It captures the received power by applying the beamforming codebook elements as a combiner. For each received power vector of dimension [64 x 1], the index with the maximum received power value is selected as the optimal beam index.
+unit1_max_pwr: Relative path to the Unit 1 maximum received-power vector file
+seq_index: During the data collection process, the mobile transmitter (unit2) travelled multiple times in front of the base station (unit1). For each run, the testbed collects multiple data samples. All the data samples with the same sequence index belongs to the same run
+unit2_num_sats: For each data sample, it is an integer value representing the number of connected satellites at that time instant
+unit2_spd_over_grnd_kmph: This represents the speed of mobility of Unit 2. Unit 2 is carried on a vehicle.
+unit2_mode_fix_type: This shows whether or not there was a 3D fix. A 3D (three dimensional) position fix includes horizontal coordinates plus altitude. It requires a minimum of four visible satellites.
+unit2_PDOP: PDOP (position dilution of precision) describes the error caused by the relative position of the GPS satellites
+unit2_HDOP: HDOP represents the horizontal dilution of precision
+unit2_VDOP: VDOP represents the vertical dilution of precision
+Warning on NaN values: Some samples (<1%) in the column ‘unit1_pwr_60ghz’ contain NaNs (not-a-value). These  NaNs result from random, real-world sensor errors. In the context of received power, NaNs can be considered as zeros. Assuming that pwr_vect is our received power vector, one can explicitly convert the NaNs into zeros by doing pwr_vect(isnan(pwr_vect)) = 0 in Matlab or  pwr_vect[np.isnan(pwr_vect)] = 0 in Python.
+
