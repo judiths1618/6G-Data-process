@@ -1,6 +1,6 @@
 # Exclude KUL dataset from version control
 6GDALI_Datasets/KUL/
-6GDALI_Datasets/DeepSense/
+6GDALI_Datasets/DeepSense/Scenario42/
 
 out/
 
