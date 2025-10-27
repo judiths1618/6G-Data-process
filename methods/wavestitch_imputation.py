@@ -39,7 +39,7 @@ import argparse
 import json
 import math
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import List, Sequence
 
@@ -138,6 +138,7 @@ class PreparedDataset:
     index: pd.Index
     time_column: str
     feature_matrix: np.ndarray
+    min_valid_ratio: float
 
     @property
     def non_hier_indices(self) -> List[int]:
@@ -338,6 +339,7 @@ def prepare_dataset(
         index=feature_df.index,
         time_column=time_column,
         feature_matrix=scaled_matrix,
+        min_valid_ratio=min_valid_ratio,
     )
 
 
@@ -467,6 +469,245 @@ def _reconstruct_sequence(windows: np.ndarray, window: int, stride: int) -> np.n
     return result
 
 
+def _impute_from_prepared(
+    model: SSSDS4Imputer,
+    prepared: PreparedDataset,
+    config: WaveStitchConfig,
+    device: torch.device,
+    scaler: StandardScaler,
+) -> pd.DataFrame:
+    """Run the diffusion sampler and return an imputed dataframe."""
+
+    model = model.to(device)
+    model.eval()
+
+    with torch.no_grad():
+        imputed_windows = _sample_windows(model, prepared, config, device)
+
+    reconstructed = _reconstruct_sequence(
+        imputed_windows, prepared.window_size, prepared.stride
+    )
+
+    scaled_full = prepared.feature_matrix
+    reconstructed[:, prepared.hierarchical_indices] = scaled_full[
+        :, prepared.hierarchical_indices
+    ]
+
+    mask_matrix = prepared.observed_mask_windows.detach().cpu().numpy()
+    mask_sequence = _reconstruct_sequence(
+        mask_matrix, prepared.window_size, prepared.stride
+    )
+    for idx, column in enumerate(prepared.non_hier_indices):
+        observed = mask_sequence[:, idx] >= 0.5
+        reconstructed[observed, column] = scaled_full[observed, column]
+
+    non_hier_scaled = reconstructed[:, prepared.non_hier_indices]
+    non_hier_values = scaler.inverse_transform(non_hier_scaled)
+
+    output_df = pd.DataFrame(
+        non_hier_values,
+        index=prepared.original.index,
+        columns=prepared.non_hier_columns,
+    )
+    output_df.insert(0, prepared.time_column, prepared.original[prepared.time_column])
+
+    return output_df
+
+
+class WaveStitchImputer:
+    """High level wrapper around the WaveStitch diffusion imputer."""
+
+    def __init__(
+        self,
+        config: WaveStitchConfig | None = None,
+        *,
+        device: str | torch.device | None = None,
+    ) -> None:
+        self.config = replace(config) if config is not None else WaveStitchConfig()
+        if isinstance(device, torch.device):
+            self.device = device
+        else:
+            self.device = _select_device(device)
+
+        self.model: SSSDS4Imputer | None = None
+        self.scaler_state: dict | None = None
+        self.feature_columns: List[str] | None = None
+        self.hierarchical_columns: List[str] | None = None
+        self.non_hier_columns: List[str] | None = None
+        self.time_column: str | None = None
+        self._min_valid_ratio: float | None = None
+
+    @property
+    def is_fitted(self) -> bool:
+        return self.model is not None
+
+    def _ensure_fitted(self) -> None:
+        if not self.is_fitted:
+            raise RuntimeError(
+                "WaveStitchImputer has not been fitted yet. Call 'fit' or 'fit_transform' first."
+            )
+
+    def _finalize_fit(
+        self, prepared: PreparedDataset, model: SSSDS4Imputer, min_valid_ratio: float
+    ) -> None:
+        self.model = model
+        self.scaler_state = dict(prepared.scaler_state)
+        self.feature_columns = list(prepared.feature_columns)
+        self.hierarchical_columns = list(prepared.hierarchical_columns)
+        self.non_hier_columns = list(prepared.non_hier_columns)
+        self.time_column = prepared.time_column
+        self._min_valid_ratio = float(min_valid_ratio)
+        self.config.window_size = prepared.window_size
+        self.config.stride = prepared.stride
+
+    def fit(
+        self,
+        sources: Sequence[str | Path],
+        *,
+        time_column: str = "time",
+        min_valid_ratio: float = 0.1,
+        feature_columns: Sequence[str] | None = None,
+    ) -> "WaveStitchImputer":
+        """Train the model and store the fitted parameters on the instance."""
+
+        prepared = prepare_dataset(
+            sources,
+            time_column=time_column,
+            min_valid_ratio=min_valid_ratio,
+            window_size=self.config.window_size,
+            stride=self.config.stride,
+            feature_columns=feature_columns,
+        )
+        model = _train_model(prepared, self.config, self.device)
+        self._finalize_fit(prepared, model, min_valid_ratio)
+        return self
+
+    def fit_transform(
+        self,
+        sources: Sequence[str | Path],
+        *,
+        time_column: str = "time",
+        min_valid_ratio: float = 0.1,
+        feature_columns: Sequence[str] | None = None,
+    ) -> pd.DataFrame:
+        """Train the model and immediately return the imputed dataframe."""
+
+        prepared = prepare_dataset(
+            sources,
+            time_column=time_column,
+            min_valid_ratio=min_valid_ratio,
+            window_size=self.config.window_size,
+            stride=self.config.stride,
+            feature_columns=feature_columns,
+        )
+        model = _train_model(prepared, self.config, self.device)
+        self._finalize_fit(prepared, model, min_valid_ratio)
+        scaler = _restore_scaler(self.scaler_state)
+        return _impute_from_prepared(model, prepared, self.config, self.device, scaler)
+
+    def transform(
+        self,
+        sources: Sequence[str | Path],
+        *,
+        time_column: str | None = None,
+        min_valid_ratio: float | None = None,
+        feature_columns: Sequence[str] | None = None,
+    ) -> pd.DataFrame:
+        """Apply the trained model to a dataset and return the imputed dataframe."""
+
+        self._ensure_fitted()
+        assert self.model is not None  # for type-checkers
+        assert self.scaler_state is not None
+        assert self.non_hier_columns is not None
+
+        prepared = prepare_dataset(
+            sources,
+            time_column=time_column or (self.time_column or "time"),
+            min_valid_ratio=(
+                min_valid_ratio
+                if min_valid_ratio is not None
+                else (self._min_valid_ratio if self._min_valid_ratio is not None else 0.1)
+            ),
+            window_size=self.config.window_size,
+            stride=self.config.stride,
+            feature_columns=feature_columns or self.non_hier_columns,
+        )
+
+        if prepared.non_hier_columns != self.non_hier_columns:
+            raise ValueError(
+                "Prepared dataset does not match the feature layout used during training."
+            )
+
+        scaler = _restore_scaler(self.scaler_state)
+        return _impute_from_prepared(self.model, prepared, self.config, self.device, scaler)
+
+    def save(self, path: str | Path) -> Path:
+        """Serialize the fitted model to ``path``."""
+
+        self._ensure_fitted()
+        assert self.model is not None
+        assert self.scaler_state is not None
+        assert self.feature_columns is not None
+        assert self.hierarchical_columns is not None
+        assert self.non_hier_columns is not None
+        assert self.time_column is not None
+
+        output_path = Path(path)
+        _ensure_directory(output_path)
+
+        state_dict = {
+            key: value.detach().cpu()
+            for key, value in self.model.state_dict().items()
+        }
+        checkpoint = {
+            "model_state": state_dict,
+            "config": asdict(self.config),
+            "scaler_state": self.scaler_state,
+            "feature_columns": self.feature_columns,
+            "hierarchical_columns": self.hierarchical_columns,
+            "non_hier_columns": self.non_hier_columns,
+            "time_column": self.time_column,
+            "min_valid_ratio": self._min_valid_ratio,
+        }
+        torch.save(checkpoint, output_path)
+        return output_path
+
+    @classmethod
+    def load(
+        cls, path: str | Path, *, device: str | torch.device | None = None
+    ) -> "WaveStitchImputer":
+        """Restore a fitted model from disk."""
+
+        checkpoint = torch.load(path, map_location="cpu")
+        config = WaveStitchConfig(**checkpoint["config"])
+        imputer = cls(config=config, device=device)
+        imputer.scaler_state = checkpoint["scaler_state"]
+        imputer.feature_columns = list(checkpoint["feature_columns"])
+        imputer.hierarchical_columns = list(checkpoint["hierarchical_columns"])
+        imputer.non_hier_columns = list(checkpoint["non_hier_columns"])
+        imputer.time_column = checkpoint["time_column"]
+        imputer._min_valid_ratio = float(checkpoint.get("min_valid_ratio", 0.1))
+
+        model = SSSDS4Imputer(
+            in_channels=len(imputer.feature_columns),
+            res_channels=config.res_channels,
+            skip_channels=config.skip_channels,
+            out_channels=len(imputer.non_hier_columns),
+            num_res_layers=config.num_res_layers,
+            diffusion_step_embed_dim_in=config.diff_step_embed_in,
+            diffusion_step_embed_dim_mid=config.diff_step_embed_mid,
+            diffusion_step_embed_dim_out=config.diff_step_embed_out,
+            s4_lmax=config.s4_lmax,
+            s4_d_state=config.s4_dstate,
+            s4_dropout=config.s4_dropout,
+            s4_bidirectional=config.s4_bidirectional,
+            s4_layernorm=config.s4_layernorm,
+        )
+        model.load_state_dict(checkpoint["model_state"])
+        imputer.model = model.to(imputer.device)
+        imputer.model.eval()
+        return imputer
+
 def train_command(args: argparse.Namespace) -> None:
     config = WaveStitchConfig(
         beta_0=args.beta_0,
@@ -490,98 +731,29 @@ def train_command(args: argparse.Namespace) -> None:
         learning_rate=args.learning_rate,
     )
 
-    prepared = prepare_dataset(
+    imputer = WaveStitchImputer(config=config, device=getattr(args, "device", None))
+    print(f"Training on device: {imputer.device}")
+    imputer.fit(
         args.dataset,
         time_column=args.time_column,
         min_valid_ratio=args.min_valid_ratio,
-        window_size=config.window_size,
-        stride=config.stride,
     )
 
-    device = _select_device(getattr(args, "device", None))
-    print(f"Training on device: {device}")
-    model = _train_model(prepared, config, device)
-
-    checkpoint = {
-        "model_state": model.state_dict(),
-        "config": asdict(config),
-        "scaler_state": prepared.scaler_state,
-        "feature_columns": prepared.feature_columns,
-        "hierarchical_columns": prepared.hierarchical_columns,
-        "non_hier_columns": prepared.non_hier_columns,
-        "time_column": prepared.time_column,
-    }
-
-    output_path = Path(args.output)
-    _ensure_directory(output_path)
-    torch.save(checkpoint, output_path)
+    output_path = imputer.save(args.output)
     metadata_path = output_path.with_suffix(output_path.suffix + ".json")
     with open(metadata_path, "w", encoding="utf-8") as fp:
-        json.dump({"feature_columns": prepared.feature_columns}, fp, indent=2)
+        json.dump({"feature_columns": imputer.feature_columns}, fp, indent=2)
     print(f"Saved checkpoint to {output_path}")
 
 
 def impute_command(args: argparse.Namespace) -> None:
-    device = _select_device(getattr(args, "device", None))
-    checkpoint = torch.load(args.model, map_location="cpu")
-    config = WaveStitchConfig(**checkpoint["config"])
-    scaler = _restore_scaler(checkpoint["scaler_state"])
-
-    prepared = prepare_dataset(
+    imputer = WaveStitchImputer.load(
+        args.model, device=getattr(args, "device", None)
+    )
+    output_df = imputer.transform(
         args.dataset,
-        time_column=checkpoint["time_column"],
         min_valid_ratio=args.min_valid_ratio,
-        window_size=config.window_size,
-        stride=config.stride,
-        feature_columns=checkpoint["non_hier_columns"],
     )
-
-    model = SSSDS4Imputer(
-        in_channels=len(prepared.feature_columns),
-        res_channels=config.res_channels,
-        skip_channels=config.skip_channels,
-        out_channels=len(prepared.non_hier_columns),
-        num_res_layers=config.num_res_layers,
-        diffusion_step_embed_dim_in=config.diff_step_embed_in,
-        diffusion_step_embed_dim_mid=config.diff_step_embed_mid,
-        diffusion_step_embed_dim_out=config.diff_step_embed_out,
-        s4_lmax=config.s4_lmax,
-        s4_d_state=config.s4_dstate,
-        s4_dropout=config.s4_dropout,
-        s4_bidirectional=config.s4_bidirectional,
-        s4_layernorm=config.s4_layernorm,
-    )
-    model.load_state_dict(checkpoint["model_state"])
-
-    model.to(device)
-    model.eval()
-
-    with torch.no_grad():
-        imputed_windows = _sample_windows(model, prepared, config, device)
-
-    reconstructed = _reconstruct_sequence(
-        imputed_windows, prepared.window_size, prepared.stride
-    )
-
-    # Enforce original observed values for stability.
-    scaled_full = prepared.feature_matrix
-    reconstructed[:, prepared.hierarchical_indices] = scaled_full[:, prepared.hierarchical_indices]
-
-    mask_matrix = prepared.observed_mask_windows.numpy()
-    mask_sequence = _reconstruct_sequence(mask_matrix, prepared.window_size, prepared.stride)
-    for idx, column in enumerate(prepared.non_hier_indices):
-        observed = mask_sequence[:, idx] >= 0.5
-        reconstructed[observed, column] = scaled_full[observed, column]
-
-    non_hier_scaled = reconstructed[:, prepared.non_hier_indices]
-    non_hier_values = scaler.inverse_transform(non_hier_scaled)
-
-    output_df = pd.DataFrame(
-        non_hier_values,
-        index=prepared.original.index,
-        columns=prepared.non_hier_columns,
-    )
-    output_df.insert(0, prepared.time_column, prepared.original[prepared.time_column])
 
     output_path = Path(args.output)
     _ensure_directory(output_path)
