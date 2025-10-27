@@ -111,7 +111,7 @@ DIMENSION_DESCRIPTIONS = {
     "Duplication": (
         "A measure of unwanted duplication existing within or across systems for a particular field, record, or data set."
     ),
-    "Other": "Issues that do not map to a predefined data-quality dimension.",
+    "Other": "If missing metadata",
 }
 
 
@@ -588,7 +588,17 @@ def _visualizations_allowed(file_paths: Iterable[str]) -> Tuple[bool, Optional[s
 # -----------------------------
 # 元数据解析
 # -----------------------------
-_COLUMN_NAME_RE = re.compile(r"^[A-Za-z0-9_ ]+$")
+_COLUMN_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\[\]() ]+$")
+_DEFAULT_METADATA_TARGET = "__default__"
+
+
+def _looks_like_column_name(name: str) -> bool:
+    text = name.strip()
+    if not text or not _COLUMN_NAME_RE.match(text):
+        return False
+    if "_" in text or "[" in text or "]" in text:
+        return True
+    return text.lower() == text
 
 
 def _parse_metadata_text(lines: Iterable[str]) -> Dict[str, Dict[str, str]]:
@@ -658,20 +668,17 @@ def _parse_metadata_text(lines: Iterable[str]) -> Dict[str, Dict[str, str]]:
                 _register_pattern(part)
             continue
 
-        if not current_keys:
-            # 还未遇到 file(s) / pattern(s) 说明，此处多为段落描述
-            continue
-
         if not value:
             # 章节标题或其他说明
             continue
 
-        if not _COLUMN_NAME_RE.match(key):
+        if not _looks_like_column_name(key):
             # 过滤掉“非列名”的行（例如长句子）
             continue
 
         col_name = key.strip().lower()
-        for tgt in current_keys:
+        targets = current_keys or [_DEFAULT_METADATA_TARGET]
+        for tgt in targets:
             mapping.setdefault(tgt, {})[col_name] = value
 
     return mapping
@@ -855,8 +862,9 @@ def load_config(path: str) -> Dict[str, Any]:
             if meta_path not in metadata_cache:
                 metadata_cache[meta_path] = parse_metadata_descriptions(meta_path)
             meta_map = metadata_cache[meta_path]
+            default_cols = meta_map.get(_DEFAULT_METADATA_TARGET)
             metadata_base_dir = os.path.abspath(os.path.dirname(meta_path) or ".")
-            selected = targets or list(meta_map.keys())
+            selected = targets or [key for key in meta_map.keys() if key != _DEFAULT_METADATA_TARGET]
             for target in selected:
                 if not target:
                     continue
@@ -878,18 +886,31 @@ def load_config(path: str) -> Dict[str, Any]:
                 base = os.path.basename(normalized)
                 if base:
                     candidates.append(base)
+                assigned = False
                 for cand in candidates:
                     if not cand:
                         continue
                     pattern_key = f"__pattern__:{cand}"
                     if cand in meta_map:
                         metadata_by_file[cand] = meta_map[cand]
+                        assigned = True
                     if pattern_key in meta_map:
                         metadata_by_file[pattern_key] = meta_map[pattern_key]
+                        assigned = True
+                if not assigned and default_cols:
+                    for cand in candidates:
+                        if not cand:
+                            continue
+                        if cand not in metadata_by_file:
+                            metadata_by_file[cand] = default_cols
             if not targets:
                 for key, cols in meta_map.items():
+                    if key == _DEFAULT_METADATA_TARGET:
+                        continue
                     if key not in metadata_by_file:
                         metadata_by_file[key] = cols
+            if not metadata_by_file and default_cols:
+                metadata_by_file["__pattern__:*"] = default_cols
         if metadata_by_file:
             rr["metadata_by_file"] = metadata_by_file
             rr["metadata_base_dir"] = metadata_base_dir

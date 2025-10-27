@@ -1,5 +1,7 @@
 import os
 import sys
+import tempfile
+import textwrap
 import unittest
 
 
@@ -11,6 +13,7 @@ from dq_local_beam import (
     DEFAULT_RULE,
     RowCtx,
     evaluate_metadata_prerequisites,
+    load_config,
     validate_row_against_rule,
 )
 
@@ -68,6 +71,53 @@ class MetadataPrerequisiteTest(unittest.TestCase):
         self.assertEqual(len(notifications), 1)
         self.assertEqual(notifications[0]["scope"], "file")
         self.assertEqual(notifications[0]["file"], "beta.csv")
+
+    def test_metadata_targets_fall_back_to_default_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metadata_path = os.path.join(tmpdir, "metadata.txt")
+            with open(metadata_path, "w", encoding="utf-8") as fp:
+                fp.write(
+                    textwrap.dedent(
+                        """
+                        Scenario description
+                        Number of Data Samples: 2411
+                        index: Sample identifier
+                        time_stamp[UTC]: Capture timestamp in hh-mm-ss-ms format
+                        unit2_num_sat: Number of connected satellites
+                        unit2_fix_type: Fix type description
+                        """
+                    ).strip()
+                )
+
+            config_path = os.path.join(tmpdir, "config.yaml")
+            with open(config_path, "w", encoding="utf-8") as fp:
+                fp.write(
+                    textwrap.dedent(
+                        f"""
+                        rules:
+                          - patterns: [".*"]
+                            metadata_path: "{metadata_path}"
+                            metadata_targets:
+                              - sample.csv
+                        """
+                    ).strip()
+                )
+
+            cfg = load_config(config_path)["rules"]
+            rule = cfg[0]
+
+            metadata_cols = rule.get("metadata_by_file", {}).get("sample.csv")
+            self.assertIsNotNone(metadata_cols)
+            self.assertIn("index", metadata_cols)
+            self.assertIn("time_stamp[utc]", metadata_cols)
+            self.assertNotIn("number of data samples", metadata_cols)
+
+            metadata_ready, notifications = evaluate_metadata_prerequisites(
+                cfg, ["sample.csv"]
+            )
+
+            self.assertTrue(metadata_ready)
+            self.assertEqual(notifications, [])
 
 
 if __name__ == "__main__":
