@@ -3,7 +3,7 @@ rules:
   - patterns:
       - "6GDALI_Datasets/DeepSense/Scenario1/scenario1\\.csv$"
       # - ".*scenario1/scenario1\\.csv$"
-    metadata_path: "6GDALI_Datasets/DeepSense/Scenario1/README.md"
+    metadata_path: "6GDALI_Datasets/DeepSense/Scenario1/metadata.txt"
     metadata_targets:
       - scenario1.csv
 
