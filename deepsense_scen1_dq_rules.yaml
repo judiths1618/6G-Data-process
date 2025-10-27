@@ -13,8 +13,6 @@ rules:
       - unit1_pwr_60ghz
       - unit1_loc
       - unit2_loc
-      # if present (many scenarios use the calibrated path name)
-      - unit2_loc_cal
       # Labels
       - unit1_beam_index
       - seq_index
@@ -53,10 +51,10 @@ rules:
 
     # Scenario 1 time stamp is sub-second within session, not epoch
     event_time_col: "time_stamp[UTC]"
-    event_time_format: "HH-mm-ss-SSS"   # e.g., '00-42-15-125'
-    freshness_slo_hours: 87600           # static dataset; set large window
-    max_future_hours: 1
-    time_epoch_bounds: {min: 0, max: 4102444800}
+    event_time_format: "deepsense_scen1"  # Normalize to ISO in the pipeline
+    freshness_slo_hours: null
+    max_future_hours: null
+    time_epoch_bounds: null
 
     primary_key: index
 
