@@ -856,7 +856,10 @@ def _simple_yaml_load(text: str) -> Any:
 
 def _load_config_text(text: str) -> Any:
     if yaml is not None:
-        return yaml.safe_load(text)
+        try:
+            return yaml.safe_load(text)
+        except yaml.YAMLError:
+            pass
     return _simple_yaml_load(text)
 
 
