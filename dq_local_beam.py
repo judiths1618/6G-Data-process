@@ -824,6 +824,17 @@ def _simple_yaml_parse(lines: List[str], start: int, indent: int) -> Tuple[Any, 
             remainder = remainder.strip()
             if result is None:
                 result = {}
+            elif isinstance(result, list):
+                if not result or not isinstance(result[-1], dict):
+                    return result or [], idx
+                target = result[-1]
+                if remainder:
+                    target[key] = _parse_simple_yaml_value(remainder)
+                    idx += 1
+                else:
+                    child, idx = _simple_yaml_parse(lines, idx + 1, current_indent + 2)
+                    target[key] = child
+                continue
             elif not isinstance(result, dict):
                 raise ValueError("Mixed list/dict structures are not supported in simple YAML parser")
             if remainder:
