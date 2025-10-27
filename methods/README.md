@@ -75,5 +75,16 @@ python -m methods.wavestitch_imputation impute 6GDALI_Datasets/EUR/6907619 \
     --model saved_models/eur_wavestitch.pt --output out/eur_imputed.csv
 ```
 
+For programmatic pipelines you can use the high level ``WaveStitchImputer``
+class:
+
+```python
+from methods.wavestitch_imputation import WaveStitchConfig, WaveStitchImputer
+
+imputer = WaveStitchImputer(WaveStitchConfig(window_size=48))
+imputer.fit(["6GDALI_Datasets/EUR/6907619"], min_valid_ratio=0.1)
+imputed = imputer.transform(["6GDALI_Datasets/EUR/6907619"])
+```
+
 Refer to the unit tests under `tests/` for additional usage examples or adapt
 the helper functions inside these modules to your pipeline needs.
