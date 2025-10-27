@@ -118,6 +118,9 @@ DIMENSION_DESCRIPTIONS = {
 STALENESS_SCORE_DEFAULT_COLUMN = "staleness_score"
 _NUMERIC_INT_RE = re.compile(r"^[-+]?\d+$")
 _NUMERIC_FLOAT_RE = re.compile(r"^[-+]?\d+\.\d+$")
+_DEEPSENSE_SCEN1_TIME_RE = re.compile(
+    r"^(?P<hour>\d{1,2})\D(?P<minute>\d{1,2})\D(?P<second>\d{1,2})(?:\D(?P<fraction>\d+))?$"
+)
 
 
 def _canonicalize_column_name(name: Optional[str]) -> str:
@@ -194,6 +197,8 @@ def _format_event_time_value(timestamp: dt.datetime, fmt: str, original_value: A
     iso_value = ts_utc.isoformat()
     if iso_value.endswith("+00:00"):
         iso_value = iso_value[:-6] + "Z"
+    if fmt_lower == "deepsense_scen1":
+        return iso_value
     if fmt_lower == "iso":
         return iso_value
     text = "" if original_value is None else str(original_value).strip()
@@ -422,7 +427,7 @@ DEFAULT_RULE = {
     "ranges": {},
     "primary_key": None,
     "event_time_col": None,
-    "event_time_format": "auto",     # iso | epoch_s | epoch_ms | auto
+    "event_time_format": "auto",     # iso | epoch_s | epoch_ms | deepsense_scen1 | auto
     "freshness_slo_hours": None,
     "max_future_hours": None,
     "time_epoch_bounds": None,       # {"min": <epoch_s>, "max": <epoch_s>}
@@ -1039,28 +1044,65 @@ def pick_rule(rules: List[Dict[str, Any]], path: str) -> Dict[str, Any]:
 # -----------------------------
 # 时间解析
 # -----------------------------
+def _strip_brackets(value: str) -> str:
+    text = value.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1].strip()
+    if text and text[0] in {'"', "'"} and text[-1] == text[0]:
+        text = text[1:-1].strip()
+    return text
+
+
+def _parse_deepsense_scen1_time(value: Any) -> dt.datetime:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        raise ValueError("empty timestamp")
+    text = _strip_brackets(text)
+    match = _DEEPSENSE_SCEN1_TIME_RE.match(text)
+    if not match:
+        raise ValueError(f"invalid deepsense_scen1 timestamp: {value!r}")
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    second = int(match.group("second"))
+    fraction = match.group("fraction") or "0"
+    fraction = (fraction + "000000")[:6]
+    microsecond = int(fraction)
+    base = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+    return base.replace(hour=hour, minute=minute, second=second, microsecond=microsecond)
+
+
 def parse_event_time(val, fmt: str = "auto") -> dt.datetime:
     if val is None or str(val).strip() == "":
         raise ValueError("empty timestamp")
+
+    fmt_lower = (fmt or "auto").lower()
+    if fmt_lower == "deepsense_scen1":
+        return _parse_deepsense_scen1_time(val)
+
+    x = 0.0
     try:
         x = float(val)
         is_numeric = True
     except Exception:
         is_numeric = False
 
-    if fmt == "iso" or (fmt == "auto" and not is_numeric):
+    if fmt_lower == "iso" or (fmt_lower == "auto" and not is_numeric):
         return _parse_iso_datetime(str(val))
 
-    if fmt == "epoch_s":
+    if fmt_lower == "epoch_s":
         seconds = x
-    elif fmt == "epoch_ms":
+    elif fmt_lower == "epoch_ms":
         seconds = x / 1000.0
     else:
         ax = abs(x)
-        if ax >= 1e18: seconds = x / 1_000_000_000.0  # ns
-        elif ax >= 1e15: seconds = x / 1_000_000.0    # µs
-        elif ax >= 1e12: seconds = x / 1_000.0        # ms
-        else: seconds = x                              # s
+        if ax >= 1e18:
+            seconds = x / 1_000_000_000.0  # ns
+        elif ax >= 1e15:
+            seconds = x / 1_000_000.0  # µs
+        elif ax >= 1e12:
+            seconds = x / 1_000.0  # ms
+        else:
+            seconds = x  # s
     return dt.datetime.fromtimestamp(seconds, tz=dt.timezone.utc)
 
 
