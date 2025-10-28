@@ -6,14 +6,14 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder, OrdinalEncoder
 
 pd.set_option('future.no_silent_downcasting', True)
 
-datasets = {"WebTraffic": "WebTrafficLAcity/lacity.org-website-traffic.csv",
-            "RossmanSales": "RossmanSales/train.csv",
-            "AustraliaTourism": "QuarterlyTourismAustralia/tourism.csv",
-            "MetroTraffic": "MetroInterstateTrafficVolume/Metro_Interstate_Traffic_Volume.csv/Metro_Interstate_Traffic_Volume.csv",
-            "BeijingAirQuality": "BeijingAirQuality/beijing+multi+site+air+quality+data",
-            "PanamaEnergy": "PanamaEnergy/continuous dataset.csv"}
+# datasets = {"WebTraffic": "WebTrafficLAcity/lacity.org-website-traffic.csv",
+#             "RossmanSales": "RossmanSales/train.csv",
+#             "AustraliaTourism": "QuarterlyTourismAustralia/tourism.csv",
+#             "MetroTraffic": "MetroInterstateTrafficVolume/Metro_Interstate_Traffic_Volume.csv/Metro_Interstate_Traffic_Volume.csv",
+#             "BeijingAirQuality": "BeijingAirQuality/beijing+multi+site+air+quality+data",
+#             "PanamaEnergy": "PanamaEnergy/continuous dataset.csv"}
 
-sixG_datasets = {
+datasets = {
             "DeepSense-Scen33": "6GDALI_Datasets/DeepSense/Scenario33/scenario33.csv",
             "DeepSense-Scen42": "6GDALI_Datasets/DeepSense/Scenario42/scenario42.csv",
             "EUR": "6GDALI_Datasets/EUR/6907619",
