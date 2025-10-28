@@ -40,8 +40,9 @@ import json
 import math
 import re
 from dataclasses import asdict, dataclass, replace
+import fnmatch
 from pathlib import Path
-from typing import List, Sequence
+from typing import Dict, List, Mapping, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -51,6 +52,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, TensorDataset
 
 # from .data_augmentation_beam import load_and_align_time_series
+from dq_local_beam import parse_metadata_descriptions
 from TSImputer.SSSDS4Imputer import SSSDS4Imputer
 
 
@@ -148,6 +150,177 @@ class PreparedDataset:
     def hierarchical_indices(self) -> List[int]:
         return [self.feature_columns.index(col) for col in self.hierarchical_columns]
 
+
+@dataclass
+class CleaningResult:
+    """Summary describing the artefacts produced by :class:`WaveStitchCleaner`."""
+
+    time_column: str
+    output_files: Dict[Path, Path]
+    feature_columns: Sequence[str]
+
+
+_METADATA_DEFAULT_KEY = "__default__"
+_PATTERN_PREFIX = "__pattern__:"
+_TIME_NAME_HINTS = ("time", "timestamp", "datetime", "event_time", "eventtime", "date")
+_TIME_DESCRIPTION_HINTS = ("time", "timestamp", "utc", "date")
+
+
+def _normalise_metadata_key(path: Path) -> str:
+    return str(path).replace("\\", "/").lower()
+
+
+def _resolve_metadata_columns(metadata_map: Mapping[str, Dict[str, str]], path: Path) -> Mapping[str, str]:
+    normalized = _normalise_metadata_key(path)
+    base = path.name.lower()
+    for key in (normalized, base):
+        columns = metadata_map.get(key)
+        if columns:
+            return columns
+    for key, columns in metadata_map.items():
+        if not key.startswith(_PATTERN_PREFIX):
+            continue
+        pattern = key[len(_PATTERN_PREFIX) :]
+        if fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(base, pattern):
+            return columns
+    return metadata_map.get(_METADATA_DEFAULT_KEY, {})
+
+
+def _score_time_candidate(name: str, description: str | None) -> float:
+    score = 0.0
+    lower = name.strip().lower()
+    if lower == "time":
+        score += 4.0
+    if any(hint in lower for hint in _TIME_NAME_HINTS):
+        score += 2.0
+    if description:
+        desc = description.lower()
+        if any(hint in desc for hint in _TIME_DESCRIPTION_HINTS):
+            score += 2.0
+    return score
+
+
+def _infer_time_column(
+    tables: Sequence[Tuple[Path, pd.DataFrame]],
+    metadata_map: Mapping[str, Dict[str, str]],
+    explicit: str | None = None,
+) -> str:
+    if explicit:
+        return explicit
+
+    scores: Dict[str, float] = {}
+    representatives: Dict[str, str] = {}
+    observed_columns: set[str] = set()
+
+    for path, frame in tables:
+        metadata_cols = _resolve_metadata_columns(metadata_map, path)
+        observed_columns.update(col for col in frame.columns)
+        for column in frame.columns:
+            canonical = column.strip().lower()
+            description = metadata_cols.get(canonical)
+            score = _score_time_candidate(canonical, description)
+            if description is not None:
+                score += 1.0
+            if score > 0.0:
+                scores[canonical] = scores.get(canonical, 0.0) + score
+                representatives.setdefault(canonical, column)
+        for column in frame.columns:
+            canonical = column.strip().lower()
+            if canonical in scores:
+                continue
+            score = _score_time_candidate(canonical, None)
+            if score > 0.0:
+                scores[canonical] = scores.get(canonical, 0.0) + score
+                representatives.setdefault(canonical, column)
+
+    if not scores:
+        columns_text = ", ".join(sorted(observed_columns)) or "<none>"
+        raise ValueError(
+            "Unable to infer the timestamp column from metadata. "
+            f"Consider specifying it explicitly. Observed columns: {columns_text}"
+        )
+
+    best_canon, _ = max(
+        scores.items(),
+        key=lambda item: (item[1], item[0] == "time", -len(item[0])),
+    )
+    return representatives[best_canon]
+
+
+def _discover_sources(sources: Sequence[str | Path]) -> List[Tuple[Path, Path]]:
+    discovered: List[Tuple[Path, Path]] = []
+    for raw in sources:
+        base = Path(raw)
+        if base.is_file():
+            if base.suffix.lower() != ".csv":
+                raise ValueError(f"Input file '{base}' is not a CSV table")
+            discovered.append((base, Path(base.name)))
+        elif base.is_dir():
+            for csv_path in sorted(base.rglob("*.csv")):
+                if csv_path.is_file():
+                    discovered.append((csv_path, csv_path.relative_to(base)))
+        else:
+            raise FileNotFoundError(f"Input source '{base}' does not exist")
+    if not discovered:
+        raise ValueError("No CSV files were discovered in the provided sources")
+    return discovered
+
+
+def _materialise_clean_tables(
+    imputed: pd.DataFrame,
+    tables: Sequence[Tuple[Path, Path, pd.DataFrame]],
+    time_column: str,
+    output_root: Path,
+) -> Dict[Path, Path]:
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    time_values = imputed[time_column]
+    parsed_time = pd.to_datetime(time_values, utc=True, errors="coerce")
+    if parsed_time.isna().all():
+        time_index = pd.Index(time_values, name=time_column)
+        formatted_time = pd.Series(time_values, dtype=str, index=time_index)
+    else:
+        naive_time = parsed_time.dt.tz_convert(None) if parsed_time.dt.tz is not None else parsed_time
+        time_index = pd.DatetimeIndex(naive_time, name=time_column)
+        formatted_time = naive_time.strftime("%Y-%m-%d %H:%M:%S")
+
+    aligned_imputed = imputed.copy()
+    aligned_imputed.index = time_index
+
+    outputs: Dict[Path, Path] = {}
+    for source_path, relative_path, original in tables:
+        prefix = source_path.stem
+        column_lookup = {col.lower(): col for col in original.columns}
+        target_time = column_lookup.get(time_column.lower(), time_column)
+
+        table_frame = pd.DataFrame(index=time_index)
+        table_frame[target_time] = formatted_time.to_numpy()
+
+        for column in original.columns:
+            if column == target_time:
+                continue
+            prefixed = f"{prefix}_{column}"
+            if prefixed in aligned_imputed.columns:
+                table_frame[column] = aligned_imputed[prefixed].to_numpy()
+            else:
+                original_copy = original.copy()
+                original_copy[target_time] = pd.to_datetime(
+                    original_copy[column_lookup.get(target_time.lower(), target_time)],
+                    utc=True,
+                    errors="coerce",
+                )
+                original_copy = original_copy.set_index(target_time)
+                table_frame[column] = original_copy.reindex(time_index)[column].to_numpy()
+
+        ordered = [target_time] + [col for col in original.columns if col != target_time]
+        table_frame = table_frame.reset_index(drop=True)[ordered]
+
+        destination = output_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        table_frame.to_csv(destination, index=False)
+        outputs[source_path] = destination
+
+    return outputs
 
 def _coerce_numeric(value: object) -> float | np.nan:
     """Best-effort conversion of heterogeneous string values to floats."""
@@ -708,6 +881,70 @@ class WaveStitchImputer:
         imputer.model.eval()
         return imputer
 
+
+class WaveStitchCleaner:
+    """High level helper orchestrating metadata-aware dataset cleaning."""
+
+    def __init__(
+        self,
+        config: WaveStitchConfig | None = None,
+        *,
+        device: str | torch.device | None = None,
+        imputer: WaveStitchImputer | None = None,
+    ) -> None:
+        if imputer is not None:
+            self.imputer = imputer
+        else:
+            self.imputer = WaveStitchImputer(config=config, device=device)
+
+    def clean(
+        self,
+        sources: Sequence[str | Path],
+        *,
+        metadata_path: str | Path,
+        output_root: str | Path,
+        time_column: str | None = None,
+        min_valid_ratio: float = 0.1,
+        refit: bool | None = None,
+    ) -> CleaningResult:
+        discovered = _discover_sources(sources)
+        tables: List[Tuple[Path, Path, pd.DataFrame]] = []
+        for path, relative in discovered:
+            frame = pd.read_csv(path)
+            tables.append((path, relative, frame))
+
+        metadata_map = parse_metadata_descriptions(str(metadata_path))
+        resolved_time = _infer_time_column(
+            [(path, frame) for path, _, frame in tables], metadata_map, time_column
+        )
+
+        dataset_sources = [str(path) for path, _relative in discovered]
+        should_refit = refit if refit is not None else not self.imputer.is_fitted
+
+        if should_refit:
+            imputed = self.imputer.fit_transform(
+                dataset_sources,
+                time_column=resolved_time,
+                min_valid_ratio=min_valid_ratio,
+            )
+        else:
+            imputed = self.imputer.transform(
+                dataset_sources,
+                time_column=resolved_time,
+                min_valid_ratio=min_valid_ratio,
+            )
+
+        output_map = _materialise_clean_tables(
+            imputed, tables, resolved_time, Path(output_root)
+        )
+        feature_columns = list(self.imputer.non_hier_columns or [])
+        return CleaningResult(
+            time_column=resolved_time,
+            output_files=output_map,
+            feature_columns=feature_columns,
+        )
+
+
 def train_command(args: argparse.Namespace) -> None:
     config = WaveStitchConfig(
         beta_0=args.beta_0,
@@ -761,6 +998,63 @@ def impute_command(args: argparse.Namespace) -> None:
     print(f"Wrote imputed dataset to {output_path}")
 
 
+def clean_command(args: argparse.Namespace) -> None:
+    if args.model:
+        imputer = WaveStitchImputer.load(
+            args.model, device=getattr(args, "device", None)
+        )
+    else:
+        config = WaveStitchConfig(
+            beta_0=args.beta_0,
+            beta_T=args.beta_T,
+            timesteps=args.timesteps,
+            res_channels=args.res_channels,
+            skip_channels=args.skip_channels,
+            num_res_layers=args.num_res_layers,
+            diff_step_embed_in=args.diff_embed_in,
+            diff_step_embed_mid=args.diff_embed_mid,
+            diff_step_embed_out=args.diff_embed_out,
+            s4_lmax=args.s4_lmax,
+            s4_dstate=args.s4_dstate,
+            s4_dropout=args.s4_dropout,
+            s4_bidirectional=not args.s4_unidirectional,
+            s4_layernorm=not args.s4_no_layernorm,
+            window_size=args.window_size,
+            stride=args.stride,
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            learning_rate=args.learning_rate,
+        )
+        imputer = WaveStitchImputer(config=config, device=getattr(args, "device", None))
+
+    cleaner = WaveStitchCleaner(imputer=imputer)
+    result = cleaner.clean(
+        args.dataset,
+        metadata_path=args.metadata,
+        output_root=args.output,
+        time_column=args.time_column,
+        min_valid_ratio=args.min_valid_ratio,
+        refit=args.refit or not args.model,
+    )
+
+    if args.save_model:
+        saved_path = imputer.save(args.save_model)
+        print(f"Saved checkpoint to {saved_path}")
+
+    summary = {
+        "time_column": result.time_column,
+        "feature_columns": result.feature_columns,
+        "output_files": {str(src): str(dst) for src, dst in result.output_files.items()},
+    }
+    summary_path = Path(args.output) / "cleaning_summary.json"
+    _ensure_directory(summary_path)
+    with open(summary_path, "w", encoding="utf-8") as fp:
+        json.dump(summary, fp, indent=2)
+
+    print(f"Wrote cleaned tables to {args.output}")
+    print(f"Cleaning summary saved to {summary_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="WaveStitch imputation for 6G datasets")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -807,6 +1101,45 @@ def build_parser() -> argparse.ArgumentParser:
         help="Device to run inference on (auto, cpu, cuda, mps)",
     )
     impute_parser.set_defaults(func=impute_command)
+
+    clean_parser = subparsers.add_parser("clean", help="Run metadata-driven cleaning")
+    clean_parser.add_argument("dataset", nargs="+", help="CSV files or directories")
+    clean_parser.add_argument("--metadata", required=True, help="Path to the metadata.txt file")
+    clean_parser.add_argument("--output", required=True, help="Directory where cleaned CSVs will be written")
+    clean_parser.add_argument("--model", help="Existing checkpoint to reuse instead of training")
+    clean_parser.add_argument("--save-model", help="Optional path to store the fitted checkpoint")
+    clean_parser.add_argument("--time-column", default=None)
+    clean_parser.add_argument("--min-valid-ratio", type=float, default=0.1)
+    clean_parser.add_argument("--window-size", type=int, default=32)
+    clean_parser.add_argument("--stride", type=int, default=1)
+    clean_parser.add_argument("--epochs", type=int, default=200)
+    clean_parser.add_argument("--batch-size", type=int, default=128)
+    clean_parser.add_argument("--learning-rate", type=float, default=1e-4)
+    clean_parser.add_argument("--beta-0", type=float, default=1e-4)
+    clean_parser.add_argument("--beta-T", type=float, default=2e-2)
+    clean_parser.add_argument("--timesteps", type=int, default=200)
+    clean_parser.add_argument("--res-channels", type=int, default=64)
+    clean_parser.add_argument("--skip-channels", type=int, default=64)
+    clean_parser.add_argument("--num-res-layers", type=int, default=4)
+    clean_parser.add_argument("--diff-embed-in", type=int, default=32)
+    clean_parser.add_argument("--diff-embed-mid", type=int, default=64)
+    clean_parser.add_argument("--diff-embed-out", type=int, default=64)
+    clean_parser.add_argument("--s4-lmax", type=int, default=100)
+    clean_parser.add_argument("--s4-dstate", type=int, default=64)
+    clean_parser.add_argument("--s4-dropout", type=float, default=0.0)
+    clean_parser.add_argument("--s4-unidirectional", action="store_true")
+    clean_parser.add_argument("--s4-no-layernorm", action="store_true")
+    clean_parser.add_argument(
+        "--device",
+        default="auto",
+        help="Device to run cleaning on (auto, cpu, cuda, mps)",
+    )
+    clean_parser.add_argument(
+        "--refit",
+        action="store_true",
+        help="Force retraining even when reusing an existing checkpoint",
+    )
+    clean_parser.set_defaults(func=clean_command)
 
     return parser
 

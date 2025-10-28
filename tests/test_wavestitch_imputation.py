@@ -11,6 +11,7 @@ from methods.wavestitch_imputation import (
     PreparedDataset,
     WaveStitchConfig,
     WaveStitchImputer,
+    WaveStitchCleaner,
     _select_device,
     prepare_dataset,
 )
@@ -225,3 +226,56 @@ def test_transform_reuses_trained_min_valid_ratio(monkeypatch: pytest.MonkeyPatc
     assert list(result.columns) == ["time", "metric"]
     assert captured["min_valid_ratio"] == pytest.approx(0.42)
     assert captured["feature_columns"] == ["metric"]
+
+def test_wavestitch_cleaner_generates_clean_tables(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "eur"
+    dataset_dir.mkdir()
+    csv_path = dataset_dir / "amf-performance.csv"
+    csv_path.write_text("time,latency\n1,10\n2,\n")
+
+    metadata = tmp_path / "metadata.txt"
+    metadata.write_text(
+        "Files: amf-performance.csv\n"
+        "time: Timestamp\n"
+        "latency: Response time\n"
+    )
+
+    imputed = pd.DataFrame(
+        {
+            "time": pd.to_datetime([1, 2], unit="s", utc=True),
+            "amf-performance_latency": [10.0, 11.0],
+        }
+    )
+
+    class DummyImputer:
+        def __init__(self) -> None:
+            self._fitted = False
+            self.non_hier_columns = ["amf-performance_latency"]
+
+        @property
+        def is_fitted(self) -> bool:
+            return self._fitted
+
+        def fit_transform(self, sources, **_: object) -> pd.DataFrame:
+            self._fitted = True
+            return imputed
+
+        def transform(self, sources, **_: object) -> pd.DataFrame:
+            return imputed
+
+    cleaner = WaveStitchCleaner(imputer=DummyImputer())
+    result = cleaner.clean(
+        [dataset_dir],
+        metadata_path=metadata,
+        output_root=tmp_path / "cleaned",
+    )
+
+    assert result.time_column == "time"
+    assert csv_path in result.output_files
+
+    output_path = result.output_files[csv_path]
+    assert output_path.exists()
+
+    cleaned = pd.read_csv(output_path)
+    assert list(cleaned.columns)[0].lower() == "time"
+    assert pytest.approx(cleaned.iloc[1]["latency"], rel=1e-6) == 11.0
