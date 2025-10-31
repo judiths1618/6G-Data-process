@@ -1,0 +1,76 @@
+rules:
+  # Scenario 33 main index
+  - patterns:
+      # 本地/挂载路径，正则精确匹配 scenario33.csv
+      - "6GDALI_Datasets/DeepSense/Scenario33/scenario33\\.csv$"
+      # 如果改用 S3（示例，二选一）：
+      # - "s3://6gdali-lake2025/DeepSense/Scenario33/scenario33\\.csv$"
+
+    # 元数据路径：请确保该文件真实存在；如走 S3，改为 s3://... 同样可用
+    metadata_path: "6GDALI_Datasets/DeepSense/Scenario33/scenario33_metadata.txt"
+    metadata_targets:
+      - scenario33.csv
+
+    # 必需列（保持你的原定义）
+    required_cols:
+      - index
+      - unit1_rgb
+      - unit1_pwr_60ghz
+      - unit1_lidar
+      - unit1_radar
+      - unit1_loc
+      - unit2_loc
+      - unit1_beam
+      - unit1_max_pwr
+      - time_stamp
+      - seq_index
+      - unit2_spd_over_grnd_kmph
+      - unit2_num_sats
+      - unit2_altitude
+      - unit2_geo_sep
+      - unit2_mode_fix_type
+      - unit2_pdop
+      - unit2_hdop
+      - unit2_vdop
+      - unit2_interpolated_position
+
+    # 参与数值型统计/分布/异常检测的列
+    numeric_cols:
+      - index
+      - unit1_max_pwr
+      - seq_index
+      - unit2_spd_over_grnd_kmph
+      - unit2_num_sats
+      - unit2_altitude
+      - unit2_geo_sep
+      - unit2_pdop
+      - unit2_hdop
+      - unit2_vdop
+      - unit2_interpolated_position
+
+    # 数值范围（闭区间）；null 表示不设上/下界
+    # 注：将 unit2_vdop 上界放宽为 null，避免误杀；若确认归一化可改回 1.0
+    ranges:
+      unit1_max_pwr: [0.0, 1.0]
+      seq_index: [0, 24]
+      index: [0, null]
+      # 若速度确实规范化到 0~1，这里可改为 [0.0, 1.0]
+      unit2_spd_over_grnd_kmph: [0.0, null]
+      unit2_num_sats: [0, null]
+      unit2_pdop: [0.0, null]
+      unit2_hdop: [0.0, null]
+      unit2_vdop: [0.0, null]
+      unit2_interpolated_position: [0.0, 1.0]
+
+    # 枚举（暂留空；如需可在此处补充）
+    enums: {}
+
+    # 时间戳相关（按你的实现：在流水线中标准化）
+    event_time_col: "time_stamp"
+    event_time_format: "deepsense_scen33"   # 你之前写的是 scen42，已更正为 scen33
+    freshness_slo_hours: null
+    max_future_hours: null
+    time_epoch_bounds: null
+
+    # 主键
+    primary_key: index

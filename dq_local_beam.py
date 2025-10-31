@@ -1,13 +1,13 @@
 from __future__ import annotations
 # dq_local_beam.py
-# 本地（DirectRunner）CSV 数据质量校验：
-# - 规则驱动（YAML）：必备列/数值/范围/枚举/PK/外键/新鲜度
-# - 支持带单位数值（如 ram_limit=2048M），解析后进行校验与统计
-# - 统计阶段按“每条记录匹配到的规则”解析，避免统计为空
-# - 输出：
-#     GOOD -> CSV
-#     BAD  -> JSONL（含 file/row/reason）
-#     DQ   -> 每文件计数、数值分布、表头 union/intersection
+# Local (DirectRunner) CSV Data Quality Verification:
+# - Rule-driven (YAML): Required columns/values/ranges/enumerations/PKs/foreign keys/freshness
+# - Supports values ​​with units (e.g., ram_limit=2048M), with post-parse validation and statistics
+# - Statistics are parsed based on "rules matched per record" to avoid empty statistics
+# - Output:
+# GOOD -> CSV
+# BAD -> JSONL (including file/row/reason)
+# DQ -> Per-file count, value distribution, table header union/intersection
 
 import os
 import io
@@ -91,6 +91,7 @@ try:
     from dateutil import parser as dtparse  # type: ignore
 except ModuleNotFoundError:
     dtparse = None  # type: ignore
+
 
 BAD_TAG = "bad"
 HEADERS_TAG = "headers"
@@ -1122,7 +1123,7 @@ def _parse_deepsense_clock_time(value: Any, dataset: str) -> dt.datetime:
     fraction = match.group("fraction") or "0"
     fraction = (fraction + "000000")[:6]
     microsecond = int(fraction)
-    base = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+    base = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
     return base.replace(hour=hour, minute=minute, second=second, microsecond=microsecond)
 
 

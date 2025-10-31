@@ -1,9 +1,9 @@
 rules:
   # 1) Main index: scenario1.csv (paths, labels, additional info)
   - patterns:
-      - "6GDALI_Datasets/DeepSense/Scenario1/scenario1\\.csv$"
+      - "./DeepSense/Scenario1/scenario1\\.csv$"
       # - ".*scenario1/scenario1\\.csv$"
-    metadata_path: "6GDALI_Datasets/DeepSense/Scenario1/scenario1_metadata.txt"
+    metadata_path: "./DeepSense/Scenario1/scenario1_metadata.txt"
     metadata_targets:
       - scenario1.csv
 
