@@ -1,0 +1,17 @@
+
+{
+  "s3": {
+    "endpoint": "127.0.0.1:9000",
+    "secure": false,
+    "access_key": "minioadmin",
+    "secret_key": "minioadmin",
+    "bucket": "6gdali-lake2025",
+    "region": null
+  },
+  "prefix": {
+    "raw": "raw",
+    "curated": "curated"
+  },
+  "data_dir": "curated/datasets",
+  "info_dir": "curated/info"
+}

@@ -112,8 +112,27 @@ def metric(name: str) -> Callable[[MetricFn], MetricFn]:
 
 # -------------------- Tabular / common metrics --------------------
 
+# @metric("completeness")
+# def m_completeness(df: pd.DataFrame, ctx: Dict[str, Any]) -> Dict[str, Any]:
+#     miss = {c: int(df[c].isna().sum()) for c in df.columns}
+#     rate = float(df.isna().mean().mean())
+#     return {
+#         "name": "completeness", 
+#         "ok": None,
+#         "metrics": {"missing_rate": rate, "missing_by_col": miss},
+#         "actions": ["impute_missing"] if any(v > 0 for v in miss.values()) else [],
+#         "notes": [],
+#     }
 @metric("completeness")
 def m_completeness(df: pd.DataFrame, ctx: Dict[str, Any]) -> Dict[str, Any]:
+    if df.empty:
+        return {
+            "name": "completeness", "ok": None,
+            "metrics": {"missing_rate": 1.0, "missing_by_col": {c: 0 for c in df.columns}},
+            "actions": [],
+            "notes": ["DataFrame is empty."],
+        }
+
     miss = {c: int(df[c].isna().sum()) for c in df.columns}
     rate = float(df.isna().mean().mean())
     return {
@@ -122,6 +141,7 @@ def m_completeness(df: pd.DataFrame, ctx: Dict[str, Any]) -> Dict[str, Any]:
         "actions": ["impute_missing"] if any(v > 0 for v in miss.values()) else [],
         "notes": [],
     }
+
 
 @metric("pk_duplicates")
 def m_pk_duplicates(df: pd.DataFrame, ctx: Dict[str, Any]) -> Dict[str, Any]:

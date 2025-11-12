@@ -13,9 +13,10 @@ from pandas.api.types import (
 from airflow.models import Variable
 from botocore.exceptions import ClientError
 
+
 # ============================ Airflow Variables (single source of truth) ============================
 PROJECT        = Variable.get("N2N_PROJECT",        default_var="demo")
-DATASET_NAME   = Variable.get("N2N_DATASET",        default_var="sample")
+DATASET_NAME   = Variable.get("N2N_DATASET",        default_var="default")
 TARGET         = Variable.get("N2N_TARGET",         default_var="label")
 
 S3_ENDPOINT    = Variable.get("N2N_S3_ENDPOINT")            # e.g. http://minio:9000
@@ -25,7 +26,10 @@ S3_BUCKET      = Variable.get("N2N_S3_BUCKET")
 INPUT_KEY      = Variable.get("N2N_INPUT_KEY")              # e.g., raw/adult.csv
 
 CURATED_PREFIX = Variable.get("N2N_CURATED_PREFIX", default_var="curated")
-REPORT_PREFIX  = Variable.get("N2N_REPORT_PREFIX",  default_var="reports")
+REPORT_PREFIX  = Variable.get("N2N_REPORT_PREFIX",  default_var="dq_reports")
+SAVED_MODELS_PREFIX = Variable.get("N2N_SAVED_MODEL_PREFIX", default_var="saved_models")
+# dqc_utils.py（或你的共享配置处）
+
 
 # Time normalization / detection config
 DEFAULT_TZ     = Variable.get("N2N_DEFAULT_TZ",     default_var="UTC")       # e.g. "Europe/Amsterdam"
@@ -37,6 +41,7 @@ TS_SNAP_UNIT      = Variable.get("N2N_TS_SNAP_UNIT",      default_var="")    # "
 TS_ANCHOR_DATE    = Variable.get("N2N_TS_ANCHOR_DATE",    default_var="")    # optional YYYY-MM-DD
 
 # TS QC config (kept in helpers so DAGs can import from here consistently)
+TIMESTAMP_COL = Variable.get("N2N_TIMESTAMP_COL", default_var="timestamp")
 TS_EXPECTED_FREQ  = Variable.get("N2N_TS_EXPECTED_FREQ",  default_var="10S")    # e.g. "1S"; empty = auto
 TS_GAP_TOL_MULT   = float(Variable.get("N2N_TS_GAP_TOL_MULT", default_var="1.8"))
 TS_GROUP_KEYS_RAW = Variable.get("N2N_TS_GROUP_KEYS",     default_var="")    # e.g. "site_id,device_id"
@@ -61,6 +66,102 @@ PK_NAME_PATTERNS = [
     r"^imsi$", r"^imei$", r"^device_id$", r"^session_id$", r"^trace_id$",
     r"^beam_id$", r"^ssb_index$", r"^node_id$", r"^enb_id$", r"^nr_cell_id$",
 ]
+
+# ============================ Key Builder ============================
+# REPORT_PREFIX = "dq_reports"  # or load from your config
+
+def build_report_key(
+    input_key: str,
+    run_ts: str,
+    suffix: str = "dqc.json",
+    report_prefix: Optional[str] = None,
+) -> str:
+    """
+    Convert an input object key into a normalized report key:
+
+      input:  DeepSense/Scenario33/scenario33.csv
+      output: dq_reports/DeepSense/scenario33/<run_ts>_dqc.json
+
+    Rules:
+    - Strip query string and trailing slash.
+    - Keep the *first* path segment (dataset group) and the file stem (basename without extension).
+    - Drop any middle folders.
+    """
+    prefix = (report_prefix or REPORT_PREFIX).strip("/")
+
+    # 1) strip query & trailing slash
+    clean_key = input_key.strip().split("?", 1)[0].rstrip("/")
+
+    # 2) split and extract
+    parts = [p for p in clean_key.split("/") if p]
+    KNOWN_PREFIXES = {"raw", "curated"}
+    if parts and parts[0] in KNOWN_PREFIXES:
+        parts = parts[1:]
+    if not parts:
+        raise ValueError(f"Invalid input_key: {input_key!r}")
+
+    fname = parts[-1]
+    stem = fname.rsplit(".", 1)[0] if "." in fname else fname
+    top = parts[0]  # keep only the first segment
+
+    # 3) build: <REPORT_PREFIX>/<top>/<stem>/<run_ts>_<suffix>
+    return f"{prefix}/{top}/{stem}/{run_ts}_{suffix}"
+
+def build_curated_key(input_key: str, leaf: str, curated_prefix: str | None = None) -> str:
+    """
+    将原始对象 Key 映射到 curated 下的标准目录，并去掉原始文件扩展名：
+      input_key: DeepSense/Scenario33/scenario33.csv
+      leaf:      'data.csv'  (或 'train.csv' / 'test.csv' / 'Info/Scenario33.json' 等)
+      => curated/DeepSense/Scenario33/scenario33/data.csv
+
+    参数
+    ----
+    input_key : str
+        原始对象的 Key（可以是 raw 下的路径，函数只做路径重写，不访问存储）
+    leaf : str
+        需要落在该目录下的文件名或子路径（会自动去掉前导斜杠）
+    curated_prefix : str | None
+        覆盖默认的 curated 前缀；不传则从配置读取（默认 'curated'）
+    """
+    # 去掉 query/尾部斜杠
+    clean_key = input_key.strip().split("?")[0].rstrip("/")
+
+    # 去掉最后一段文件名的扩展名
+    parts = clean_key.split("/")
+    KNOWN_PREFIXES = {"raw", "curated"}
+    if parts and parts[0] in KNOWN_PREFIXES:
+        parts = parts[1:]
+    fname = parts[-1]
+    stem = fname.rsplit(".", 1)[0] if "." in fname else fname
+    rebuilt = "/".join(parts[:-1] + [stem])
+
+    # 读取配置中的 curated 前缀（若提供了参数则用参数）
+    try:
+        from dqc_utils import get_config_value  # 如果本函数就放在 dqc_utils 内部，直接调用本地函数即可
+        _cur_prefix = curated_prefix or get_config_value("prefix", "curated", default="curated")
+    except Exception:
+        _cur_prefix = curated_prefix or "curated"
+
+    leaf = leaf.lstrip("/")  # 规整 leaf
+    return f"{_cur_prefix}/{rebuilt}/{leaf}"
+
+
+def build_saved_models_key(input_key: str, run_ts: str, suffix: str = "model.pkl") -> str:
+    """
+    将输入对象 Key 原样嵌入到 saved_models/ 下，并去掉文件扩展名：
+      input_key: DeepSense/Scenario33/scenario33.csv
+      => saved_models/DeepSense/Scenario33/scenario33/<run_ts>_model.pkl
+    """
+    # 去掉 query/尾部斜杠
+    clean_key = input_key.strip().split("?")[0].rstrip("/")
+
+    # 去掉最后一段文件名的扩展名
+    parts = clean_key.split("/")
+    fname = parts[-1]
+    stem = fname.rsplit(".", 1)[0] if "." in fname else fname
+    rebuilt = "/".join(parts[:-1] + [stem])
+
+    return f"{SAVED_MODELS_PREFIX}/{rebuilt}/{run_ts}_{suffix}"
 
 # ============================ S3 / MinIO Helpers ============================
 @lru_cache(maxsize=1)
@@ -103,61 +204,126 @@ def _read_bytes(bucket: str, key: str) -> bytes:
     return _s3().get_object(Bucket=bucket, Key=key)["Body"].read()
 
 def load_df_from_minio(key: str) -> Tuple[pd.DataFrame, str]:
-    """Read CSV/Parquet/JSON(/NDJSON) → (DataFrame, format). Supports gz via extension."""
     ext = os.path.splitext(key)[1].lower()
     body = _read_bytes(S3_BUCKET, key)
+    bio = io.BytesIO(body)
+    lower_key = key.lower()
 
-    if ext in {".csv", ".txt"} or ext.endswith(".csv.gz") or ext == ".gz":
-        try:
-            return pd.read_csv(io.BytesIO(body)), "csv"
-        except UnicodeDecodeError:
-            return pd.read_csv(io.BytesIO(body), encoding="latin-1"), "csv"
-    if ext in {".parquet", ".pq"}:
-        return pd.read_parquet(io.BytesIO(body)), "parquet"
-    if ext in {".json", ".ndjson"} or ext.endswith(".json.gz") or ext.endswith(".ndjson.gz"):
-        is_nd = ext.endswith(".ndjson") or ext.endswith(".ndjson.gz")
-        return pd.read_json(io.BytesIO(body), lines=is_nd), "json"
-    # default: try CSV
-    return pd.read_csv(io.BytesIO(body)), "csv"
+    if lower_key.endswith(".csv") or lower_key.endswith(".txt"):
+        return pd.read_csv(bio), "csv"
+    if lower_key.endswith(".csv.gz") or lower_key.endswith(".txt.gz"):
+        return pd.read_csv(bio, compression="gzip"), "csv"
+
+    if lower_key.endswith(".parquet") or lower_key.endswith(".pq"):
+        return pd.read_parquet(bio), "parquet"
+
+    if lower_key.endswith(".ndjson") or lower_key.endswith(".ndjson.gz"):
+        return pd.read_json(bio, lines=True, compression=("gzip" if lower_key.endswith(".gz") else None)), "json"
+    if lower_key.endswith(".json") or lower_key.endswith(".json.gz"):
+        return pd.read_json(bio, lines=False, compression=("gzip" if lower_key.endswith(".gz") else None)), "json"
+
+    # default: try CSV without/with gzip
+    try:
+        return pd.read_csv(io.BytesIO(body)), "csv"
+    except Exception:
+        return pd.read_csv(io.BytesIO(body), compression="gzip"), "csv"
 
 def save_df_to_minio(df: pd.DataFrame, key: str, fmt: Optional[str] = None, index: bool = False) -> None:
     fmt = fmt or os.path.splitext(key)[1].lstrip(".").lower() or "csv"
-    if fmt == "csv":
-        buf = io.BytesIO(); df.to_csv(buf, index=index)
+    lower_key = key.lower()
+    if fmt == "csv" or lower_key.endswith(".csv") or lower_key.endswith(".csv.gz"):
+        buf = io.BytesIO()
+        comp = "gzip" if lower_key.endswith(".gz") else None
+        df.to_csv(buf, index=index, compression=comp)
         _s3().put_object(Bucket=S3_BUCKET, Key=key, Body=buf.getvalue(), ContentType="text/csv"); return
-    if fmt == "parquet":
+    if fmt == "parquet" or lower_key.endswith(".parquet") or lower_key.endswith(".pq"):
         buf = io.BytesIO(); df.to_parquet(buf, index=index)
         _s3().put_object(Bucket=S3_BUCKET, Key=key, Body=buf.getvalue(), ContentType="application/octet-stream"); return
+    # json
     buf = io.BytesIO(json.dumps(df.to_dict(orient="records")).encode("utf-8"))
     _s3().put_object(Bucket=S3_BUCKET, Key=key, Body=buf.getvalue(), ContentType="application/json")
 
+
+# dqc_utils.py (add)
+def s3_join(*parts: str) -> str:
+    return "/".join(str(p).strip("/") for p in parts if str(p).strip("/"))
+
+def get_curated_root(datasetname: str, dataname: str) -> str:
+    return s3_join(CURATED_PREFIX, datasetname, dataname)
+
+def curated_keys(datasetname: str, dataname: str) -> Dict[str, str]:
+    root = get_curated_root(datasetname, dataname)
+    return {
+        "root":        root + "/",
+        "data_csv":    s3_join(root, "data.csv"),
+        "train_csv":   s3_join(root, "train.csv"),
+        "test_csv":    s3_join(root, "test.csv"),
+        "incomplete":  s3_join(root, "incomplete.csv"),
+        "info_json":   s3_join(root, "Info", f"{dataname}.json"),
+        # "models_dir":  s3_join(root, "models"),
+        # "metrics_dir": s3_join(root, "metrics"),
+        "preds_dir":   s3_join(root, "predictions"),
+        "logs_dir":    s3_join(root, "logs"),
+        "masks_dir":   s3_join(root, "masks"),
+    }
+
 # ============================ Timestamp Inference & Normalization ============================
+
 NAME_PATTERNS = [
-    r"^timestamp$",
-    r"^time(?:_?stamp)?(?:\[.*\])?$",     # time_stamp, timestamp, time_stamp[UTC]
+    r"^time(?:_?stamp)?(?:\[.*\])?$",   # time, timestamp, time_stamp, time_stamp[UTC]
     r"^datetime$",
     r"^date$",
     r"^(?:event[_-]?(?:time|date))$",
     r"^(?:created|updated)_at$",
-    r"^ingest[_-]?time$",
-    # fuzzy fallbacks:
+    # 次要模糊匹配（放后面）
     r"\btime[_-]?stamp\b",
     r"\bdatetime\b",
     r"\bevent[_-]?time\b",
 ]
 
+# preclean the time format strings
+def _preclean_time_strings(series: pd.Series) -> pd.Series:
+    s = series.astype(str).str.strip()
+
+    # 去掉像 "['...']" 的包裹
+    s = s.str.replace(r"^\[\s*['\"]?(.*?)['\"]?\s*\]$", r"\1", regex=True)
+
+    # HH:MM:SS-ffffff -> HH:MM:SS.ffffff
+    s = s.str.replace(r"^(\d{1,2}):(\d{2}):(\d{2})-(\d{1,6})$", r"\1:\2:\3.\4", regex=True)
+
+    # HH-MM-SS-ffffff 或 HH-MM-SS.ffffff -> HH:MM:SS.ffffff
+    s = s.str.replace(r"^(\d{1,2})-(\d{2})-(\d{2})[.\-](\d{1,6})$", r"\1:\2:\3.\4", regex=True)
+
+    # HH-MM-SS -> HH:MM:SS
+    s = s.str.replace(r"^(\d{1,2})-(\d{2})-(\d{2})$", r"\1:\2:\3", regex=True)
+
+    # 末尾的 .毫秒 补齐到 ≥3 位，最多保留6位（微秒）
+    def _pad_frac(m):
+        ms = m.group(1)[:6]             # 最多 6 位
+        if 1 <= len(ms) <= 2:
+            ms = ms.ljust(3, "0")       # 至少 3 位
+        return "." + ms
+    s = s.str.replace(r"\.(\d{1,6})$", lambda m: _pad_frac(m), regex=True)
+
+    # 空字串统一为 NaN
+    s = s.mask(s.str.len() == 0)
+    return s
+
 
 EXPLICIT_TIME_FORMATS = [
+    # 日期+时间
     "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f",
     "%Y/%m/%d %H:%M:%S",
     "%d-%m-%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
     "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y",
     "%Y%m%d%H%M%S", "%Y%m%d",
     "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S%z",
-    # time-only (both colon and hyphen separators)
-    "%H:%M:%S.%f", "%H:%M:%S",          # existing colon forms
-    "%H-%M-%S.%f", "%H-%M-%S-%f", "%H-%M-%S",  # <-- new hyphen forms
+
+    # 只有时间（冒号/短横，带/不带毫秒/微秒）
+    "%H:%M:%S.%f", "%H:%M:%S",
+    "%H-%M-%S.%f", "%H-%M-%S-%f", "%H-%M-%S",
 ]
+
 
 
 def _preclean_time_strings(series: pd.Series) -> pd.Series:
@@ -174,6 +340,10 @@ def _preclean_time_strings(series: pd.Series) -> pd.Series:
     s = s.str.replace(r"^(\d{1,2})-(\d{2})-(\d{2})[.\-](\d{1,6})$", r"\1:\2:\3.\4", regex=True)
     # HH-MM-SS       -> HH:MM:SS
     s = s.str.replace(r"^(\d{1,2})-(\d{2})-(\d{2})$", r"\1:\2:\3", regex=True)
+    # 必须包含：HH:MM:SS-ffffff -> HH:MM:SS.ffffff
+    s = s.str.replace(r"^(\d{1,2}):(\d{2}):(\d{2})-(\d{1,6})$", r"\1:\2:\3.\4", regex=True)
+    # 以及 HH-MM-SS[-|.]fff -> HH:MM:SS.fff
+    s = s.str.replace(r"^(\d{1,2})-(\d{2})-(\d{2})[.\-](\d{1,6})$", r"\1:\2:\3.\4", regex=True)
 
     # pad trailing milliseconds to ≥3 digits
     def _pad_ms(m):
@@ -184,13 +354,15 @@ def _preclean_time_strings(series: pd.Series) -> pd.Series:
     s = s.str.replace(r"\.(\d{1,6})$", lambda m: _pad_ms(m), regex=True)
     return s
 
-def _try_parse_datetime(series: pd.Series, sample: int = 1000, tz_aware: bool = False) -> float:
-    s = series.dropna()
-    if s.empty:
-        return 0.0
-    s = s.sample(min(sample, len(s)), random_state=42)
-    parsed = pd.to_datetime(s, errors="coerce", utc=tz_aware)  # no infer_datetime_format
-    return float(parsed.notna().mean())
+# def _try_parse_datetime(series, sample=1000, tz_aware=False):
+#     s = series.dropna().astype(str).str.strip()
+#     s = s[~s.str.lower().isin({"", "nan", "none", "null"})]
+#     if s.empty:
+#         return 0.0
+#     s = s.sample(min(sample, len(s)), random_state=42)
+#     s_clean = _preclean_time_strings(s)
+#     parsed = pd.to_datetime(s_clean, errors="coerce", utc=tz_aware)
+#     return float(parsed.notna().mean())
 
 def _looks_like_epoch(series: pd.Series) -> tuple[bool, Optional[str]]:
     """Detect epoch s/ms/us/ns by magnitude + quasi-monotonicity."""
@@ -214,179 +386,301 @@ def _looks_like_epoch(series: pd.Series) -> tuple[bool, Optional[str]]:
     if not diffs.empty and (diffs < 0).mean() <= 0.2:
         return True, unit
     return False, None
-
 def detect_timestamp_column(df: pd.DataFrame, configured_name: Optional[str] = None) -> tuple[Optional[str], Dict[str, Any]]:
+    """
+    Detect a single timestamp column.
+    Returns (column_name_or_None, details={"strategy","unit","confidence"})
+    """
     details: Dict[str, Any] = {"strategy": None, "unit": None, "confidence": 0.0}
 
+    # ---- local helpers ------------------------------------------------------
+    TIME_ONLY_REGEX = re.compile(r"^\s*\d{1,2}[:\-]\d{2}[:\-]\d{2}(?:[.\-]\d{1,6})?\s*$")
+    # rename-friendly patterns: time / timestamp / time_stamp / time_stamp[UTC]
+    EXTRA_NAME_PATTERNS = [r"^time(?:_?stamp)?(?:\[.*\])?$"]
 
-    # 0) explicit
+    def _score_series_as_time(s: pd.Series) -> Tuple[float, Optional[str]]:
+        """
+        Score a candidate text series as timestamp.
+        Returns (score in [0,1], epoch_unit_if_used).
+        """
+        epoch_unit_used: Optional[str] = None
+
+        # 0) preclean (strip ['...'], unify -, pad fraction)
+        s_clean = _preclean_time_strings(s.astype(str))
+
+        # 1) quick regex-based time-only score (no parsing)
+        #    e.g. "04:09:06-325991", "12-00-06.900", "00-42-15-0"
+        regex_rate = float(s_clean.str.match(TIME_ONLY_REGEX, na=False).mean())
+
+        # 2) explicit formats first (robust)
+        best = regex_rate  # start from regex score so time-only won't be 0
+        for fmt in EXPLICIT_TIME_FORMATS:
+            try:
+                r = pd.to_datetime(s_clean, format=fmt, errors="coerce", utc=True).notna().mean()
+                best = max(best, float(r))
+                if best >= 0.95:
+                    return best, None
+            except Exception:
+                pass
+
+        # 3) generic parser on cleaned strings
+        try:
+            r2 = pd.to_datetime(s_clean, errors="coerce", utc=True).notna().mean()
+            best = max(best, float(r2))
+            if best >= 0.95:
+                return best, None
+        except Exception:
+            pass
+
+        # 4) epoch digits embedded or pure numeric (10–19 digits)
+        try:
+            digits = s_clean.str.extract(r"(\d{10,19})")[0]
+            if digits is not None:
+                x = pd.to_numeric(digits, errors="coerce")
+                med = x.median()
+                unit = None
+                if pd.notna(med):
+                    if 1e18 <= med < 1e19: unit = "ns"
+                    elif 1e15 <= med < 1e16: unit = "us"
+                    elif 1e12 <= med < 1e13: unit = "ms"
+                    elif 1e9  <= med < 1e10: unit = "s"   # <- 覆盖 1636553178
+                if unit:
+                    p = pd.to_datetime(x, unit=unit, errors="coerce", utc=True)
+                    r3 = float(p.notna().mean())
+                    if r3 > best:
+                        best, epoch_unit_used = r3, unit
+        except Exception:
+            pass
+
+        return best, epoch_unit_used
+
+    # 合并列名模式（保序去重）
+    combined_name_patterns = []
+    for pat in (list(NAME_PATTERNS) if 'NAME_PATTERNS' in globals() else []) + EXTRA_NAME_PATTERNS:
+        if pat not in combined_name_patterns:
+            combined_name_patterns.append(pat)
+
+    # ---- 0) configured name -------------------------------------------------
     if configured_name and configured_name in df.columns:
-        ok = 1.0 if is_datetime64_any_dtype(df[configured_name]) else _try_parse_datetime(df[configured_name])
-        details.update({"strategy": "configured", "confidence": ok})
-        return configured_name, details
+        col = configured_name
+        if is_datetime64_any_dtype(df[col]):
+            details.update({"strategy": "configured", "confidence": 1.0})
+            return col, details
+        score, unit_used = _score_series_as_time(df[col])
+        details.update({"strategy": "configured", "unit": unit_used, "confidence": float(score)})
+        if score >= 0.6:
+            return col, details
+        # else fallthrough
 
-    # 1) regex name match
+    # ---- 1) name regex shortlist -------------------------------------------
     lowers = {c.lower(): c for c in df.columns}
-    for pat in NAME_PATTERNS:
+    for pat in combined_name_patterns:
         prog = re.compile(pat, re.IGNORECASE)
         for lc, orig in lowers.items():
-            if prog.match(lc) or prog.search(lc):
-                score = 1.0 if is_datetime64_any_dtype(df[orig]) else _try_parse_datetime(df[orig])
-                if score < 0.8 and is_string_dtype(df[orig]):
-                    best = 0.0
-                    for fmt in EXPLICIT_TIME_FORMATS:
-                        try:
-                            r = pd.to_datetime(df[orig], format=fmt, errors="coerce", utc=True).notna().mean()
-                            best = max(best, float(r))
-                            if best >= 0.95: break
-                        except Exception:
-                            pass
-                    score = max(score, best)
+            # also try stripping bracket suffix like [UTC] for matching
+            lc_stripped = re.sub(r"\[.*?\]$", "", lc)
+            if prog.match(lc) or prog.search(lc) or prog.match(lc_stripped) or prog.search(lc_stripped):
+                col = orig
+                if is_datetime64_any_dtype(df[col]):
+                    details.update({"strategy": "name_regex", "confidence": 1.0})
+                    return col, details
+                score, unit_used = _score_series_as_time(df[col])
                 if score >= 0.6:
-                    details.update({"strategy": "name_regex", "confidence": score})
-                    return orig, details
+                    details.update({"strategy": "name_regex", "unit": unit_used, "confidence": float(score)})
+                    return col, details
 
-    # 2) datetime dtype
+    # ---- 2) dtype is already datetime --------------------------------------
     for c in df.columns:
         if is_datetime64_any_dtype(df[c]):
             details.update({"strategy": "dtype_datetime", "confidence": 1.0})
             return c, details
 
-    # 3) parseable strings via explicit formats
-    best_col, best_score = None, 0.0
+    # ---- 3) free scan over string columns ----------------------------------
+    best_col, best_score, best_unit = None, 0.0, None
     for c in df.columns:
         if is_string_dtype(df[c]):
-            # inside: for c in df.columns: if is_string_dtype(df[c]):
-            raw = df[c]
-            clean = _preclean_time_strings(raw)
-            score = 0.0
-            # try explicit formats on cleaned first
-            for fmt in EXPLICIT_TIME_FORMATS:
-                try:
-                    r = pd.to_datetime(clean, format=fmt, errors="coerce", utc=True).notna().mean()
-                    score = max(score, float(r))
-                    if score >= 0.95: break
-                except Exception:
-                    pass
-            # fall back: generic to_datetime on cleaned
-            if score < 0.95:
-                r2 = pd.to_datetime(clean, errors="coerce", utc=True).notna().mean()
-                score = max(score, float(r2))
-
+            score, unit_used = _score_series_as_time(df[c])
             if score > best_score:
-                best_col, best_score = c, score
+                best_col, best_score, best_unit = c, score, unit_used
     if best_col and best_score >= 0.6:
-        details.update({"strategy": "explicit_formats_scan", "confidence": best_score})
+        details.update({"strategy": "explicit_formats_scan", "unit": best_unit, "confidence": float(best_score)})
         return best_col, details
 
-    # 4) epoch numeric
+    # ---- 4) epoch numeric (pure numeric dtype) ------------------------------
     for c in df.columns:
         ok, unit = _looks_like_epoch(df[c])
         if ok:
             details.update({"strategy": "epoch_numeric", "unit": unit, "confidence": 0.8})
             return c, details
 
-    return None, {"strategy": "none", "confidence": 0.0}
+    # ---- none ---------------------------------------------------------------
+    return None, {"strategy": "none", "unit": None, "confidence": 0.0}
 
-def _coerce_to_datetime_robust(series: pd.Series, default_tz: str = "UTC") -> tuple[pd.Series, Dict[str, Any]]:
-    """Parse heterogenous time formats into pandas datetime64[ns, UTC]."""
+def _coerce_to_datetime_robust(series: pd.Series, default_tz: str = "UTC") -> tuple[pd.Series, dict]:
+    """
+    Parse heterogeneous timestamp columns into pandas datetime64[ns, UTC].
+
+    - Uses pre-cleaning for odd strings (e.g., HH-MM-SS-fff, ['...']).
+    - Tries: (A) fast generic parse on cleaned strings,
+             (B) explicit formats (incl. time-only),
+             (C) numeric epoch (s/ms/us/ns) by magnitude,
+             (D) epoch digits embedded in strings,
+             (E) last-resort localize->UTC.
+    - Flags time-only detections so the caller can anchor a date if desired.
+
+    Returns
+    -------
+    (parsed_series_utc, meta_dict)
+      parsed_series_utc : pd.Series[datetime64[ns, UTC]]
+      meta_dict         : {
+        "strategy": str,
+        "unit": Optional[str],             # epoch unit if used: "s"|"ms"|"us"|"ns"
+        "parse_rate": float,               # fraction of non-NaT after parse
+        "notes": list[str],
+        "time_only": bool                  # True when values look like HH:MM:SS[.fff] without date
+      }
+    """
     s = series.copy()
-    meta: Dict[str, Any] = {"strategy": None, "unit": None, "parse_rate": 0.0, "notes": [], "time_only": False}
+    meta = {"strategy": None, "unit": None, "parse_rate": 0.0, "notes": [], "time_only": False}
 
-    # already datetime?
+    # --- Case 0: already datetime-like ---
     if is_datetime64_any_dtype(s):
         try:
+            # localize naïve → default_tz, then convert to UTC
             if s.dt.tz is None:
                 s = s.dt.tz_localize(default_tz)
             s = s.dt.tz_convert("UTC")
             meta.update({"strategy": "already_datetime", "parse_rate": 1.0})
             return s, meta
         except Exception as e:
-            meta["notes"].append(f"tz_convert_failed: {e}")
+            meta["notes"].append(f"already_datetime_convert_failed: {e}")
 
-    # infer (mixed strings)
+    # Prepare string & numeric views once
+    is_str_like = (s.dtype == object) or pd.api.types.is_string_dtype(s)
+    s_str = None
+    if is_str_like:
+        s_str = s.astype(str).str.strip()
+        # drop common empties before scoring to avoid depressing parse_rate
+        mask_valid = ~s_str.str.lower().isin({"", "nan", "none", "null"})
+        s_str = s_str.where(mask_valid, None)
+
+    # --- Case A: fast generic parse on pre-cleaned strings ---
     try:
-        parsed = pd.to_datetime(s, errors="coerce", utc=True)  # no infer_datetime_format
-        rate = float(parsed.notna().mean())
-        if rate >= 0.9:
-            meta.update({"strategy": "pd_to_datetime_infer", "parse_rate": rate})
-            return parsed, meta
-        meta["notes"].append(f"infer_rate={rate:.2f}")
+        if is_str_like:
+            s0 = _preclean_time_strings(s_str)
+            parsed = pd.to_datetime(s0, errors="coerce", utc=True)
+            rate = float(parsed.notna().mean())
+            if rate >= 0.90:
+                # mark time-only if many rows normalize to 1900-01-01 (pandas default for time-only)
+                try:
+                    if (parsed.dt.normalize() == pd.Timestamp("1900-01-01", tz="UTC")).mean() > 0.5:
+                        meta["time_only"] = True
+                except Exception:
+                    pass
+                meta.update({"strategy": "generic_cleaned", "parse_rate": rate})
+                return parsed, meta
+            meta["notes"].append(f"generic_cleaned_rate={rate:.2f}")
     except Exception as e:
-        meta["notes"].append(f"to_datetime_error: {e}")
+        meta["notes"].append(f"generic_cleaned_error: {e}")
 
-    if s.dtype == object or pd.api.types.is_string_dtype(s):
-        s_clean = _preclean_time_strings(s)
-    else:
-        s_clean = s
-
-    # explicit formats (incl time-only)
-    best, best_rate = None, 0.0
-    for fmt in EXPLICIT_TIME_FORMATS:
-        try:
-            p = pd.to_datetime(s_clean, format=fmt, errors="coerce", utc=True)
-            r = float(p.notna().mean())
-            if fmt in ("%H:%M:%S-%f", "%H:%M:%S.%f", "%H:%M:%S"):
-                meta["time_only"] = True
-            if r > best_rate:
-                best, best_rate = p, r
-            if r >= 0.95:
-                best, best_rate = p, r
-                break
-        except Exception:
-            pass
-    if best is not None and best_rate >= 0.6:
-        meta.update({"strategy": "explicit_formats", "parse_rate": best_rate})
+    # --- Case B: explicit formats (try strongest first) ---
+    best = None
+    best_rate = 0.0
+    tried_time_only = False
+    if is_str_like:
+        s0 = _preclean_time_strings(s_str)
+        for fmt in EXPLICIT_TIME_FORMATS:
+            try:
+                p = pd.to_datetime(s0, format=fmt, errors="coerce", utc=True)
+                r = float(p.notna().mean())
+                # identify time-only formats
+                if fmt in ("%H:%M:%S.%f", "%H:%M:%S", "%H-%M-%S.%f", "%H-%M-%S-%f", "%H-%M-%S"):
+                    tried_time_only = True
+                if r > best_rate:
+                    best, best_rate = p, r
+                if r >= 0.95:
+                    best, best_rate = p, r
+                    break
+            except Exception:
+                continue
+    if best is not None and best_rate >= 0.60:
+        meta["time_only"] = meta["time_only"] or tried_time_only
+        meta.update({"strategy": "explicit_formats", "parse_rate": float(best_rate)})
         return best, meta
     if best is not None:
-        meta["notes"].append(f"explicit_rate={best_rate:.2f}")
+        meta["notes"].append(f"explicit_formats_rate={best_rate:.2f}")
 
-    # epoch numeric (by magnitude)
-    x = pd.to_numeric(s, errors="coerce")
-    med = x.median()
-    if pd.notna(med):
-        for unit, lo, hi in [("s",1e9,1e10),("ms",1e12,1e13),("us",1e15,1e16),("ns",1e18,1e19)]:
-            if lo <= med < hi:
+    # --- Case C: numeric epoch by magnitude (s/ms/us/ns) ---
+    try:
+        x = pd.to_numeric(s, errors="coerce")
+        med = x.median()
+        if pd.notna(med):
+            unit = None
+            # infer unit by magnitude (robust rough bands)
+            if 1e18 <= med < 1e19:
+                unit = "ns"
+            elif 1e15 <= med < 1e16:
+                unit = "us"
+            elif 1e12 <= med < 1e13:
+                unit = "ms"
+            elif 1e9 <= med < 1e10:
+                unit = "s"
+            if unit:
                 p = pd.to_datetime(x, unit=unit, errors="coerce", utc=True)
                 rate = float(p.notna().mean())
-                if rate >= 0.9:
-                    meta.update({"strategy":"epoch_numeric","unit":unit,"parse_rate":rate})
+                if rate >= 0.90:
+                    meta.update({"strategy": "epoch_numeric", "unit": unit, "parse_rate": rate})
                     return p, meta
-                break
+                meta["notes"].append(f"epoch_numeric_rate={rate:.2f} (unit={unit})")
+    except Exception as e:
+        meta["notes"].append(f"epoch_numeric_error: {e}")
 
-    # epoch embedded in strings (e.g., "...1698765432100...")
-    if is_string_dtype(s):
-        digits = s.astype(str).str.extract(r"(\d{10,19})")[0]
-        if digits is not None:
-            p = pd.to_numeric(digits, errors="coerce")
-            med = p.median()
-            unit = None
-            if pd.notna(med):
-                if 1e9 <= med < 1e10: unit = "s"
-                elif 1e12 <= med < 1e13: unit = "ms"
-                elif 1e15 <= med < 1e16: unit = "us"
-                elif 1e18 <= med < 1e19: unit = "ns"
-            if unit:
-                parsed = pd.to_datetime(p, unit=unit, errors="coerce", utc=True)
-                rate = float(parsed.notna().mean())
-                if rate >= 0.9:
-                    meta.update({"strategy":"epoch_in_string","unit":unit,"parse_rate":rate})
-                    return parsed, meta
-                meta["notes"].append(f"epoch_in_string_rate={rate:.2f}")
+    # --- Case D: epoch digits embedded inside strings ---
+    if is_str_like:
+        try:
+            digits = s_str.str.extract(r"(\d{10,19})")[0]
+            if digits is not None:
+                vals = pd.to_numeric(digits, errors="coerce")
+                med = vals.median()
+                unit = None
+                if pd.notna(med):
+                    if 1e18 <= med < 1e19: unit = "ns"
+                    elif 1e15 <= med < 1e16: unit = "us"
+                    elif 1e12 <= med < 1e13: unit = "ms"
+                    elif 1e9 <= med < 1e10:  unit = "s"
+                if unit:
+                    p = pd.to_datetime(vals, unit=unit, errors="coerce", utc=True)
+                    rate = float(p.notna().mean())
+                    if rate >= 0.90:
+                        meta.update({"strategy": "epoch_in_string", "unit": unit, "parse_rate": rate})
+                        return p, meta
+                    meta["notes"].append(f"epoch_in_string_rate={rate:.2f} (unit={unit})")
+        except Exception as e:
+            meta["notes"].append(f"epoch_in_string_error: {e}")
 
-    # last resort: naive → localize → UTC
+    # --- Case E: last resort: naive parse → localize(default_tz) → UTC ---
     try:
-        parsed = pd.to_datetime(s, errors="coerce")  # utc=False default
+        # Try on raw strings if available; else on original
+        base = _preclean_time_strings(s_str) if is_str_like else s
+        parsed = pd.to_datetime(base, errors="coerce")  # tz-naive
         rate = float(parsed.notna().mean())
         if rate > 0.0:
             parsed = parsed.dt.tz_localize(default_tz, nonexistent="NaT", ambiguous="NaT").dt.tz_convert("UTC")
-            meta.update({"strategy":"last_resort_localize","parse_rate":rate})
+            # mark time-only by 1900-01-01 heuristic if applicable
+            try:
+                if (parsed.dt.normalize() == pd.Timestamp("1900-01-01", tz="UTC")).mean() > 0.5:
+                    meta["time_only"] = True
+            except Exception:
+                pass
+            meta.update({"strategy": "last_resort_localize", "parse_rate": rate})
             return parsed, meta
+        meta["notes"].append("last_resort_rate=0.00")
     except Exception as e:
         meta["notes"].append(f"last_resort_error: {e}")
 
-    meta.update({"strategy":"failed","parse_rate":0.0})
-    return pd.Series([pd.NaT]*len(s), dtype="datetime64[ns, UTC]"), meta
+    # --- Fail: return all-NaT UTC series with diagnostics ---
+    meta.update({"strategy": "failed", "parse_rate": 0.0})
+    return pd.Series([pd.NaT] * len(s), dtype="datetime64[ns, UTC]"), meta
 
 def standardize_timestamp_column(
     df: pd.DataFrame, ts_col: str, out_col: str, default_tz: str = "UTC"
