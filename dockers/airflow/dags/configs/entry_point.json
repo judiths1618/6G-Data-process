@@ -1,11 +1,11 @@
 
 {
   "s3": {
-    "endpoint": "127.0.0.1:9000",
+    "endpoint": "127.0.0.1:9333",
     "secure": false,
-    "access_key": "minioadmin",
-    "secret_key": "minioadmin",
-    "bucket": "6gdali-lake2025",
+    "access_key": "anykey",
+    "secret_key": "anysecret",
+    "bucket": "6gdali-lake2026",
     "region": null
   },
   "prefix": {

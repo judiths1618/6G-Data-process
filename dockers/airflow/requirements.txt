@@ -1,0 +1,13 @@
+apache-airflow-providers-amazon
+# torch
+# torchvision
+# torchaudio
+scikit-learn
+pandas
+numpy
+boto3
+s3fs
+
+great-expectations==0.18.19
+matplotlib
+pyarrow
