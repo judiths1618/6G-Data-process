@@ -1,0 +1,39 @@
+{
+  "dataset_name": "rabbitmq-performance",
+  "model_version": "manual__2026-02-25T07:39:18.669633+00:00",
+  "output_version": "manual__2026-02-25T07:39:18.669633+00:00",
+  "model_s3_prefix": "wavestitchplus/rabbitmq-performance/manual__2026-02-25T07:39:18.669633+00:00/prepared",
+  "inference_timestamp": "2026-02-25T08:01:52.351312",
+  "shapes": {
+    "test_input": [
+      2612,
+      17
+    ],
+    "output": [
+      2612,
+      17
+    ]
+  },
+  "missing_values": {
+    "input": 16760,
+    "output": 0,
+    "filled": 16760
+  },
+  "params": {
+    "n_trials": 1,
+    "guidance_scale": 0.1
+  },
+  "timing": {
+    "started_at": "2026-02-25T08:01:10.171465",
+    "completed_at": "2026-02-25T08:01:52.310824",
+    "duration_seconds": 42.139359
+  },
+  "files": {
+    "main_output": "imputed.csv",
+    "trials": [
+      "imputed_em_stride_1_trial_0.csv",
+      "imputed_em_stride_1_trial_0.csv"
+    ],
+    "log": "inference.log"
+  }
+}

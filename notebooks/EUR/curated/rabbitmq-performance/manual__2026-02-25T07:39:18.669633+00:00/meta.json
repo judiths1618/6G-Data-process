@@ -1,0 +1,209 @@
+{
+  "dataset_name": "rabbitmq-performance",
+  "run_id": "manual__2026-02-25T07:39:18.669633+00:00",
+  "stored_at": "2026-02-25T08:02:00.527780",
+  "rows": 2612,
+  "columns": [
+    "time",
+    "cpu_limit",
+    "cpu_usage",
+    "n",
+    "ram_limit_mb",
+    "ram_usage_mb",
+    "min_ms",
+    "lat50_ms",
+    "lat75_ms",
+    "lat95_ms",
+    "lat99_ms",
+    "t_norm",
+    "sin_day",
+    "cos_day",
+    "is_gap",
+    "time_since_last_obs",
+    "time_to_next_obs"
+  ],
+  "source_key": "test/rabbitmq-performance.csv",
+  "quality_status": "FAIL",
+  "validation_passed": true,
+  "cleaning_summary": {
+    "deduplication": {
+      "removed": 0,
+      "remaining": 22556
+    },
+    "structural_fix": {
+      "fixes_applied": [
+        "Sorted by timestamp (enforced monotonicity)"
+      ]
+    },
+    "outlier_handling": {
+      "lat99": {
+        "clipped": 226,
+        "range": [
+          0.0,
+          98142493.60000001
+        ]
+      },
+      "lat95": {
+        "clipped": 226,
+        "range": [
+          0.0,
+          97996104.60000001
+        ]
+      },
+      "min": {
+        "clipped": 226,
+        "range": [
+          0.0,
+          96463646.65
+        ]
+      },
+      "ram_usage": {
+        "clipped": 451,
+        "range": [
+          241597030.4,
+          2353577984.0
+        ]
+      },
+      "lat75": {
+        "clipped": 226,
+        "range": [
+          0.0,
+          97678655.55
+        ]
+      },
+      "lat50": {
+        "clipped": 226,
+        "range": [
+          0.0,
+          97427839.4
+        ]
+      },
+      "cpu_usage": {
+        "clipped": 452,
+        "range": [
+          0.10993705000000001,
+          2.6244379000000007
+        ]
+      }
+    },
+    "ts_imputation": {
+      "method": "WaveStitch+ (diffusion EM)",
+      "output_key": "wavestitchplus/rabbitmq-performance/latest_inference/imputed.csv"
+    },
+    "post_imputation_outlier_removal": {
+      "cpu_limit": {
+        "clipped": 27,
+        "range": [
+          0.5,
+          2.9722836200000002
+        ]
+      },
+      "cpu_usage": {
+        "clipped": 54,
+        "range": [
+          0.003851638722,
+          0.016411058489999998
+        ]
+      },
+      "n": {
+        "clipped": 0,
+        "range": [
+          50.0,
+          600.0
+        ]
+      },
+      "ram_limit_mb": {
+        "clipped": 0,
+        "range": [
+          1024.0,
+          4096.0
+        ]
+      },
+      "ram_usage_mb": {
+        "clipped": 54,
+        "range": [
+          243.90307769999998,
+          1841.0893279999993
+        ]
+      },
+      "min_ms": {
+        "clipped": 53,
+        "range": [
+          0.16796875,
+          91642.9857
+        ]
+      },
+      "lat50_ms": {
+        "clipped": 53,
+        "range": [
+          0.43164062,
+          92827.9228
+        ]
+      },
+      "lat75_ms": {
+        "clipped": 54,
+        "range": [
+          0.6019921875,
+          93158.75415000001
+        ]
+      },
+      "lat95_ms": {
+        "clipped": 54,
+        "range": [
+          0.951796875,
+          93631.06605000001
+        ]
+      },
+      "lat99_ms": {
+        "clipped": 54,
+        "range": [
+          1.424882818,
+          93900.4861
+        ]
+      },
+      "t_norm": {
+        "clipped": 54,
+        "range": [
+          0.009999999999999929,
+          0.99
+        ]
+      },
+      "sin_day": {
+        "clipped": 54,
+        "range": [
+          -0.9994518170194631,
+          0.9994640563795574
+        ]
+      },
+      "cos_day": {
+        "clipped": 54,
+        "range": [
+          -0.9994590157891706,
+          0.9997495282877816
+        ]
+      },
+      "is_gap": {
+        "clipped": 0,
+        "range": [
+          0.0,
+          1.0
+        ]
+      },
+      "time_since_last_obs": {
+        "clipped": 24,
+        "range": [
+          0.0,
+          11.5
+        ]
+      },
+      "time_to_next_obs": {
+        "clipped": 24,
+        "range": [
+          0.0,
+          11.5
+        ]
+      }
+    }
+  },
+  "curated_key": "curated/rabbitmq-performance/manual__2026-02-25T07:39:18.669633+00:00/data.csv"
+}

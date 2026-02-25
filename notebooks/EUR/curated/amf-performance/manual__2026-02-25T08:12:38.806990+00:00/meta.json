@@ -1,0 +1,290 @@
+{
+  "dataset_name": "amf-performance",
+  "run_id": "manual__2026-02-25T08:12:38.806990+00:00",
+  "stored_at": "2026-02-25T08:16:38.786712",
+  "rows": 493,
+  "columns": [
+    "time",
+    "cpu_limit",
+    "cpu_usage",
+    "n",
+    "ram_limit_mb",
+    "ram_usage_mb",
+    "mean_ms",
+    "lat50_ms",
+    "lat75_ms",
+    "lat80_ms",
+    "lat90_ms",
+    "lat95_ms",
+    "lat98_ms",
+    "lat99_ms",
+    "lat100_ms",
+    "t_norm",
+    "sin_day",
+    "cos_day",
+    "sin_hour",
+    "cos_hour",
+    "is_gap",
+    "time_since_last_obs",
+    "time_to_next_obs"
+  ],
+  "source_key": "test/amf-performance.csv",
+  "quality_status": "PASS",
+  "validation_passed": true,
+  "cleaning_summary": {
+    "deduplication": {
+      "removed": 0,
+      "remaining": 27413
+    },
+    "structural_fix": {
+      "skipped": true
+    },
+    "outlier_handling": {
+      "lat99": {
+        "clipped": 550,
+        "range": [
+          180095.88,
+          88854276.04
+        ]
+      },
+      "lat90": {
+        "clipped": 550,
+        "range": [
+          180095.88,
+          88811250.96000001
+        ]
+      },
+      "mean": {
+        "clipped": 550,
+        "range": [
+          175732.88,
+          87422958.16000004
+        ]
+      },
+      "n": {
+        "clipped": 203,
+        "range": [
+          10.0,
+          520.0
+        ]
+      },
+      "lat98": {
+        "clipped": 550,
+        "range": [
+          180095.88,
+          88848871.08000001
+        ]
+      },
+      "lat95": {
+        "clipped": 550,
+        "range": [
+          180095.88,
+          88828390.96000001
+        ]
+      },
+      "ram_usage": {
+        "clipped": 545,
+        "range": [
+          217821184.0,
+          1843965952.0
+        ]
+      },
+      "lat75": {
+        "clipped": 550,
+        "range": [
+          178980.6,
+          88424573.00000013
+        ]
+      },
+      "lat50": {
+        "clipped": 550,
+        "range": [
+          175877.84,
+          87471645.56000003
+        ]
+      },
+      "lat100": {
+        "clipped": 550,
+        "range": [
+          181612.92,
+          88866829.48
+        ]
+      },
+      "lat80": {
+        "clipped": 550,
+        "range": [
+          178980.6,
+          88576662.40000013
+        ]
+      },
+      "cpu_usage": {
+        "clipped": 275,
+        "range": [
+          0.0,
+          1.2649402
+        ]
+      }
+    },
+    "ts_imputation": {
+      "method": "WaveStitch+ (diffusion EM)",
+      "output_key": "wavestitchplus/amf-performance/latest_inference/imputed.csv"
+    },
+    "post_imputation_outlier_removal": {
+      "cpu_limit": {
+        "clipped": 5,
+        "range": [
+          2.5,
+          2.76462084
+        ]
+      },
+      "cpu_usage": {
+        "clipped": 10,
+        "range": [
+          0.0629741492,
+          1.2256019599999997
+        ]
+      },
+      "n": {
+        "clipped": 4,
+        "range": [
+          30.0,
+          520.0
+        ]
+      },
+      "ram_limit_mb": {
+        "clipped": 7,
+        "range": [
+          512.0,
+          2225.641792
+        ]
+      },
+      "ram_usage_mb": {
+        "clipped": 10,
+        "range": [
+          353.66632799999996,
+          1816.722052
+        ]
+      },
+      "mean_ms": {
+        "clipped": 10,
+        "range": [
+          453.4610184,
+          70739.91471999996
+        ]
+      },
+      "lat50_ms": {
+        "clipped": 10,
+        "range": [
+          456.9543328,
+          70764.74479999994
+        ]
+      },
+      "lat75_ms": {
+        "clipped": 10,
+        "range": [
+          459.3199976,
+          71014.38807999996
+        ]
+      },
+      "lat80_ms": {
+        "clipped": 10,
+        "range": [
+          459.4514072,
+          71037.22559999995
+        ]
+      },
+      "lat90_ms": {
+        "clipped": 10,
+        "range": [
+          461.2689112,
+          71120.44079999995
+        ]
+      },
+      "lat95_ms": {
+        "clipped": 10,
+        "range": [
+          463.6388544,
+          71141.39831999995
+        ]
+      },
+      "lat98_ms": {
+        "clipped": 10,
+        "range": [
+          464.6805888,
+          71182.65879999995
+        ]
+      },
+      "lat99_ms": {
+        "clipped": 10,
+        "range": [
+          464.6814812,
+          71192.50351999995
+        ]
+      },
+      "lat100_ms": {
+        "clipped": 10,
+        "range": [
+          467.8535572,
+          71195.86539999995
+        ]
+      },
+      "t_norm": {
+        "clipped": 10,
+        "range": [
+          0.009999999999999943,
+          0.99
+        ]
+      },
+      "sin_day": {
+        "clipped": 10,
+        "range": [
+          -0.6355887455847569,
+          -0.1274050606470344
+        ]
+      },
+      "cos_day": {
+        "clipped": 10,
+        "range": [
+          0.7720277500467608,
+          0.9918507200571031
+        ]
+      },
+      "sin_hour": {
+        "clipped": 10,
+        "range": [
+          -0.9992629164191028,
+          0.999506560358504
+        ]
+      },
+      "cos_hour": {
+        "clipped": 10,
+        "range": [
+          -0.9998476951563552,
+          0.9995065603652978
+        ]
+      },
+      "is_gap": {
+        "clipped": 0,
+        "range": [
+          0.0,
+          1.0
+        ]
+      },
+      "time_since_last_obs": {
+        "clipped": 5,
+        "range": [
+          0.0,
+          12.82133333333333
+        ]
+      },
+      "time_to_next_obs": {
+        "clipped": 5,
+        "range": [
+          0.0,
+          12.82133333333333
+        ]
+      }
+    }
+  },
+  "curated_key": "curated/amf-performance/manual__2026-02-25T08:12:38.806990+00:00/data.csv"
+}

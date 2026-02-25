@@ -1,0 +1,25 @@
+{
+  "dataset_name": "amf-performance",
+  "version": "manual__2026-02-25T08:12:38.806990+00:00",
+  "input_key": "interim/amf-performance/manual__2026-02-25T08:12:38.806990+00:00/pre_impute.csv",
+  "s3_prefix": "wavestitchplus/amf-performance/manual__2026-02-25T08:12:38.806990+00:00",
+  "params": {
+    "time_col": "time",
+    "target_cols": "ram_limit,cpu_limit,ram_usage,cpu_usage,n,mean,lat50,lat75,lat80,lat90,lat95,lat98,lat99,lat100",
+    "epochs": 500,
+    "batch_size": 512,
+    "window_size": 32,
+    "use_em": true,
+    "em_iterations": 5,
+    "epochs_per_em": 200
+  },
+  "started_at": "2026-02-25T08:12:52.167531",
+  "completed_at": "2026-02-25T08:16:20.007385",
+  "duration_seconds": 207.839854,
+  "files_found": {
+    "saved_model": true,
+    "scaler": true,
+    "meta": true,
+    "train_imputed": true
+  }
+}

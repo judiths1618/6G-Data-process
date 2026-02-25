@@ -1,0 +1,39 @@
+{
+  "dataset_name": "amf-performance",
+  "model_version": "manual__2026-02-25T08:12:38.806990+00:00",
+  "output_version": "manual__2026-02-25T08:12:38.806990+00:00",
+  "model_s3_prefix": "wavestitchplus/amf-performance/manual__2026-02-25T08:12:38.806990+00:00/prepared",
+  "inference_timestamp": "2026-02-25T08:16:30.273250",
+  "shapes": {
+    "test_input": [
+      493,
+      23
+    ],
+    "output": [
+      493,
+      23
+    ]
+  },
+  "missing_values": {
+    "input": 5264,
+    "output": 0,
+    "filled": 5264
+  },
+  "params": {
+    "n_trials": 1,
+    "guidance_scale": 0.1
+  },
+  "timing": {
+    "started_at": "2026-02-25T08:16:20.340543",
+    "completed_at": "2026-02-25T08:16:30.261144",
+    "duration_seconds": 9.920601
+  },
+  "files": {
+    "main_output": "imputed.csv",
+    "trials": [
+      "imputed_em_stride_1_trial_0.csv",
+      "imputed_em_stride_1_trial_0.csv"
+    ],
+    "log": "inference.log"
+  }
+}

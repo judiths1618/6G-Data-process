@@ -1,0 +1,25 @@
+{
+  "dataset_name": "rabbitmq-performance",
+  "version": "manual__2026-02-25T07:39:18.669633+00:00",
+  "input_key": "interim/rabbitmq-performance/manual__2026-02-25T07:39:18.669633+00:00/pre_impute.csv",
+  "s3_prefix": "wavestitchplus/rabbitmq-performance/manual__2026-02-25T07:39:18.669633+00:00",
+  "params": {
+    "time_col": "time",
+    "target_cols": "ram_limit,cpu_limit,ram_usage,cpu_usage,n,min,lat50,lat75,lat95,lat99",
+    "epochs": 500,
+    "batch_size": 512,
+    "window_size": 32,
+    "use_em": true,
+    "em_iterations": 5,
+    "epochs_per_em": 200
+  },
+  "started_at": "2026-02-25T07:39:31.492444",
+  "completed_at": "2026-02-25T08:01:09.651608",
+  "duration_seconds": 1298.159164,
+  "files_found": {
+    "saved_model": true,
+    "scaler": true,
+    "meta": true,
+    "train_imputed": true
+  }
+}
