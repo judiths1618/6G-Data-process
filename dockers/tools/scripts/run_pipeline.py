@@ -197,7 +197,7 @@ def run_train(
     os.makedirs(local_prepared, exist_ok=True)
     
     # S3 目标路径
-    s3_prefix = f"cleaned/{dataset_name}/{version}"
+    s3_prefix = f"wavestitchplus/{dataset_name}/{version}"
     
     # Step 1: 下载输入数据
     print(f"\n[TRAIN] Step 1: Download input data")
@@ -208,14 +208,17 @@ def run_train(
     print(f"\n[TRAIN] Step 2: Run training script")
     
     cmd = [
-        'python', '/app/WaveStitchPlus_app/train_wavestitchPlus_customdata.py', # WaveStitch+EM methods
+        'python', '/app/WaveStitchPlus_app/train_improved.py', # WaveStitch+EM methods
         '-d', 'custom_csv',
         '-input_csv', local_input,
         '-prepared_dir', local_prepared,
-        '-epochs', str(epochs),
-        '-batch_size', str(batch_size),
-        '-window_size', str(window_size),
-        '-stride', '1',
+        # '-epochs', str(epochs),
+        # '-batch_size', str(batch_size),
+        # '-window_size', str(window_size),
+        # '-stride', '1',
+        '-repaint_rounds', 5,
+        '-save_train_imputed_denorm',
+        '-train_imputed_clamp bounds'
     ]
     
     if use_em:

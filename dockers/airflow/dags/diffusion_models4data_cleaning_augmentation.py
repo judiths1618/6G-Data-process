@@ -833,7 +833,7 @@ with DAG(
         trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     )
 
-    # 🔥 AI-based methods for cleaning and augmentation (GPU isolated, correct)
+    # 🔥 AI-based methods for cleaning (GPU isolated, correct)
     # from airflow.providers.docker.operators.docker import DockerOperator
 
     # 在 DAG 中使用 DockerOperator
@@ -918,14 +918,15 @@ with DAG(
         python_callable=store_curated,
     )
 
-    viz = PythonOperator(
-        task_id="visualization",
-        python_callable=visualize,
-    )
+    # viz = PythonOperator(
+    #     task_id="visualization",
+    #     python_callable=visualize,
+    # )
 
     # -------- Dependencies (mirrors your diagram) --------
 
     load >> branch
     branch >> qc_task >> report
     branch >> ts_qc_task >> report
-    report >> clean >> validate >> store >> viz
+    report >> clean >> validate >> store 
+    # >> viz

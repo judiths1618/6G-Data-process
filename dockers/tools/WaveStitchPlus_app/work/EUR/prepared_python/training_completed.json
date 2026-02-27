@@ -1,0 +1,13 @@
+{
+  "completed_at": "2026-02-27T11:16:26.378711",
+  "model_count": 4,
+  "ready": true,
+  "repaint_rounds": 5,
+  "scaler_mode": "robust",
+  "clip_mode": "soft",
+  "clip_bound": 4.0,
+  "save_train_imputed_denorm": true,
+  "train_imputed_clamp": "bounds",
+  "bound_headroom": 1.2,
+  "nonneg_cols": null
+}

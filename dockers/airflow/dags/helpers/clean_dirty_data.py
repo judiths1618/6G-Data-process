@@ -335,20 +335,38 @@ def clean_dirty_data(**context):
         cleaning_report["imputation"] = {"skipped": True}
 
     # ── Step 5/5: Post-imputation outlier removal ──
-    # Re-run outlier clipping after imputation because:
-    # 1. Diffusion model may synthesize values outside the observed range
-    # 2. Tabular median fill is safe but worth enforcing bounds consistently
+    # Re-run after imputation because:
+    # 1. Diffusion model may synthesize values outside the observed distribution
+    # 2. All target metrics (latency, CPU, RAM, etc.) are physically non-negative
     print("[CLEAN] Step 5/5: Post-imputation outlier removal")
+
     numeric_cols = [
         c for c in df.select_dtypes(include="number").columns
         if c != ts_col
     ]
+
     if numeric_cols:
+        # ── Enforce non-negativity first ─────────
+        negative_stats = {}
+        for col in numeric_cols:
+            n_negative = int((df[col] < 0).sum())
+            if n_negative > 0:
+                df[col] = df[col].clip(lower=0)
+                negative_stats[col] = {"clipped_to_zero": n_negative}
+                print(f"  [NON-NEG] '{col}': clipped {n_negative} negative values to 0")
+
+        cleaning_report["non_negativity_enforcement"] = (
+            negative_stats if negative_stats else {"skipped": "no negative values found"}
+        )
+
+        # ── Then clip upper outliers (99th percentile) ──
         df, post_outlier_stats = _handle_outliers(df, numeric_cols, ts_col)
         cleaning_report["post_imputation_outlier_removal"] = post_outlier_stats
+
     else:
         print("  [POST_OUTLIER] No numeric columns — skipped")
         cleaning_report["post_imputation_outlier_removal"] = {"skipped": True}
+        cleaning_report["non_negativity_enforcement"]      = {"skipped": True}
 
     # ── Save final cleaned data ───────────────
     cleaned_key = f"cleaned/{dataset_name}/{run_id}/cleaned.csv"
