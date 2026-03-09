@@ -38,5 +38,5 @@ for prefix_item in SeawwedFS_folders:
     download_folder(
         bucket="airflow-bucket",
         prefix=prefix_item,
-        local_dir=f"/home/Yuandou/Desktop/projects/6G-Data-process/notebooks/EUR/{prefix_item}",
+        local_dir=f"./notebooks/EUR/{prefix_item}",
     )

@@ -1,1 +1,0 @@
-https://www.deepsense6g.net/scenarios/scenario-1/

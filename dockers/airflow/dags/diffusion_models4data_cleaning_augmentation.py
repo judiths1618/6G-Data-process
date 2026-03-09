@@ -803,7 +803,7 @@ with DAG(
     start_date=datetime(2024, 1, 1),
     schedule_interval=None,
     catchup=False,
-    tags=["GX", "SeaweedFS", "GPU", "Diffusion Models"],
+    tags=["6G Time Series", "GX", "SeaweedFS", "WaveStitchPlus", "GPU", "Diffusion Models"],
 ) as dag:
 
     # 1) Load + Profile

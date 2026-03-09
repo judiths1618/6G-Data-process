@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 run_pipeline.py
-WaveStitchPlus Pipeline - S3-backed data lake storage
+WaveStitchPlus Pipeline - S3-backed data lake storage: load --> train (save models) + inference --> store curated data
 """
 
 import os

@@ -1,16 +1,5 @@
-# # 直接运行
-# sudo docker run --rm --gpus all \
-#     -e S3_ENDPOINT=http://host.docker.internal:8333 \
-#     -e S3_ACCESS_KEY=anykey \
-#     -e S3_SECRET_KEY=anysecret \
-#     -e S3_BUCKET=airflow-bucket \
-#     wavestitchplus-gpu:latest \
-#     python /app/run_pipeline.py \
-#     --input-s3-key test/amfperformance.csv \
-#     --output-s3-prefix wavestitch/test001 \
-#     --epochs 100
-
-# build 
+# 直接运行
+# build wavestitchplus-gpu:latest docker image
 # sudo docker build -f Dockerfile.wavestitchplus-gpu -t wavestitchplus-gpu:latest .
 
 # 查看 SeaweedFS 所在的网络
