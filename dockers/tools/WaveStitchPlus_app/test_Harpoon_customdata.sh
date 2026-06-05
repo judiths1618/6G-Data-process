@@ -26,7 +26,7 @@ python synthesis_harpoon_pipeline_strided_preconditioning_customdata.py \
 # python synthesis_wavestitchPlus_pipeline_strided_preconditioning_customdata.py \
 #     -d custom_csv \
 #     -prepared_dir ./work/EUR/prepared_python \
-#     -out_csv ./work/EUR/generated_python/wavestitchPlus_full_imputed.csv \
+#     -out_csv ./work/EUR/generated_python/wavestitchplus_v1_test_imputed.csv \
 #     -model_type em \
 #     -guidance_scale 0.1 \
 #     -n_trials 3
@@ -34,7 +34,7 @@ python synthesis_harpoon_pipeline_strided_preconditioning_customdata.py \
 # python synthesis_wavestitchPlus_pipeline_strided_preconditioning_customdata.py \
 #     -d custom_csv \
 #     -prepared_dir ./work/EUR/prepared_golang \
-#     -out_csv ./work/EUR/generated_golang/wavestitchPlus_full_imputed.csv \
+#     -out_csv ./work/EUR/generated_golang/wavestitchplus_v1_test_imputed.csv \
 #     -model_type em \
 #     -guidance_scale 0.1 \
 #     -n_trials 3
@@ -42,7 +42,7 @@ python synthesis_harpoon_pipeline_strided_preconditioning_customdata.py \
 # python synthesis_wavestitchPlus_pipeline_strided_preconditioning_customdata.py \
 #     -d custom_csv \
 #     -prepared_dir ./work/EUR/prepared_rabbitmq \
-#     -out_csv ./work/EUR/generated_rabbitmq/wavestitchPlus_full_imputed.csv \
+#     -out_csv ./work/EUR/generated_rabbitmq/wavestitchplus_v1_test_imputed.csv \
 #     -model_type em \
 #     -guidance_scale 0.1 \
 #     -n_trials 3

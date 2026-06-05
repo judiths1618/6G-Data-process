@@ -9,7 +9,7 @@
 # 新增：DiffPuter EM 模式
 python train_wavestitchPlus_customdata.py \
     -d custom_csv \
-    -input_csv "/home/Yuandou/Desktop/projects/6G-Data-process/6GDALI_Datasets/EUR/6907619/amf-performance.csv" \
+    -input_csv "../../../6GDALI_Datasets/EUR/6907619/amf-performance.csv" \
     -prepared_dir ./work/EUR/prepared_amf \
     -use_em -em_iterations 5 -epochs_per_em 200
 

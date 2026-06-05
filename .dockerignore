@@ -1,0 +1,53 @@
+# Speed up Docker context uploads & keep image layers slim. The runtime images
+# only need the python code under dockers/tools/ (or dockers/airflow/) plus
+# their requirements.txt — none of the experiment data, notebooks, or local
+# dev caches belong inside the image context.
+
+# VCS + GitHub
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Heavy local artefacts that never belong in a runtime image
+6GDALI_Datasets/
+experiments/
+notebooks/
+design/
+dashboard/
+scripts/
+
+# Docs & top-level meta
+README.md
+LICENSE
+*.md
+
+# Test outputs / model snapshots that might be lying around
+*.pth
+*.npy
+*.parquet
+generated/
+saved_models/

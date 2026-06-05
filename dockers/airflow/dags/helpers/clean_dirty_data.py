@@ -1,21 +1,17 @@
-from __future__ import annotations  # ADD THIS — enables PEP 604
+from __future__ import annotations
 
-import pandas as pd
-import numpy as np
 import json
-import docker
+
+import numpy as np
+import pandas as pd
 from airflow.models import Variable
 from helpers.object_store import load_df_from_object_store, save_df_to_object_store
 
 
-import boto3
-from botocore.client import Config
-from airflow.models import Variable
-
 # helpers/clean_dirty_data.py
 
 def _get_s3_client():
-    """统一的 S3 客户端，与 run_pipeline.py 保持一致。"""
+    """Shared S3 client, kept in sync with run_pipeline.py."""
     import boto3
     from botocore.client import Config
 
@@ -169,7 +165,218 @@ def _tabular_imputation(
 
 
 # ─────────────────────────────────────────────
-# Sub-module 5: TS imputation via WaveStitch+
+# Sub-module 5(pre): regularize + split via preprocess_csv (shared with WaveStitchPlus)
+# ─────────────────────────────────────────────
+#
+# ``preprocess_csv`` lives next to us in ``helpers/preprocess.py``. We invoke
+# it with the **same arguments WaveStitchPlus's training scripts use** so the
+# train/test split and holdout mask the DAG produces match exactly what
+# WaveStitchPlus would produce on the same input. That keeps any subsequent
+# method comparison (WaveStitchPlus vs darts_linear vs pypots_*) honest:
+# every method sees the same train/test/holdout cells.
+
+# Defaults mirroring the WaveStitchPlus callsites in
+# train_improved.py / train_wavestitchPlus_customdata.py / train_wavestitch_customdata.py.
+# Keep this dict as the single source of truth — if WaveStitchPlus changes its
+# preprocess args, update here too.
+_PREPROCESS_ARGS_MATCHING_WAVESTITCHPLUS = dict(
+    base_dt=None,                       # auto-infer
+    extract_main_segment=True,          # WSP uses longest segment only
+    skip_regularize_if_sparse=True,
+    convert_units=True,                 # 6G-schema renames (no-op on non-6G)
+    add_cond_features=True,             # t_norm / sin_day / gap-depth conds
+    # preprocess_csv defaults: split_ratio=0.8, holdout_frac=0.15, seed=0
+)
+
+
+def _prepare_via_preprocess_csv(
+    df: pd.DataFrame,
+    ts_col: str,
+    dataset_name: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, "np.ndarray", dict, Path]:
+    """
+    Run :func:`helpers.preprocess.preprocess_csv` with WaveStitchPlus's exact
+    args and return the artifacts the imputer + downstream comparison need.
+
+    Returns
+    -------
+    train_df : DataFrame             same as ``prepared_<subset>/train.csv``
+    test_input_df : DataFrame        test rows with holdout cells set to NaN
+    test_gt_df : DataFrame           ground-truth values at holdout positions
+    holdout_mask : np.ndarray[bool]  row-level holdout indicator, length=T_test
+    prep_meta : dict                 preprocess_csv's ``meta.json`` payload
+    prepared_dir : Path              tmp dir on disk (kept alive by caller)
+
+    The caller is responsible for the lifetime of ``prepared_dir`` — wrap the
+    whole imputation+save block in a ``TemporaryDirectory`` context.
+    """
+    import tempfile
+    from pathlib import Path
+    import numpy as np
+    from helpers.preprocess import preprocess_csv
+
+    tmp = Path(tempfile.mkdtemp(prefix=f"prep_{dataset_name}_"))
+    in_csv = tmp / "input.csv"
+    out_dir = tmp / "prepared"
+    df.to_csv(in_csv, index=False)
+
+    prep_meta = preprocess_csv(
+        input_csv=str(in_csv),
+        output_dir=str(out_dir),
+        time_col=ts_col,
+        **_PREPROCESS_ARGS_MATCHING_WAVESTITCHPLUS,
+    )
+
+    train_df = pd.read_csv(out_dir / "train.csv")
+    test_input_df = pd.read_csv(out_dir / "test_input.csv")
+    test_gt_df = pd.read_csv(out_dir / "test_gt.csv")
+    holdout_mask = np.load(out_dir / "eval_holdout_mask.npy")
+    return train_df, test_input_df, test_gt_df, holdout_mask, prep_meta, out_dir
+
+
+# ─────────────────────────────────────────────
+# Sub-module 5a: TS imputation via in-process baselines
+# ─────────────────────────────────────────────
+
+# Methods chosen for the in-process path. Selected via Airflow Variable
+# ``N2N_IMPUTER`` (default ``darts_linear``).
+#
+# ImputeGAP is intentionally NOT included here: it transitively requires PyQt5,
+# whose source build needs Qt/qmake (and no aarch64 prebuilt wheels exist on
+# the Airflow base image). Use the standalone ImputeGAP container via
+# DockerOperator if you need ``imputegap_*`` methods.
+_BASELINE_METHODS = {
+    "darts_linear",
+    "darts_cubic",
+    "darts_nearest",
+    "darts_kalman",
+    "darts_auto",
+    "pypots_saits",
+    "pypots_brits",
+}
+
+
+def _impute_darts(df: pd.DataFrame, target_cols: list, method: str) -> pd.DataFrame:
+    """One Darts method, applied per target column."""
+    from darts import TimeSeries
+    from darts.dataprocessing.transformers import MissingValuesFiller
+
+    out = df.copy()
+    for c in target_cols:
+        if c not in out.columns:
+            continue
+        sub = out[[c]].copy()
+        sub["__idx__"] = np.arange(len(sub))
+        series = TimeSeries.from_dataframe(sub, time_col="__idx__", value_cols=c)
+
+        if method == "darts_kalman":
+            from darts.models import KalmanFilter
+
+            vals = series.values().squeeze()
+            mask = ~np.isnan(vals)
+            if mask.sum() < 2:
+                filler = MissingValuesFiller(fill="auto")
+                filled = filler.transform(series).values().squeeze()
+            else:
+                observed = TimeSeries.from_values(vals[mask].reshape(-1, 1))
+                kf = KalmanFilter(dim_x=1)
+                kf.fit(observed)
+                smoothed = kf.filter(observed).values().squeeze()
+                filled = vals.copy()
+                filled[mask] = smoothed
+                holes = np.where(~mask)[0]
+                if holes.size:
+                    # Linearly interpolate at hole positions over the smoothed obs.
+                    obs_idx = np.where(mask)[0]
+                    filled[holes] = np.interp(holes, obs_idx, smoothed)
+        else:
+            kind = method.split("_", 1)[1]  # 'linear', 'cubic', 'nearest', 'auto'
+            filler = MissingValuesFiller(fill="auto")
+            filled = (filler.transform(series)
+                      if kind == "auto"
+                      else filler.transform(series, method=kind)).values().squeeze()
+        out[c] = filled
+    return out
+
+
+def _impute_pypots(df: pd.DataFrame, target_cols: list, method: str,
+                   epochs: int = 30) -> pd.DataFrame:
+    """PyPOTS SAITS / BRITS, fit-then-impute on a single window."""
+    import torch
+
+    cols = [c for c in target_cols if c in df.columns]
+    X = df[cols].to_numpy(dtype=float)
+    # PyPOTS expects shape (n_samples, n_steps, n_features). Treat the whole
+    # series as one sample.
+    X3 = X.reshape(1, X.shape[0], X.shape[1])
+    n_steps = X3.shape[1]
+    n_features = X3.shape[2]
+    kind = method.split("_", 1)[1]
+    common = dict(n_steps=n_steps, n_features=n_features,
+                  epochs=epochs, batch_size=1,
+                  device="cuda" if torch.cuda.is_available() else "cpu")
+    if kind == "saits":
+        from pypots.imputation import SAITS
+        model = SAITS(n_layers=2, d_model=64, n_heads=2,
+                      d_k=32, d_v=32, d_ffn=128, dropout=0.0, **common)
+    elif kind == "brits":
+        from pypots.imputation import BRITS
+        model = BRITS(rnn_hidden_size=64, **common)
+    else:
+        raise ValueError(f"Unsupported pypots method: {method}")
+    model.fit({"X": X3})
+    recovered = model.impute({"X": X3})
+    if isinstance(recovered, dict):
+        recovered = recovered.get("imputation", recovered)
+    recovered = np.asarray(recovered).reshape(n_steps, n_features)
+    out = df.copy()
+    out[cols] = recovered
+    return out
+
+
+def _ts_imputation_baseline(df: pd.DataFrame, ts_col: str,
+                            target_cols: list, method: str) -> tuple[pd.DataFrame, dict]:
+    """
+    In-process baseline imputation. Returns (imputed_df, stats).
+
+    ``method`` is one of the keys in ``_BASELINE_METHODS``.
+    """
+    if method not in _BASELINE_METHODS:
+        raise ValueError(
+            f"Unknown imputer '{method}'. Pick one of: {sorted(_BASELINE_METHODS)}"
+        )
+
+    # Limit to numeric target columns; non-numeric / ts column passes through.
+    numeric_targets = [
+        c for c in target_cols
+        if c in df.columns and pd.api.types.is_numeric_dtype(df[c])
+    ]
+    missing_before = int(df[numeric_targets].isna().sum().sum())
+    print(f"  [BASELINE_IMPUTE] method={method} cols={len(numeric_targets)} "
+          f"NaN cells before={missing_before}")
+
+    if method.startswith("darts_"):
+        out = _impute_darts(df, numeric_targets, method)
+    elif method.startswith("pypots_"):
+        epochs = int(Variable.get("N2N_PYPOTS_EPOCHS", default_var="30"))
+        out = _impute_pypots(df, numeric_targets, method, epochs=epochs)
+    else:
+        raise ValueError(f"Method dispatch missing for '{method}'")
+
+    missing_after = int(out[numeric_targets].isna().sum().sum())
+    stats = {
+        "method": method,
+        "columns_imputed": numeric_targets,
+        "cells_filled": missing_before - missing_after,
+        "cells_remaining_nan": missing_after,
+    }
+    print(f"  [BASELINE_IMPUTE] {method}: filled {stats['cells_filled']} cells, "
+          f"{missing_after} remain NaN")
+    return out, stats
+
+
+# ─────────────────────────────────────────────
+# Sub-module 5b: TS imputation via WaveStitch+
 # (invoked as subprocess / API call to GPU container)
 # ─────────────────────────────────────────────
 
@@ -319,22 +526,133 @@ def clean_dirty_data(**context):
 
     # ── Step 4/5: Imputation ─────────────────
     if recs.get("ts_imputation", False):
-        print("[CLEAN] Step 4/5: Time-series imputation (GPU / WaveStitch+)")
-        interim_key = f"interim/{dataset_name}/{run_id}/pre_impute.csv"
-        save_df_to_object_store(df, key=interim_key, bucket=bucket, fmt="csv")
+        imputer = Variable.get("N2N_IMPUTER", default_var="darts_linear")
+        target_cols = meta.get("target_cols", [])
+        ts_gaps = diagnostics.get("issues", {}).get("ts_gaps", {}) or {}
+        print(f"[CLEAN] Step 4: Time-series imputation "
+              f"(imputer={imputer}, has_gaps={ts_gaps.get('has_gaps')}, "
+              f"num_gaps={ts_gaps.get('num_gaps')})")
 
-        imputed_handle = _ts_imputation_via_docker(
-            handle={"bucket": bucket, "key": interim_key, "format": "csv"},
-            meta=meta,
-            run_id=run_id,
-        )
-        df, _ = load_df_from_object_store(
-            key=imputed_handle["key"], bucket=imputed_handle["bucket"]
-        )
-        cleaning_report["ts_imputation"] = {
-            "method": "WaveStitch+ (diffusion EM)",
-            "output_key": imputed_handle["key"],
-        }
+        if imputer == "wavestitchplus":
+            # WaveStitchPlus does its own preprocess_csv internally inside the
+            # GPU container — we only hand it the raw interim CSV.
+            interim_key = f"interim/{dataset_name}/{run_id}/pre_impute.csv"
+            save_df_to_object_store(df, key=interim_key, bucket=bucket, fmt="csv")
+            imputed_handle = _ts_imputation_via_docker(
+                handle={"bucket": bucket, "key": interim_key, "format": "csv"},
+                meta=meta,
+                run_id=run_id,
+            )
+            df, _ = load_df_from_object_store(
+                key=imputed_handle["key"], bucket=imputed_handle["bucket"]
+            )
+            cleaning_report["ts_imputation"] = {
+                "method": "WaveStitch+ (diffusion EM)",
+                "output_key": imputed_handle["key"],
+            }
+            cleaning_report["prepared_artifacts"] = {"applied": False}
+        else:
+            # ── 4a: SAME preprocess_csv args as WaveStitchPlus ───────
+            # The DAG runs preprocess_csv with the identical settings the
+            # WaveStitchPlus app uses (extract_main_segment, holdout_frac=0.15,
+            # split_ratio=0.8, etc.). Any baseline imputer driven from this
+            # task therefore sees the exact same train/test/holdout cells
+            # that WaveStitchPlus would see — comparisons stay fair.
+            try:
+                (train_df, test_input_df, test_gt_df, holdout_mask,
+                 prep_meta, prepared_dir) = _prepare_via_preprocess_csv(
+                    df, ts_col=ts_col, dataset_name=dataset_name,
+                )
+            except Exception as e:
+                print(f"[CLEAN] Step 4a: preprocess_csv FAILED ({e}). "
+                      f"Falling back to imputing on raw irregular timeline.")
+                cleaning_report["prepared_artifacts"] = {
+                    "applied": False, "error": str(e),
+                }
+                df, impute_stats = _ts_imputation_baseline(
+                    df, ts_col=ts_col, target_cols=target_cols, method=imputer,
+                )
+                cleaning_report["ts_imputation"] = impute_stats
+            else:
+                target_cols = prep_meta.get("target_cols", target_cols)
+                # Time-order: train rows come first, then test rows.
+                # We impute the *concatenation* of train + test_input. The
+                # imputer fills both the regularize-induced NaNs (in train
+                # AND test) and the holdout-hidden NaNs (in test_input only).
+                full_input = pd.concat(
+                    [train_df, test_input_df], ignore_index=True
+                )
+                nan_before = int(full_input[target_cols].isna().sum().sum())
+                print(f"[CLEAN]   train={len(train_df)}  "
+                      f"test={len(test_input_df)}  "
+                      f"holdout_rows={int(holdout_mask.sum())}  "
+                      f"NaN cells to fill={nan_before:,}")
+
+                # ── 4b: Run the in-process baseline imputer ──────────
+                full_imputed, impute_stats = _ts_imputation_baseline(
+                    full_input, ts_col=ts_col,
+                    target_cols=target_cols, method=imputer,
+                )
+                # Forward/back-fill categorical-encoded cond columns (e.g.
+                # ram_limit_cat) — they aren't in target_cols so the imputer
+                # ignored them, but we don't want NaN leaking into curated.
+                for c in (prep_meta.get("categorical_encoded_cols") or []):
+                    if c in full_imputed.columns:
+                        full_imputed[c] = full_imputed[c].ffill().bfill()
+
+                # Split back so we can persist per-method train_imputed.csv +
+                # test_imputed.csv next to the prepared/ dir. The dashboard
+                # picks up both filenames; test_imputed is the one we score
+                # against test_gt.csv at eval_holdout_mask positions.
+                n_train = len(train_df)
+                train_imputed_df = full_imputed.iloc[:n_train].reset_index(drop=True)
+                test_imputed_df = full_imputed.iloc[n_train:].reset_index(drop=True)
+
+                # ── 4c: Persist the comparable artifacts to S3 ───────
+                # These are the SAME files WaveStitchPlus's prepared/<subset>/
+                # folder produces, so the dashboard's Time series / Metrics
+                # tabs can score this run apples-to-apples against any other
+                # method that lands its own test_imputed.csv in the same dir.
+                prep_prefix = f"cleaned/{dataset_name}/{run_id}/prepared"
+                save_df_to_object_store(train_df,
+                    key=f"{prep_prefix}/train.csv", bucket=bucket, fmt="csv")
+                save_df_to_object_store(test_input_df,
+                    key=f"{prep_prefix}/test_input.csv", bucket=bucket, fmt="csv")
+                save_df_to_object_store(test_gt_df,
+                    key=f"{prep_prefix}/test_gt.csv", bucket=bucket, fmt="csv")
+                save_df_to_object_store(train_imputed_df,
+                    key=f"{prep_prefix}/{imputer}_train_imputed.csv",
+                    bucket=bucket, fmt="csv")
+                save_df_to_object_store(test_imputed_df,
+                    key=f"{prep_prefix}/{imputer}_test_imputed.csv",
+                    bucket=bucket, fmt="csv")
+                # eval_holdout_mask.npy — boolean numpy array, save via bytes
+                from io import BytesIO
+                import numpy as np
+                buf = BytesIO()
+                np.save(buf, holdout_mask.astype(np.bool_))
+                _s3_upload_bytes(buf.getvalue(),
+                    bucket=bucket, key=f"{prep_prefix}/eval_holdout_mask.npy")
+                _s3_upload_string(json.dumps(prep_meta, indent=2, default=str),
+                    bucket=bucket, key=f"{prep_prefix}/meta.json")
+
+                cleaning_report["ts_imputation"] = impute_stats
+                cleaning_report["prepared_artifacts"] = {
+                    "applied": True,
+                    "s3_prefix": prep_prefix,
+                    "train_rows": len(train_df),
+                    "test_rows": len(test_input_df),
+                    "holdout_rows": int(holdout_mask.sum()),
+                    "preprocess_args": _PREPROCESS_ARGS_MATCHING_WAVESTITCHPLUS,
+                }
+
+                # The curated CSV (downstream) gets the full imputed timeline.
+                df = full_imputed.sort_values(ts_col).reset_index(drop=True) \
+                     if ts_col in full_imputed.columns else full_imputed
+
+                # Cleanup tmp prepared dir (we've already persisted to S3)
+                import shutil
+                shutil.rmtree(prepared_dir.parent, ignore_errors=True)
 
     elif recs.get("tabular_imputation", False):
         print("[CLEAN] Step 4/5: Tabular imputation (CPU / median+mode)")

@@ -30,7 +30,7 @@ services:
   seaweed-s3:
     image: chrislusf/seaweedfs:latest
     container_name: seaweed-s3
-    command: s3 -filer=seaweed-filer:8888 -port=8333 
+    command: s3 -filer=seaweed-filer:8888 -port=8333 -ip.bind=0.0.0.0
     ports:
       - "8333:8333"
     depends_on:
@@ -103,28 +103,18 @@ services:
       AWS_ACCESS_KEY_ID: anykey
       AWS_SECRET_ACCESS_KEY: anysecret
 
-    command: >
-      bash -c "
-      airflow db migrate &&
-      airflow users create
-        --username admin
-        --password admin
-        --firstname Admin
-        --lastname User
-        --role Admin
-        --email admin@example.com || true &&
-
-      until curl -sf http://seaweed-s3:8333; do sleep 2; done &&
-      curl -X PUT http://seaweed-s3:8333/6gdali-lake2026 || true &&
-
-      airflow connections add 'seaweed_s3'
-        --conn-type 'aws'
-        --conn-login 'anykey'
-        --conn-password 'anysecret'
-        --conn-extra '{\"endpoint_url\": \"http://seaweed-s3:8333\", \"region_name\": \"us-east-1\"}' || true &&
-
-      airflow scheduler & exec airflow webserver
-      "
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        airflow db migrate
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true
+        until curl -sf http://seaweed-s3:8333; do sleep 2; done
+        curl -X PUT http://seaweed-s3:8333/6gdali-lake2026 || true
+        airflow connections add 'seaweed_s3' --conn-type 'aws' --conn-login 'anykey' --conn-password 'anysecret' --conn-extra '{"endpoint_url": "http://seaweed-s3:8333", "region_name": "us-east-1"}' || true
+        airflow scheduler &
+        exec airflow webserver
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       # - ./airflow/logs:/opt/airflow/logs

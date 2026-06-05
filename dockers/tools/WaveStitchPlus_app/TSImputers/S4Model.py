@@ -88,7 +88,8 @@ try:  # Try pykeops
         z = _c2r(z)
         w = _c2r(w)
 
-        r = 2 * cauchy_mult(v, z, w, backend='GPU')
+        backend = 'GPU' if any(t.is_cuda for t in (v, z, w)) else 'CPU'
+        r = 2 * cauchy_mult(v, z, w, backend=backend)
         return _r2c(r)
 
 except ImportError:

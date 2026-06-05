@@ -109,12 +109,13 @@ if __name__ == "__main__":
         prepared_dir = args.prepared_dir or "./work/prepared"
         
         if args.input_csv:
-            preprocess_csv(input_csv=args.input_csv, 
-                           output_dir=prepared_dir, 
-                           time_col =None, 
-                            base_dt=None,  # detect or 强制 11 秒
-                            extract_main_segment=True,  # ← 解决 79% gap 问题
-                            skip_regularize_if_sparse=True  # 智能保护
+            preprocess_csv(input_csv=args.input_csv,
+                           output_dir=prepared_dir,
+                           time_col=None,
+                           base_dt=None,
+                           extract_main_segment=True,
+                           skip_regularize_if_sparse=True,
+                           convert_units=True,
             )
 
         training_df, cond_cols, target_cols = load_custom_train_df(prepared_dir)

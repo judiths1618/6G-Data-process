@@ -3,7 +3,7 @@ apache-airflow-providers-amazon
 # torchvision == 0.23.0
 # torchaudio == 2.8.0
 scikit-learn
-pandas ==2.3.2
+pandas ==2.0.3
 numpy
 boto3
 s3fs
@@ -15,3 +15,13 @@ great-expectations==0.18.19
 matplotlib
 pyarrow
 tqdm>=4.65.0
+
+# Baseline imputers invoked in-process from clean_dirty_data.py
+# (Variable N2N_IMPUTER picks one). Pinned to the local myenv
+# versions so behaviour matches the standalone runners.
+# NOTE: imputegap is NOT included here because it transitively requires PyQt5,
+# whose source build needs Qt/qmake (no aarch64 wheels). Use the standalone
+# ImputeGAP container via DockerOperator if you need imputegap_* methods.
+torch==2.5.1
+darts==0.33.0
+pypots==1.5

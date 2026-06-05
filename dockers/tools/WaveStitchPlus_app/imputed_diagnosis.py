@@ -15,7 +15,7 @@ datafilename = 'golang'
 base_dir = f'./work/EUR'
 prepared_dir = f'{base_dir}/prepared_{datafilename}'
 generated_dir = f'{base_dir}/generated_{datafilename}'
-imputed_file = "wavestitchPlus_full_imputed.csv"
+imputed_file = "wavestitchplus_v1_test_imputed.csv"
 
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial']
 plt.rcParams['axes.unicode_minus'] = False

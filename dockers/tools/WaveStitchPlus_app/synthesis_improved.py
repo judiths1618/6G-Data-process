@@ -196,13 +196,16 @@ def ensure_bwc(x, window_size):
     raise ValueError(f"Can't infer window axis: {x.shape}")
 
 
-def load_custom_prepared(prepared_dir):
+def load_custom_prepared(prepared_dir, test_csv=None):
     meta_path = os.path.join(prepared_dir, "meta.json")
-    test_path = os.path.join(prepared_dir, "test_input.csv")
+    # ``test_csv`` overrides the default prepared/test_input.csv so callers (e.g.
+    # the long-gap eval harness) can synthesize against a re-masked test split
+    # while still loading the model/scaler from the real prepared dir.
+    test_path = test_csv or os.path.join(prepared_dir, "test_input.csv")
     if not os.path.exists(meta_path):
         raise FileNotFoundError("meta.json not found")
     if not os.path.exists(test_path):
-        raise FileNotFoundError("test_input.csv not found")
+        raise FileNotFoundError(f"test_input not found: {test_path}")
 
     with open(meta_path) as f:
         meta = json.load(f)
@@ -399,6 +402,16 @@ class RePaintDDIMSynthesizer:
               f"steps={len(self._ts)} repaint={self.repaint_rounds} "
               f"guide={self.guidance_scale} clip={self.clip_bound}")
 
+    def _extra_guidance_loss(self, x0c, obs_mask_batch_f, synth_mask_batch_f, test_batch):
+        """Extension point for subclasses (e.g. HARPOON's manifold-bound penalty).
+
+        Called inside the guided-sampling step with the current x0 prediction and
+        the per-target observed/synth-mask floats. Return a scalar/per-window
+        tensor to be added to ``l1 + l2`` before the autograd. Default ``0``
+        keeps v1/v2 behaviour unchanged.
+        """
+        return torch.zeros((), device=x0c.device)
+
     def synthesize_batch(self, test_batch, synth_mask_batch, obs_mask_batch):
         """
         test_batch      : [B, W, C]
@@ -469,8 +482,13 @@ class RePaintDDIMSynthesizer:
                             dim=(1, 2)
                         )
 
+                        # Extension hook: subclasses (e.g. HARPOON) add an
+                        # extra per-window guidance term to the autograd target.
+                        l3 = self._extra_guidance_loss(
+                            x0c, obs_mask_batch_f, synth_mask_batch_f, test_batch,
+                        )
                         grad = torch.autograd.grad(
-                            l1 + l2,
+                            l1 + l2 + l3,
                             x_in_g,
                             grad_outputs=torch.ones_like(l1)
                         )[0]
@@ -535,6 +553,14 @@ if __name__ == "__main__":
     parser.add_argument("-dataset", "-d", type=str, required=True)
     parser.add_argument("-prepared_dir", type=str, default="./work/prepared")
     parser.add_argument("-out_csv", type=str, default=None)
+    parser.add_argument("-test_csv", type=str, default=None,
+                        help="override the test_input.csv read from prepared_dir "
+                             "(model/scaler still load from prepared_dir)")
+    parser.add_argument("-ignore_col_masks", action="store_true",
+                        help="derive the original observed mask + conditioning "
+                             "features from the (overridden) test input itself "
+                             "instead of prepared/col_masks, so they stay "
+                             "consistent with a re-masked long-gap input")
 
     # Model
     parser.add_argument("-backbone", type=str, default="S4")
@@ -569,6 +595,10 @@ if __name__ == "__main__":
     parser.add_argument("-use_ddpm", action="store_true")
     parser.add_argument("-model_type", type=str, default="auto",
                         choices=["auto", "em", "standard"])
+    parser.add_argument("-model_tag", type=str, default="",
+                        help="if set, load model_<tag>_best.pth / model_<tag>.pth "
+                             "(the method-named checkpoints written by training with "
+                             "the same -model_tag); falls back to the default names")
 
     # Value bounds
     parser.add_argument("-clamp_mode", type=str, default="bounds",
@@ -597,7 +627,7 @@ if __name__ == "__main__":
     # 1) Load data
     # -----------------------------------------------------------------
     if dataset == "custom_csv":
-        df_input, meta = load_custom_prepared(args.prepared_dir)
+        df_input, meta = load_custom_prepared(args.prepared_dir, test_csv=args.test_csv)
         time_col = meta.get("time_col", "time")
         cond_cols = meta.get("cond_cols", [])
         target_cols = meta.get("target_cols", [])
@@ -612,8 +642,9 @@ if __name__ == "__main__":
                 raise ValueError("meta.json missing train_rows and regularized_rows")
             train_rows = int(split_ratio * regularized_rows)
 
-        # ORIGINAL observed mask from preprocessing
-        orig_obs_mask_test = load_test_target_mask(
+        # ORIGINAL observed mask from preprocessing (skipped when the test input
+        # is overridden, so cond features match the re-masked visibility).
+        orig_obs_mask_test = None if args.ignore_col_masks else load_test_target_mask(
             args.prepared_dir,
             target_cols=target_cols,
             n_rows=len(df_input),
@@ -771,7 +802,12 @@ if __name__ == "__main__":
     non_hier_cols = np.setdiff1d(np.arange(in_dim), hierarchical_column_indices)
 
     saved_dir = get_save_dir(args.prepared_dir)
-    if args.model_type == "em":
+    tag = getattr(args, "model_tag", "") or ""
+    if tag and os.path.exists(os.path.join(saved_dir, f"model_{tag}_best.pth")):
+        mp = os.path.join(saved_dir, f"model_{tag}_best.pth")
+    elif tag and os.path.exists(os.path.join(saved_dir, f"model_{tag}.pth")):
+        mp = os.path.join(saved_dir, f"model_{tag}.pth")
+    elif args.model_type == "em":
         mp = os.path.join(saved_dir, "model_em_best.pth")
         if not os.path.exists(mp):
             mp = os.path.join(saved_dir, "model_em.pth")
@@ -781,7 +817,8 @@ if __name__ == "__main__":
     else:
         saved_params, mp = load_model_with_fallback(saved_dir, args, dev)
 
-    if args.model_type != "auto":
+    # Load explicitly unless the auto-fallback above already returned weights.
+    if args.model_type != "auto" or tag:
         if not os.path.exists(mp):
             raise FileNotFoundError(f"Not found: {mp}")
         saved_params = torch.load(mp, map_location=dev)
@@ -869,7 +906,7 @@ if __name__ == "__main__":
 
             out_dir = (
                 f"{get_generated_dir(args.prepared_dir)}"
-                f"/{args.synth_mask}_wavestitchPlus/"
+                f"/{args.synth_mask}_wavestitchplus/"
             )
             os.makedirs(out_dir, exist_ok=True)
 
@@ -894,7 +931,7 @@ if __name__ == "__main__":
     # -----------------------------------------------------------------
     out_dir = (
         f"{get_generated_dir(args.prepared_dir)}"
-        f"/{args.synth_mask}_wavestitchPlus/"
+        f"/{args.synth_mask}_wavestitchplus/"
     )
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, f"timing_stride_{args.stride}.txt"), "a") as f:

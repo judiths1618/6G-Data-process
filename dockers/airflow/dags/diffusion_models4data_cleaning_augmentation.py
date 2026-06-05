@@ -2,22 +2,20 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.utils.trigger_rule import TriggerRule
+from airflow.models import Variable
 from datetime import datetime, timedelta
+from io import BytesIO
+from pathlib import Path
 
 
 import json
 import pandas as pd
-from io import BytesIO
-from airflow.models import Variable
+import re
 
 
 from helpers.object_store import load_df_from_object_store, save_df_to_object_store
 from helpers.utils import analyze_csv_time_series_df, detect_primary_key
 from helpers.clean_dirty_data import clean_dirty_data, _get_s3_client, _s3_upload_string, _s3_upload_bytes
-
-from pathlib import Path
-import re
-from airflow.models import Variable
 
 def make_dataset_name_from_key(key: str) -> str:
     stem = Path(key).name  # e.g., "amfperformance.csv"
@@ -35,17 +33,7 @@ def load_raw_data(**context):
 
     input_key = Variable.get("N2N_INPUT_KEY", default_var = "test/amf-performance.csv")
     bucket = Variable.get("S3_BUCKET", default_var="6gdali-lake2026")
-    # bucket = "6gdali-lake2026"
-    # bucket = "airflow-bucket"
-
-    # --- ADD THIS PRINT BLOCK ---
-    print(f"DEBUG INFO:")
-    print(f"   Target Bucket: {bucket}")
-    print(f"   Target Key:    {input_key}")
-    print(f"   Full URI:      s3://{bucket}/{input_key}")
-    # ----------------------------
-    print("[DEBUG] input_key repr:", repr(input_key))
-    print("[DEBUG] bucket repr:", repr(bucket))
+    print(f"[LOAD_RAW_DATA] Reading s3://{bucket}/{input_key}")
 
     df, fmt = load_df_from_object_store(
         key=input_key,
@@ -63,9 +51,6 @@ def load_raw_data(**context):
     )
     is_ts = ts_analysis["is_time_series"]
     ts_col = ts_analysis["timestamp_column"]
-    
-    from pathlib import Path
-
     
     dataset_name = Variable.get(
         "N2N_DATASET_NAME",
@@ -376,10 +361,16 @@ def ts_qc(**context):
     # ===============================
     # 4. Time-series Gap Detection
     # ===============================
-    df_ts = df[[ts_col]].copy()
-    df_ts[ts_col] = pd.to_datetime(df_ts[ts_col], unit="s", errors="coerce")
-
-    ts_diag = detect_time_gaps(df_ts, ts_col)
+    # ``detect_time_gaps`` is dtype-aware: numeric epoch seconds / ms /
+    # datetime64 / parseable string columns are all handled. We pass the
+    # original column so the detector can pick the right unit; no need to
+    # force a conversion here.
+    ts_diag = detect_time_gaps(df, ts_col)
+    print(f"[TS_QC] gap detection: has_gaps={ts_diag.get('has_gaps')} "
+          f"num_gaps={ts_diag.get('num_gaps')} "
+          f"expected_dt={ts_diag.get('expected_dt_seconds')}s "
+          f"missing_rows~={ts_diag.get('total_missing_rows')} "
+          f"gap_pct={100 * (ts_diag.get('gap_pct') or 0):.1f}%")
 
     # ===============================
     # 5. Recommendations (Decoupled!)
@@ -417,8 +408,8 @@ def ts_qc(**context):
         "recommendations": recommendations,
         "summary": {
             "total_records": len(df),
-            "start_date": str(df_ts[ts_col].min()),
-            "end_date": str(df_ts[ts_col].max())
+            "start_date": str(df[ts_col].min()),
+            "end_date": str(df[ts_col].max()),
         }
     }
 
@@ -444,10 +435,16 @@ def report_dqc(ti, **context):
         status = "FAIL"
         issues.append("Data quality expectations failed (GX).")
 
-    ts_diag = qc_result.get("time_series_diagnostics", {})
+    ts_diag = qc_result.get("issues", {}).get("ts_gaps", {})
     if ts_diag.get("has_gaps"):
-        if status != "FAIL": status = "WARN"
-        issues.append(f"Time-series gaps detected ({ts_diag.get('total_gaps')} gaps).")
+        if status != "FAIL":
+            status = "WARN"
+        issues.append(
+            f"Time-series gaps detected: {ts_diag.get('num_gaps')} gaps, "
+            f"expected dt={ts_diag.get('expected_dt_seconds')}s, "
+            f"~{ts_diag.get('total_missing_rows')} missing rows "
+            f"({100 * (ts_diag.get('gap_pct') or 0):.1f}% of grid)."
+        )
 
     report = {
         "metadata": {

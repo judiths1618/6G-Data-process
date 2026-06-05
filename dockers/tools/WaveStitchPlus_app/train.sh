@@ -1,6 +1,6 @@
 python3 train_wavestitch_customdata.py \
     -d 'custom_csv' \
-    -input_csv "/home/Yuandou/Desktop/projects/6G-Data-process/6GDALI_Datasets/EUR/6907619/amf-performance.csv" \
+    -input_csv "../../../6GDALI_Datasets/EUR/6907619/amf-performance.csv" \
     -prepared_dir ./work/EUR/prepared_amf \
     -lr 1e-3 \
     -stride 1 \

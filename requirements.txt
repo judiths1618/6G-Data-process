@@ -1,0 +1,31 @@
+# Core data stack
+numpy==1.26.4
+pandas==2.0.3
+scipy==1.14.1
+scikit-learn==1.5.2
+h5py==3.16.0
+
+# Storage and pipeline utilities
+boto3==1.39.4
+s3fs
+pyarrow==18.1.0
+tqdm==4.67.1
+great-expectations>=0.18,<2
+
+# WaveStitch+ runtime
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
+einops==0.8.0
+opt-einsum==3.4.0
+pykeops==2.3
+matplotlib==3.7.5
+
+# Baseline imputation libraries
+darts==0.33.0
+pypots==1.5
+imputegap==1.1.1
+
+# Dashboard
+streamlit==1.57.0
+plotly==5.24.1

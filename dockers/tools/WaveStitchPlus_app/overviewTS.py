@@ -44,7 +44,7 @@
 
 # # 加载 imputed 数据
 # ws_path = os.path.join(generated_dir, 'wavestitch_full_imputed_cleaned.csv')
-# wsp_path = os.path.join(generated_dir, 'wavestitchPlus_full_imputed_cleaned.csv')
+# wsp_path = os.path.join(generated_dir, 'wavestitchplus_v1_test_imputed_cleaned.csv')
 
 # pred_wavestitch = pd.read_csv(ws_path) if os.path.exists(ws_path) else None
 # pred_wavestitchPlus = pd.read_csv(wsp_path) if os.path.exists(wsp_path) else None
@@ -352,7 +352,7 @@ test_gt = pd.read_csv(os.path.join(prepared_dir, 'test_gt.csv'))
 test_input = pd.read_csv(os.path.join(prepared_dir, 'test_input.csv'))
 
 ws_path = os.path.join(generated_dir, 'wavestitch_full_imputed_cleaned.csv')
-wsp_path = os.path.join(generated_dir, 'wavestitchPlus_full_imputed_cleaned.csv')
+wsp_path = os.path.join(generated_dir, 'wavestitchplus_v1_test_imputed_cleaned.csv')
 
 pred_wavestitch = pd.read_csv(ws_path) if os.path.exists(ws_path) else None
 pred_wavestitchPlus = pd.read_csv(wsp_path) if os.path.exists(wsp_path) else None

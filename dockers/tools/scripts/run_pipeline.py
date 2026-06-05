@@ -457,7 +457,7 @@ def run_inference(
     print(f"\n[INFERENCE] Step 3/5: Run inference script")
     local_generated_dir = os.path.join(local_work, "generated")
     os.makedirs(local_generated_dir, exist_ok=True)
-    local_output_csv = os.path.join(local_generated_dir, "wavestitchPlus_full_imputed.csv")
+    local_output_csv = os.path.join(local_generated_dir, "wavestitchplus_v1_test_imputed.csv")
 
     _synth_cwd = local_prepared
     _run_name = os.path.basename(os.path.dirname(local_prepared))

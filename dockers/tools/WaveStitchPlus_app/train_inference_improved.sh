@@ -4,8 +4,10 @@ set -euo pipefail
 # =========================
 # Global settings
 # =========================
-DATA_ROOT="/home/Yuandou/Desktop/projects/6G-Data-process/6GDALI_Datasets/EUR/6907619"
-WORK_ROOT="./work"
+# Repo-relative default (script lives in dockers/tools/WaveStitchPlus_app/);
+# overridable via env. No absolute/user-specific paths so logs stay portable.
+DATA_ROOT="${DATA_ROOT:-../../../6GDALI_Datasets/EUR/6907619}"
+WORK_ROOT="${WORK_ROOT:-./work}"
 GROUP="EUR"
 
 USE_EM=true
@@ -37,7 +39,7 @@ for item in "${DATASETS[@]}"; do
 
   PREPARED_DIR="${WORK_ROOT}/${GROUP}/prepared_${NAME}"
   GENERATED_DIR="${WORK_ROOT}/${GROUP}/generated_${NAME}"
-  OUT_CSV="${GENERATED_DIR}/wavestitchPlus_full_imputed.csv"
+  OUT_CSV="${GENERATED_DIR}/wavestitchplus_v1_test_imputed.csv"
 
   mkdir -p "${PREPARED_DIR}"
   mkdir -p "${GENERATED_DIR}"

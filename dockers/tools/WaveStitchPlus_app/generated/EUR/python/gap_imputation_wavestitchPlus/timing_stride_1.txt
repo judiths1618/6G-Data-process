@@ -1,4 +1,0 @@
-
-bounds headroom=1.2 | 9.87s ± 0.00s
-
-bounds headroom=1.2 | 9.87s ± 0.00s

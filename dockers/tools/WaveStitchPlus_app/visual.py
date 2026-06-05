@@ -54,7 +54,7 @@ gt_path = os.path.join(prepared_dir, 'test_gt.csv')
 gt_data = pd.read_csv(gt_path) if os.path.exists(gt_path) else None
 
 pred_wavestitch = pd.read_csv(os.path.join(generated_dir, 'wavestitch_full_imputed_cleaned.csv'))
-pred_wavestitchPlus = pd.read_csv(os.path.join(generated_dir, 'wavestitchPlus_full_imputed_cleaned.csv'))
+pred_wavestitchPlus = pd.read_csv(os.path.join(generated_dir, 'wavestitchplus_v1_test_imputed_cleaned.csv'))
 
 print(f"Raw data shape: {raw_data.shape}")
 print(f"WaveStitch shape: {pred_wavestitch.shape}")

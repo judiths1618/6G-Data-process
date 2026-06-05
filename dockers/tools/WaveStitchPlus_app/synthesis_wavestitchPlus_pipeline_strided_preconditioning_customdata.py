@@ -500,7 +500,7 @@ if __name__ == "__main__":
                 if c in df_input.columns:
                     final_df[c] = df_input[c].to_numpy()[:len(final_df)]
 
-            # out_dir = f"{get_generated_dir(args.prepared_dir)}/{args.synth_mask}_wavestitchPlus/"
+            # out_dir = f"{get_generated_dir(args.prepared_dir)}/{args.synth_mask}_wavestitchplus/"
             out_dir = os.path.join(args.prepared_dir, f'generated/{args.synth_mask}')
             print("out_dir: ", out_dir)
             os.makedirs(out_dir, exist_ok=True)
@@ -516,7 +516,7 @@ if __name__ == "__main__":
 
             print(f"[Trial {trial}] Saved: {out_name}")
 
-    out_dir = f"{get_generated_dir(args.prepared_dir)}/{args.synth_mask}_wavestitchPlus/"
+    out_dir = f"{get_generated_dir(args.prepared_dir)}/{args.synth_mask}_wavestitchplus/"
     os.makedirs(out_dir, exist_ok=True)
     timing_file = os.path.join(out_dir, f"timing_stride_{args.stride}.txt")
     with open(timing_file, "a") as f:

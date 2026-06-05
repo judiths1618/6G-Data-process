@@ -167,9 +167,18 @@ class DirectoryManager:
 
 # Convenience functions for backward compatibility
 def get_save_dir(prepared_dir: str) -> str:
-    """Get saved_models directory path"""
-    dm = DirectoryManager(prepared_dir)
-    return str(dm.get_path("saved_models"))
+    """Model checkpoint directory, co-located UNDER the subset's generated folder.
+
+    Models are saved next to the imputed outputs at
+    ``<prepared_dir>/../generated_<subset>/saved_models`` (derived from the
+    prepared dir's actual location, so it is CWD-independent and stays inside the
+    consolidated ``experiments/<group>/`` tree). Train (save) and synthesis (load)
+    both call this, so they always agree. The container flow (run_pipeline.py)
+    manages its own ``prepared/saved_model`` path and is unaffected.
+    """
+    p = Path(prepared_dir)
+    name = p.name[len("prepared_"):] if p.name.startswith("prepared_") else p.name
+    return str(p.parent / f"generated_{name}" / "saved_models")
 
 def get_generated_dir(prepared_dir: str) -> str:
     """Get generated directory path"""

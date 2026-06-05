@@ -1,0 +1,29 @@
+FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
+
+LABEL description="PyPOTS baseline imputation runner (GPU) for the 6G-DALI pipeline"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-dev build-essential git curl \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python \
+    && ln -sf /usr/bin/pip3   /usr/local/bin/pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --no-cache-dir -U pip setuptools wheel \
+ && python -m pip install --no-cache-dir \
+        torch==2.8.0 --index-url https://download.pytorch.org/whl/cu118
+
+COPY PyPOTS_app/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY PyPOTS_app/ /app/PyPOTS_app/
+
+ENV PYTHONPATH=/app
+WORKDIR /app/PyPOTS_app
+
+ENTRYPOINT ["python", "/app/PyPOTS_app/run_imputation.py"]

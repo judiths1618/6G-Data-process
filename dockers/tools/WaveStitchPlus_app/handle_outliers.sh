@@ -5,8 +5,8 @@
 #     -prepared_dir ./work/prepared_python
 
 # python ./helper/outlier_removal.py \
-#     -i ./work/EUR/generated_python/wavestitchPlus_full_imputed.csv \
-#     -o ./work/EUR/generated_python/wavestitchPlus_full_imputed_cleaned.csv \
+#     -i ./work/EUR/generated_python/wavestitchplus_v1_test_imputed.csv \
+#     -o ./work/EUR/generated_python/wavestitchplus_v1_test_imputed_cleaned.csv \
 #     -prepared_dir ./work/prepared_python
 
 
@@ -16,8 +16,8 @@ python ./helper/outlier_removal.py \
     -prepared_dir ./work/prepared_amf
 
 python ./helper/outlier_removal.py \
-    -i ./work/EUR/generated_amf/wavestitchPlus_full_imputed.csv \
-    -o ./work/EUR/generated_amf/wavestitchPlus_full_imputed_cleaned.csv \
+    -i ./work/EUR/generated_amf/wavestitchplus_v1_test_imputed.csv \
+    -o ./work/EUR/generated_amf/wavestitchplus_v1_test_imputed_cleaned.csv \
     -prepared_dir ./work/prepared_amf
 
 # python ./helper/outlier_removal.py \
@@ -26,8 +26,8 @@ python ./helper/outlier_removal.py \
 #     -prepared_dir ./work/prepared_golang
 
 # python ./helper/outlier_removal.py \
-#     -i ./work/EUR/generated_golang/wavestitchPlus_full_imputed.csv \
-#     -o ./work/EUR/generated_golang/wavestitchPlus_full_imputed_cleaned.csv \
+#     -i ./work/EUR/generated_golang/wavestitchplus_v1_test_imputed.csv \
+#     -o ./work/EUR/generated_golang/wavestitchplus_v1_test_imputed_cleaned.csv \
 #     -prepared_dir ./work/prepared_golang
 
 
@@ -37,6 +37,6 @@ python ./helper/outlier_removal.py \
 #     -prepared_dir ./work/prepared_rabbitmq
 
 # python ./helper/outlier_removal.py \
-#     -i ./work/EUR/generated_rabbitmq/wavestitchPlus_full_imputed.csv \
-#     -o ./work/EUR/generated_rabbitmq/wavestitchPlus_full_imputed_cleaned.csv \
+#     -i ./work/EUR/generated_rabbitmq/wavestitchplus_v1_test_imputed.csv \
+#     -o ./work/EUR/generated_rabbitmq/wavestitchplus_v1_test_imputed_cleaned.csv \
 #     -prepared_dir ./work/prepared_rabbitmq

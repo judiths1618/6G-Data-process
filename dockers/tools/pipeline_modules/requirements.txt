@@ -1,0 +1,5 @@
+pandas>=1.5
+numpy>=1.23
+great_expectations>=0.18,<1.0
+boto3>=1.26
+pyarrow>=12.0

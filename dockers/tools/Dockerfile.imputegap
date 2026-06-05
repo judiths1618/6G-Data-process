@@ -1,0 +1,26 @@
+FROM python:3.10-slim
+
+LABEL description="ImputeGAP baseline imputation runner for the 6G-DALI pipeline"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+# ImputeGAP ships a couple of native components; keep the toolchain around.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential git curl cmake \
+        libopenblas-dev liblapack-dev gfortran \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ImputeGAP_app/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r /app/requirements.txt
+
+COPY ImputeGAP_app/ /app/ImputeGAP_app/
+
+ENV PYTHONPATH=/app
+WORKDIR /app/ImputeGAP_app
+
+ENTRYPOINT ["python", "/app/ImputeGAP_app/run_imputation.py"]

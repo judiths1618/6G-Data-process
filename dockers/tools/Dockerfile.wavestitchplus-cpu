@@ -1,0 +1,35 @@
+# WaveStitch+ CPU image — same code as the GPU image, no CUDA runtime.
+# Build from dockers/tools/ :
+#     docker build -f Dockerfile.wavestitchplus-cpu -t wavestitchplus-cpu:latest .
+
+FROM python:3.10-slim
+
+LABEL description="WaveStitchPlus CPU image — for laptops without a GPU"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl wget build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --no-cache-dir -U pip setuptools wheel
+
+# CPU PyTorch — much smaller wheel than the CUDA build.
+RUN python -m pip install --no-cache-dir \
+        torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+COPY requirements.txt /app/requirements.txt
+# Strip the GPU torch entries the GPU image installs separately.
+RUN sed -i '/^torch/d; /^torchvision/d; /^torchaudio/d' /app/requirements.txt \
+ && pip install --no-cache-dir -r /app/requirements.txt
+
+COPY WaveStitchPlus_app/ /app/WaveStitchPlus_app/
+COPY scripts/run_pipeline.py /app/run_pipeline.py
+
+ENV WORK_DIR=/tmp/wavestitch
+
+CMD ["python", "/app/run_pipeline.py"]

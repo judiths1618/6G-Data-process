@@ -1245,12 +1245,13 @@ if __name__ == "__main__":
         
         if args.input_csv:
             preprocess_csv(
-                input_csv=args.input_csv, 
-                output_dir=prepared_dir, 
-                time_col=None, 
+                input_csv=args.input_csv,
+                output_dir=prepared_dir,
+                time_col=None,
                 base_dt=None,
                 extract_main_segment=True,
-                skip_regularize_if_sparse=True
+                skip_regularize_if_sparse=True,
+                convert_units=True,
             )
 
         # 加载数据

@@ -4,7 +4,13 @@ import os
 import numpy as np
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, OrdinalEncoder
 
-pd.set_option('future.no_silent_downcasting', True)
+try:
+    # pandas >= 2.1 - suppress the silent-downcast deprecation noise. On older
+    # pandas the option doesn't exist; skip silently so this module also
+    # imports cleanly outside the container (for example, in myenv).
+    pd.set_option('future.no_silent_downcasting', True)
+except pd.errors.OptionError:
+    pass
 
 datasetfolder = './datasets/'
 datasets = {

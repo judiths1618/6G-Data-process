@@ -1,0 +1,7 @@
+pypots>=0.7
+torch==2.8.0
+numpy
+pandas==2.3.2
+scikit-learn
+scipy
+h5py
