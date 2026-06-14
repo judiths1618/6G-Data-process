@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch the imputation comparison dashboard.
+# Launch the DataOps cleaning-first dashboard.
 # Use:  conda activate myenv && bash dashboard/run.sh
 set -euo pipefail
 

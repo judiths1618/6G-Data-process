@@ -1,0 +1,9 @@
+.git/
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+experiments/
+generated/
+dockers/tools/WaveStitchPlus_app/generated/
+logs/

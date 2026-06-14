@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # ---------------- SeaweedFS ----------------
 
@@ -102,6 +100,7 @@ services:
 
       AWS_ACCESS_KEY_ID: anykey
       AWS_SECRET_ACCESS_KEY: anysecret
+      PYTHONPATH: /opt/airflow/project_src:/opt/airflow
 
     command:
       - bash
@@ -117,11 +116,47 @@ services:
         exec airflow webserver
     volumes:
       - ./airflow/dags:/opt/airflow/dags
+      - ../dags/minimal_dataops_dag.py:/opt/airflow/dags/minimal_dataops_dag.py:ro
+      - ../src:/opt/airflow/project_src:ro
+      - ../pipelines:/opt/airflow/pipelines:ro
+      - ../config:/opt/airflow/config:ro
+      - ../data:/opt/airflow/data
+      - ../reports:/opt/airflow/reports
+      - ../logs:/opt/airflow/logs
       # - ./airflow/logs:/opt/airflow/logs
       # - ./airflow/plugins:/opt/airflow/plugins
       - /var/run/docker.sock:/var/run/docker.sock
 
 
+    networks:
+      - airflow_net
+
+  # ---------------- DataOps Dashboard ----------------
+
+  dashboard:
+    build:
+      context: ..
+      dockerfile: dashboard/Dockerfile
+    container_name: dataops-dashboard
+    ports:
+      - "8502:8502"
+    environment:
+      PYTHONPATH: /app/src
+      PIPELINE_S3_ENDPOINT: http://seaweed-s3:8333
+      PIPELINE_S3_BUCKET: 6gdali-lake2026
+      PIPELINE_S3_ACCESS: anykey
+      PIPELINE_S3_SECRET: anysecret
+    volumes:
+      - ../dashboard:/app/dashboard:ro
+      - ../src:/app/src:ro
+      - ../config:/app/config:ro
+      - ../data:/app/data
+      - ../reports:/app/reports
+      - ../experiments:/app/experiments
+      - ../scripts:/app/scripts:ro
+      - ../dockers/tools:/app/dockers/tools:ro
+    depends_on:
+      - seaweed-s3
     networks:
       - airflow_net
 

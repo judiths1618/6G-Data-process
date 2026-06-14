@@ -1,0 +1,28 @@
+# input: data/raw/user_0_sample_0_antenna_0.csv
+# output: data/processed/user_0_sample_0_antenna_0_clean.csv
+input: data/raw/amf-performance.csv
+output: data/processed/amf-performance_clean.csv   # content = remediated frame
+cleaned_output:                                   # conservative-clean frame; null → <output_stem>_cleaned.csv
+report: reports/amf-performance_clean_report.json
+log_file: logs/amf-performance-dataops.log
+timestamp_col:
+
+validation:
+  mode: auto
+  expected_columns: []
+  numeric_bounds: {}
+  missing_threshold: 0.0
+  require_timestamp_unique: true
+  require_timestamp_monotonic: true
+  allow_step_index_timestamp: false
+  outlier_q: 0.01        # flag values outside the [q, 1-q] quantile band
+  outlier_mostly: 0.95   # GX pass threshold for that band (margin over the ~2q tail)
+
+# Imputation handoff: the pipeline regularizes gappy timelines and advertises a
+# method catalog; it does NOT run imputation. Choose (app, method) here and the
+# external orchestrator invokes the matching app on the prepared-dir bundle.
+imputation:
+  app:               # Darts | ImputeGAP | PyPOTS | WaveStitchPlus
+  method:            # e.g. saits, iim, linear, v2
+  build_bundle: true
+  prepared_dir:      # default: <output_stem>_prepared/ next to the output csv

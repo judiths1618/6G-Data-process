@@ -44,9 +44,12 @@ from plotly.subplots import make_subplots
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+SRC_DIR = REPO_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 # All demo results live under experiments/ (local-demo convention). The canonical
 # imputation tree is experiments/EUR/{prepared_<subset>, generated_<subset>}.
-DEFAULT_WORK_ROOT = REPO_ROOT / "experiments" / "EUR"
+DEFAULT_WORK_ROOT = REPO_ROOT / "data" / "processed"
 
 RUNNERS = {
     "darts": REPO_ROOT / "dockers" / "tools" / "Darts_app" / "run_imputation.py",
@@ -70,6 +73,15 @@ RUNNER_METHODS = {
     "wavestitchplus": ["v1", "em", "standard"],
     "wavestitchplus_v2": ["anchored"],
     "wavestitchplus_harpoon": ["harpoon"],
+}
+
+RUNNER_IMPORT_CHECKS = {
+    "darts": ("darts", "python -m pip install -r dockers/tools/Darts_app/requirements.txt"),
+    "imputegap": ("imputegap", "python -m pip install -r dockers/tools/ImputeGAP_app/requirements.txt"),
+    "pypots": ("pypots", "python -m pip install -r dockers/tools/PyPOTS_app/requirements.txt"),
+    "wavestitchplus": ("torch", "python -m pip install -r dockers/tools/requirements.txt"),
+    "wavestitchplus_v2": ("torch", "python -m pip install -r dockers/tools/requirements.txt"),
+    "wavestitchplus_harpoon": ("torch", "python -m pip install -r dockers/tools/requirements.txt"),
 }
 
 INPUT_FILES = {"train": "train.csv", "test": "test_input.csv"}
@@ -127,12 +139,15 @@ class Subset:
 
 @st.cache_data(show_spinner=False)
 def discover_subsets(work_root: Path) -> List[Subset]:
-    """Discover ``prepared_<subset>`` folders under ``work_root``.
+    """Discover prepared bundles under ``work_root`` (fallback for the run picker).
 
-    Accepts either layout: ``work_root/<dataset>/prepared_<subset>`` (a tree of
-    dataset groups) or ``work_root/prepared_<subset>`` (work_root *is* the group,
-    e.g. ``experiments/EUR``). Both are scanned so the default points straight at
-    the consolidated ``experiments/EUR`` tree.
+    Handles both naming conventions:
+      * ``prepared_<name>`` + ``generated_<name>``         (experiments/EUR tree)
+      * ``<name>_prepared`` + ``generated_<name>_prepared`` (pipeline output under
+        ``data/processed``)
+
+    Scans ``work_root`` itself and one level of sub-directories, so the default
+    can point straight at ``data/processed``.
     """
     out: List[Subset] = []
     if not work_root.exists():
@@ -140,18 +155,110 @@ def discover_subsets(work_root: Path) -> List[Subset]:
     candidates = [work_root] + sorted(p for p in work_root.iterdir() if p.is_dir())
     seen: set = set()
     for ds_dir in candidates:
-        for prep in sorted(ds_dir.glob("prepared_*")):
-            if prep in seen or not (prep / "meta.json").exists():
+        for prep in sorted(ds_dir.glob("*prepared*")):
+            if prep in seen or not prep.is_dir() or not (prep / "meta.json").exists():
                 continue
             seen.add(prep)
-            name = prep.name.removeprefix("prepared_")
-            gen = ds_dir / f"generated_{name}"
+            if prep.name.startswith("prepared_"):       # experiments/EUR layout
+                name = prep.name.removeprefix("prepared_")
+                gen = ds_dir / f"generated_{name}"
+            else:                                         # data/processed layout
+                name = prep.name.removesuffix("_prepared")
+                gen = ds_dir / f"generated_{prep.name}"
             out.append(Subset(
                 dataset=ds_dir.name,
                 name=name,
                 prepared_dir=prep,
                 generated_dir=gen if gen.exists() else None,
             ))
+    return out
+
+
+@dataclass
+class DataOpsRun:
+    """One end-to-end DataOps run, discovered from a pipeline report JSON.
+
+    Unifies the cleaning lineage (raw→cleaned→remediated→regularized→final) and
+    the imputation bundle (prepared/generated dirs) behind a single selectable
+    run, so the dashboard no longer needs two separate data-source mental models.
+    """
+    name: str
+    report_path: Optional[Path]
+    report: Optional[dict]
+    compare: Optional[dict]         # *_imputation_compare.json, if present
+    raw_csv: Optional[Path]
+    cleaned_csv: Optional[Path]
+    remediated_csv: Optional[Path]
+    prepared_dir: Optional[Path]    # regularized bundle (drives the imputation views)
+    generated_dir: Optional[Path]
+    final_csv: Optional[Path]
+
+    @property
+    def data_type(self) -> str:
+        rep = self.report or {}
+        return (rep.get("data_type")
+                or rep.get("profile", {}).get("data_type")
+                or "unknown")
+
+    def to_subset(self) -> Optional["Subset"]:
+        """Expose the regularized bundle as a Subset for the imputation workbench."""
+        if not self.prepared_dir or not (self.prepared_dir / "meta.json").exists():
+            return None
+        gen = self.generated_dir if (self.generated_dir and self.generated_dir.exists()) else None
+        return Subset(dataset=self.name, name="run", prepared_dir=self.prepared_dir,
+                      generated_dir=gen)
+
+
+@st.cache_data(show_spinner=False)
+def discover_dataops_runs(reports_dir: Path, repo_root: Path) -> List[DataOpsRun]:
+    """Discover DataOps runs from ``reports/*.json`` pipeline reports.
+
+    A file counts as a pipeline report if it carries ``validation_comparison``.
+    Paths inside the report (relative to the repo root) are resolved, and the
+    sibling ``*_imputation_compare.json`` (final dataset + comparison) is attached.
+    """
+    out: List[DataOpsRun] = []
+    if not reports_dir.exists():
+        return out
+
+    def _abs(p) -> Optional[Path]:
+        if not p:
+            return None
+        pp = Path(p)
+        return pp if pp.is_absolute() else repo_root / pp
+
+    for jp in sorted(reports_dir.glob("*.json")):
+        if jp.name.endswith("_imputation_compare.json"):
+            continue
+        try:
+            rep = json.loads(jp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(rep, dict) or "validation_comparison" not in rep:
+            continue
+        cmp_path = jp.with_name(jp.stem + "_imputation_compare.json")
+        compare = None
+        if cmp_path.exists():
+            try:
+                compare = json.loads(cmp_path.read_text(encoding="utf-8"))
+            except Exception:
+                compare = None
+        generated = final_csv = None
+        if compare:
+            generated = _abs((compare.get("imputation") or {}).get("output_dir"))
+            final_csv = _abs((compare.get("final_dataset") or {}).get("path"))
+        out.append(DataOpsRun(
+            name=jp.stem,
+            report_path=jp,
+            report=rep,
+            compare=compare,
+            raw_csv=_abs(rep.get("input")),
+            cleaned_csv=_abs(rep.get("cleaned_output")),
+            remediated_csv=_abs(rep.get("output")),
+            prepared_dir=_abs((rep.get("handoff") or {}).get("prepared_dir")),
+            generated_dir=generated,
+            final_csv=final_csv,
+        ))
     return out
 
 
@@ -323,15 +430,12 @@ def plot_feature_comparison(input_df: pd.DataFrame,
                             max_bands: int = 30) -> go.Figure:
     fig = go.Figure()
 
-    x = input_df[time_col] if time_col in input_df.columns else input_df.index
-    if time_col == "time":
-        # Treat unix-seconds as a datetime axis when it looks like one.
-        try:
-            xv = pd.to_numeric(x, errors="coerce")
-            if xv.notna().all() and xv.min() > 1_000_000_000:
-                x = pd.to_datetime(xv, unit="s")
-        except Exception:
-            pass
+    # Render the time axis as wall-clock dates whenever the column is datetime
+    # or epoch seconds/ms (shared, robust coercion — handles s and ms).
+    if time_col in input_df.columns:
+        x, x_label = _coerce_time_axis(input_df[time_col])
+    else:
+        x, x_label = pd.Series(input_df.index), "row index"
 
     input_vals = input_df[feature].to_numpy(dtype=float)
     miss_mask = np.isnan(input_vals)
@@ -424,7 +528,7 @@ def plot_feature_comparison(input_df: pd.DataFrame,
         height=520,
         margin=dict(l=40, r=20, t=40, b=40),
         title=f"{feature}  —  observed vs imputed",
-        xaxis_title=time_col,
+        xaxis_title=x_label,
         yaxis_title=feature,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="closest",
@@ -570,15 +674,11 @@ def plot_long_gap_feature(ti: pd.DataFrame, gt: pd.DataFrame,
                           preds: Dict[str, pd.DataFrame], feature: str,
                           time_col: str) -> go.Figure:
     """Per-method reconstruction of one feature over the masked long gaps."""
-    x = ti[time_col] if time_col in ti.columns else pd.Series(np.arange(len(ti)))
-    if time_col == "time":
-        try:
-            xv = pd.to_numeric(x, errors="coerce")
-            if xv.notna().all() and xv.min() > 1_000_000_000:
-                x = pd.to_datetime(xv, unit="s")
-        except Exception:
-            pass
-    x = np.asarray(x)
+    if time_col in ti.columns:
+        xser, _ = _coerce_time_axis(ti[time_col])
+    else:
+        xser = pd.Series(np.arange(len(ti)))
+    x = np.asarray(xser)
     inp = ti[feature].to_numpy(float)
     miss = np.isnan(inp)
     gtv = gt[feature].to_numpy(float) if feature in gt.columns else None
@@ -762,14 +862,49 @@ def run_experiment(library: str,
                    subset: Subset,
                    splits: List[str],
                    extra_args: List[str]) -> Tuple[int, str]:
-    """Invoke a runner script and return (exit_code, combined_output)."""
+    """Invoke a runner and return (exit_code, combined_output).
+
+    Darts interpolation methods run dependency-free through the pandas engine in
+    :mod:`dataops.imputation_runner` (bit-faithful to Darts' MissingValuesFiller),
+    so the Run tab works without a local ``darts`` install. Everything else
+    (darts kalman, PyPOTS, WaveStitch+, …) shells out to its app runner.
+    """
+    output_dir = subset.generated_dir or (subset.prepared_dir.parent / f"generated_{subset.name}")
+
+    if library == "darts":
+        from dataops.imputation_runner import INTERP_METHODS, impute_bundle
+        if method in INTERP_METHODS:
+            try:
+                res = impute_bundle(subset.prepared_dir, method=method,
+                                    output_dir=str(output_dir), inputs=splits, engine="pandas")
+            except Exception as exc:  # noqa: BLE001 - surface as a run failure
+                return 1, f"darts/{method} (pandas engine) failed: {exc}"
+            lines = [f"darts/{method} via built-in pandas engine (no `darts` dependency):"]
+            for kind, info in res["files"].items():
+                lines.append(f"  {kind}: filled {info['filled']:,}/{info['nan_before']:,} "
+                             f"NaN target cells → {Path(info['path']).name}")
+            return 0, "\n".join(lines)
+
     runner = RUNNERS[library]
     if not runner.exists():
         return 127, f"runner not found: {runner}"
+    module_name, install_hint = RUNNER_IMPORT_CHECKS.get(library, (None, None))
+    if module_name:
+        import importlib.util
+
+        if importlib.util.find_spec(module_name) is None:
+            return 127, (
+                f"Optional dependency for {library}/{method} is not installed: "
+                f"`{module_name}`.\n\n"
+                f"Install it in the dashboard Python environment first:\n"
+                f"  {install_hint}\n\n"
+                "The dashboard keeps method execution as the final-step detail; "
+                "the cleaning lineage and existing imputation outputs remain usable."
+            )
     cmd = [
         sys.executable, str(runner),
         "--prepared-dir", str(subset.prepared_dir),
-        "--output-dir", str(subset.generated_dir or (subset.prepared_dir.parent / f"generated_{subset.name}")),
+        "--output-dir", str(output_dir),
         "--method", method,
         "--inputs", *splits,
     ] + extra_args
@@ -931,6 +1066,426 @@ def _pipeline_compare_plot(raw: pd.DataFrame, cleaned: pd.DataFrame,
     return fig
 
 
+_SEVERITY_COLORS = {"error": "#d62728", "warning": "#e8820c", "info": "#1f77b4"}
+_STATUS_BADGES = {
+    "applied_by_remediation": ("#2ca02c", "✓ applied"),
+    "deferred_to_imputation": ("#7e57c2", "→ imputation"),
+    "manual": ("#6c757d", "manual"),
+}
+
+
+def _badge(text: str, color: str) -> str:
+    return (
+        f"<span style='background:{color};color:#fff;padding:2px 9px;"
+        f"border-radius:11px;font-size:0.78em;font-weight:600;white-space:nowrap'>"
+        f"{text}</span>"
+    )
+
+
+def _passed_badge(value: Optional[bool]) -> str:
+    if value is True:
+        return _badge("PASSED", "#2ca02c")
+    if value is False:
+        return _badge("FAILED", "#d62728")
+    return _badge("not run", "#6c757d")
+
+
+def _bool_badge(value: Optional[bool], yes: str, no: str) -> str:
+    if value is True:
+        return _badge(yes, "#e8820c")
+    if value is False:
+        return _badge(no, "#2ca02c")
+    return _badge("—", "#6c757d")
+
+
+def _issue_counts_chart(before: dict, after: Optional[dict]) -> Optional[go.Figure]:
+    families = ["ts_gaps", "missing", "outliers", "failed_columns"]
+    nice = {"ts_gaps": "time gaps", "missing": "missing",
+            "outliers": "outliers", "failed_columns": "GX failed cols"}
+    bvals = [int(before.get(f, 0)) for f in families]
+    if not any(bvals) and not after:
+        return None
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=[nice[f] for f in families], y=bvals, name="detected",
+        marker_color="#e8820c",
+        text=bvals, textposition="outside",
+    ))
+    if after is not None:
+        avals = [int(after.get(f, 0)) for f in families]
+        fig.add_trace(go.Bar(
+            x=[nice[f] for f in families], y=avals, name="after remediation",
+            marker_color="#2ca02c", text=avals, textposition="outside",
+        ))
+    fig.update_layout(
+        barmode="group", height=320,
+        title="Quality issues — detected vs after remediation",
+        yaxis_title="count", margin=dict(l=30, r=20, t=50, b=30),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+    )
+    return fig
+
+
+def _lifecycle_chart(comparison: dict) -> Optional[go.Figure]:
+    cleaning = comparison.get("cleaning_effect", {})
+    remed = comparison.get("remediation_effect", {})
+    miss = [
+        cleaning.get("missing_cells_before"),
+        cleaning.get("missing_cells_after"),
+        remed.get("missing_cells_after"),
+    ]
+    if all(v is None for v in miss):
+        return None
+    stages = ["raw", "cleaned", "remediated"]
+    vals = [int(v) if v is not None else 0 for v in miss]
+    fig = go.Figure(go.Bar(
+        x=stages, y=vals, marker_color=["#1f77b4", "#e8820c", "#2ca02c"],
+        text=vals, textposition="outside",
+    ))
+    fig.update_layout(
+        height=320, title="Missing cells across pipeline stages",
+        yaxis_title="missing cells", margin=dict(l=30, r=20, t=50, b=30),
+    )
+    return fig
+
+
+def _render_action_plan(actions: List[dict]) -> None:
+    """Issue → solution plan, grouped into auto-handled vs needs-attention."""
+    auto = [a for a in actions if a.get("status") == "applied_by_remediation"]
+    deferred = [a for a in actions if a.get("status") == "deferred_to_imputation"]
+    manual = [a for a in actions if a.get("status") not in
+              {"applied_by_remediation", "deferred_to_imputation"}]
+
+    def _line(a: dict) -> str:
+        sev = a.get("severity", "info")
+        status = a.get("status", "manual")
+        color, label = _STATUS_BADGES.get(status, ("#6c757d", status))
+        return (
+            f"<div style='margin:6px 0;padding:8px 12px;border-left:4px solid "
+            f"{_SEVERITY_COLORS.get(sev, '#1f77b4')};background:#fafafa;border-radius:4px'>"
+            f"{_badge(label, color)} &nbsp;<b>{a.get('issue')}</b> "
+            f"<span style='color:#888;font-size:0.85em'>({sev})</span><br>"
+            f"<span style='font-size:0.9em'>{a.get('solution', '')}</span><br>"
+            f"<code style='font-size:0.8em;color:#555'>{a.get('module', '')}</code>"
+            f"</div>"
+        )
+
+    if auto:
+        st.markdown("**Auto-handled by remediation**")
+        st.markdown("".join(_line(a) for a in auto), unsafe_allow_html=True)
+    if deferred:
+        st.markdown("**Deferred to imputation**")
+        st.markdown("".join(_line(a) for a in deferred), unsafe_allow_html=True)
+    if manual:
+        st.markdown("**Needs manual attention**")
+        st.markdown("".join(_line(a) for a in manual), unsafe_allow_html=True)
+
+
+def _render_handoff(handoff: dict) -> None:
+    needs = handoff.get("needs_ts_imputation")
+    st.markdown(
+        f"Needs time-series imputation: {_bool_badge(needs, 'YES', 'NO')} "
+        f"&nbsp;<span style='color:#888;font-size:0.85em'>({handoff.get('reason', '')})</span>",
+        unsafe_allow_html=True,
+    )
+    if not needs:
+        st.caption("No timeline gaps detected — nothing routed to imputation.")
+        return
+
+    sel = handoff.get("selection", {}) or {}
+    sel_status = sel.get("status")
+    status_color = {
+        "ok": "#2ca02c", "known_failing": "#e8820c",
+        "invalid": "#d62728", "none_configured": "#6c757d",
+    }.get(sel_status, "#6c757d")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Selected app", sel.get("app") or "—")
+    c2.metric("Method", sel.get("method") or "—")
+    c3.markdown(
+        f"<div style='padding-top:14px'>{_badge(sel_status or '—', status_color)}</div>",
+        unsafe_allow_html=True,
+    )
+    if sel.get("message"):
+        st.caption(sel["message"])
+
+    if handoff.get("bundle_written"):
+        st.success(f"Imputation-ready bundle written to `{handoff.get('prepared_dir')}` "
+                   f"· targets: {', '.join(handoff.get('target_cols', [])) or '—'}")
+    elif handoff.get("bundle_error"):
+        st.warning(f"Bundle not written: {handoff['bundle_error']}")
+
+    hint = handoff.get("invoke_hint")
+    if hint:
+        st.caption("Next step (run by the external orchestrator):")
+        st.code(hint, language="bash")
+
+    catalog = handoff.get("imputation_catalog", {})
+    if catalog:
+        with st.expander("Imputation method catalog", expanded=False):
+            rows = []
+            for app, spec in catalog.items():
+                rows.append({
+                    "app": app,
+                    "default": spec.get("default"),
+                    "methods": len(spec.get("methods", [])),
+                    "known_failing": ", ".join(spec.get("known_failing", [])) or "—",
+                    "available": ", ".join(spec.get("methods", [])),
+                })
+            st.dataframe(pd.DataFrame(rows).set_index("app"), width="stretch")
+
+
+def _render_gx_failures(quality: dict, quality_after: Optional[dict]) -> None:
+    """Surface the concrete failed GX expectations so 'manual attention' is actionable."""
+    src = quality_after if (quality_after and (quality_after.get("report") or {}).get("gx")) else quality
+    gx = (src.get("report") or {}).get("gx", {})
+    failed = gx.get("failed_expectations", [])
+    if not failed:
+        return
+    which = "after remediation" if src is quality_after else "as detected"
+    st.markdown(f"**Failed GX expectations ({which})** — {gx.get('failed', len(failed))} "
+                f"of {gx.get('evaluated', '?')} evaluated")
+    fdf = pd.DataFrame(failed).rename(columns={
+        "expectation": "expectation", "column": "column",
+        "unexpected_percent": "unexpected %",
+    })
+    st.dataframe(fdf, width="stretch", hide_index=True)
+    types = {f.get("expectation") for f in failed}
+    if types == {"expect_column_values_to_be_between"}:
+        st.caption(
+            "ℹ️ All failures are the quantile-based range sentinel "
+            "`expect_column_values_to_be_between(q1, q99, mostly=0.98)`. By "
+            "construction ~2% of a continuous column lies outside its own 1st/99th "
+            "percentile, so this check trips by design and is **not** a hard schema "
+            "break. Winsorizing doesn't clear it — the after-check recomputes the "
+            "same quantiles on the clipped data (a fixed point). Treat these as soft "
+            "outlier flags, or relax `outlier_q` / `mostly` if you want them green."
+        )
+
+
+def _render_imputation_compare(impute_compare: dict) -> None:
+    """Final cleaned dataset callout + clean-vs-imputed fill rate / per-column MAE."""
+    final = impute_compare.get("final_dataset") or {}
+    comp = impute_compare.get("comparison") or {}
+    imp = impute_compare.get("imputation") or {}
+    method = imp.get("method") or comp.get("method") or "?"
+
+    if final:
+        filled = final.get("gaps_before", 0) - final.get("gaps_after", 0)
+        st.success(
+            f"**Final cleaned data** → `{final.get('path')}`  ·  "
+            f"{final.get('rows', 0):,} rows × {len(final.get('columns', []))} cols  ·  "
+            f"gaps filled {filled:,}/{final.get('gaps_before', 0):,} via "
+            f"darts/{method} (residual {final.get('gaps_after', 0):,})"
+        )
+
+    splits = comp.get("splits", {})
+    cols = st.columns(2)
+    if splits:
+        fr = go.Figure(go.Bar(
+            x=list(splits.keys()),
+            y=[s.get("fill_rate", 0) * 100 for s in splits.values()],
+            marker_color="#2ca02c",
+            text=[f"{s.get('fill_rate', 0) * 100:.0f}%" for s in splits.values()],
+            textposition="outside",
+        ))
+        fr.update_layout(
+            title=f"Gap fill rate by split (darts/{method})", yaxis_title="% filled",
+            height=320, yaxis_range=[0, 110], margin=dict(l=30, r=20, t=50, b=30),
+        )
+        cols[0].plotly_chart(fr, width="stretch")
+
+    acc = (splits.get("test") or {}).get("accuracy") or {}
+    per_col = acc.get("per_column") or {}
+    if per_col:
+        items = sorted(per_col.items(), key=lambda kv: kv[1]["MAE"], reverse=True)
+        mae = go.Figure(go.Bar(
+            x=[v["MAE"] for _, v in items], y=[k for k, _ in items],
+            orientation="h", marker_color="#1f77b4",
+        ))
+        mae.update_layout(
+            title="Per-column MAE on eval cells (test)", xaxis_type="log",
+            xaxis_title="MAE (log scale)", height=320, margin=dict(l=30, r=20, t=50, b=30),
+        )
+        cols[1].plotly_chart(mae, width="stretch")
+        cols[1].caption(
+            "Eval cells = holdout-masked positions with known truth. Log scale "
+            "because columns span microseconds → bytes; `nearest` is a weak "
+            "baseline on spiky latency (high MAE) but exact on constants like `cpu_limit`."
+        )
+
+
+def render_validation_comparison(report: dict, data_type: str,
+                                 impute_compare: Optional[dict] = None) -> None:
+    comparison = report.get("validation_comparison", {})
+    quality = report.get("quality", {})
+    quality_after = report.get("quality_after") or {}
+    handoff = report.get("handoff", {})
+    status = comparison.get("validation_status", {})
+
+    if not comparison and not quality:
+        st.info("No validation comparison payload found in the report. Re-run "
+                "`python -m pipelines.minimal_dataops` to populate it.")
+        return
+
+    st.caption("Lineage:  raw → cleaned → remediated → regularized (gaps explicit) "
+               "→ **final** (imputed, gap-free)")
+
+    # ---- Validation status badges ----------------------------------------
+    st.markdown("##### Validation status")
+    mode = status.get("mode", data_type)
+    gx_b = (quality.get("report") or {}).get("gx", {})
+    gx_a = (quality_after.get("report") or {}).get("gx", {}) if quality_after else {}
+
+    def _gx_label(passed: Optional[bool], detail: dict) -> str:
+        badge = _passed_badge(passed)
+        if detail.get("evaluated"):
+            badge += (f" <span style='color:#888;font-size:0.85em'>"
+                      f"{detail.get('passed')}/{detail.get('evaluated')} expectations</span>")
+        return badge
+
+    st.markdown(
+        f"GX detected {_gx_label(quality.get('gx_passed'), gx_b)} "
+        f"&nbsp;→&nbsp; after remediation "
+        f"{_gx_label(quality_after.get('gx_passed') if quality_after else None, gx_a)} "
+        f"&nbsp;&nbsp;·&nbsp;&nbsp; Pandera "
+        f"{_passed_badge(status.get('pandera_passed'))} "
+        f"&nbsp;&nbsp;·&nbsp;&nbsp; mode <code>{mode}</code>",
+        unsafe_allow_html=True,
+    )
+
+    # ---- Lifecycle metrics -----------------------------------------------
+    shape = comparison.get("dataset_shape", {})
+    cleaning = comparison.get("cleaning_effect", {})
+    remed = comparison.get("remediation_effect", {})
+    raw_rows = shape.get("raw", {}).get("rows")
+    remed_rows = shape.get("remediated", {}).get("rows", shape.get("cleaned", {}).get("rows"))
+    miss_raw = cleaning.get("missing_cells_before")
+    miss_remed = remed.get("missing_cells_after", cleaning.get("missing_cells_after"))
+
+    m = st.columns(4)
+    m[0].metric(
+        "Final rows", f"{remed_rows:,}" if remed_rows is not None else "—",
+        delta=(f"{remed_rows - raw_rows:+,}" if raw_rows is not None and remed_rows is not None else None),
+        help="raw → cleaned → remediated",
+    )
+    m[1].metric(
+        "Missing cells", f"{miss_remed:,}" if miss_remed is not None else "—",
+        delta=(f"{miss_remed - miss_raw:+,}" if miss_raw is not None and miss_remed is not None else None),
+        delta_color="inverse",
+    )
+    m[2].metric("Outliers clipped", f"{remed.get('outlier_cells_clipped', 0):,}")
+    m[3].metric("Rows dropped (cleaning)", f"{cleaning.get('dropped_rows', 0):,}",
+                help="empty + duplicate rows removed by the first-pass cleaning")
+
+    # ---- Two charts side by side -----------------------------------------
+    c1, c2 = st.columns(2)
+    life = _lifecycle_chart(comparison)
+    if life is not None:
+        c1.plotly_chart(life, width="stretch")
+    issues = _issue_counts_chart(
+        quality.get("issue_summary", {}),
+        quality_after.get("issue_summary") if quality_after else None,
+    )
+    if issues is not None:
+        c2.plotly_chart(issues, width="stretch")
+
+    # ---- Failed GX expectations ------------------------------------------
+    _render_gx_failures(quality, quality_after)
+
+    # ---- Issue → solution plan -------------------------------------------
+    actions = quality.get("action_plan", [])
+    if actions:
+        st.divider()
+        st.markdown("##### Issue → solution plan")
+        _render_action_plan(actions)
+
+    # ---- Imputation handoff ----------------------------------------------
+    if handoff:
+        st.divider()
+        st.markdown("##### Imputation handoff")
+        _render_handoff(handoff)
+
+    # ---- Final cleaned data & clean-vs-imputed comparison ----------------
+    if impute_compare:
+        st.divider()
+        st.markdown("##### Final cleaned data & imputation comparison")
+        _render_imputation_compare(impute_compare)
+    elif handoff.get("needs_ts_imputation"):
+        st.divider()
+        st.caption(
+            "No imputation comparison yet. Produce the final cleaned dataset with:  "
+            "`python scripts/auto_impute.py --report <this report> --method nearest`"
+        )
+
+
+def render_overview(run: Optional["DataOpsRun"]) -> None:
+    """Cleaning-first landing view: the raw→…→final lineage for one run."""
+    if run is None or not run.report:
+        st.info("No DataOps pipeline run selected. Pick a run (`reports/*.json`) in the "
+                "sidebar, or generate one with "
+                "`python -m pipelines.minimal_dataops --config config/dataops.yaml`.")
+        return
+    rep = run.report
+    vc = rep.get("validation_comparison", {})
+    shape = vc.get("dataset_shape", {})
+    cleaning = vc.get("cleaning_effect", {})
+    remed = vc.get("remediation_effect", {})
+    compare = run.compare or {}
+    final = compare.get("final_dataset") or {}
+    q = rep.get("quality", {})
+    qa = rep.get("quality_after") or {}
+
+    st.markdown(f"#### Run `{run.name}` · type `{run.data_type}`")
+    st.caption("Lineage:  raw → cleaned → remediated → regularized (gaps explicit) "
+               "→ **final** (imputed, gap-free)")
+
+    reg_rows = None
+    if run.prepared_dir and (run.prepared_dir / "meta.json").exists():
+        try:
+            reg_rows = load_meta(run.prepared_dir).get("regularized_rows")
+        except Exception:
+            reg_rows = None
+
+    cards = [
+        ("raw", run.raw_csv, shape.get("raw", {}).get("rows"), None),
+        ("cleaned", run.cleaned_csv, shape.get("cleaned", {}).get("rows"), None),
+        ("remediated", run.remediated_csv, shape.get("remediated", {}).get("rows"),
+         f"{remed.get('outlier_cells_clipped', 0):,} clipped"),
+        ("regularized", run.prepared_dir, reg_rows, "gaps explicit"),
+        ("final", run.final_csv, final.get("rows"), "gap-free" if final else "not built yet"),
+    ]
+    cols = st.columns(5)
+    for c, (stage, path, rows, note) in zip(cols, cards):
+        c.metric(stage, f"{rows:,}" if isinstance(rows, int) else "—")
+        exists = bool(path and Path(path).exists())
+        label = Path(path).name if path else "—"
+        c.caption(("✓ " if exists else "✗ ") + label + (f" · {note}" if note else ""))
+
+    gx_b = (q.get("report") or {}).get("gx", {})
+    gx_a = (qa.get("report") or {}).get("gx", {}) if qa else {}
+    pandera = vc.get("validation_status", {}).get("pandera_passed")
+    line = (f"GX detected {_passed_badge(q.get('gx_passed'))}"
+            + (f" <span style='color:#888;font-size:.85em'>{gx_b.get('passed')}/{gx_b.get('evaluated')}</span>"
+               if gx_b.get("evaluated") else "")
+            + f" → after remediation {_passed_badge(qa.get('gx_passed') if qa else None)}"
+            + (f" <span style='color:#888;font-size:.85em'>{gx_a.get('passed')}/{gx_a.get('evaluated')}</span>"
+               if gx_a.get("evaluated") else "")
+            + f" &nbsp;·&nbsp; Pandera {_passed_badge(pandera)}")
+    st.markdown(line, unsafe_allow_html=True)
+
+    handoff = rep.get("handoff", {})
+    st.markdown(
+        f"Needs ts-imputation: {_bool_badge(handoff.get('needs_ts_imputation'), 'YES', 'NO')} "
+        f"<span style='color:#888;font-size:.85em'>({handoff.get('reason', '')})</span>",
+        unsafe_allow_html=True,
+    )
+    if final.get("path"):
+        filled = final.get("gaps_before", 0) - final.get("gaps_after", 0)
+        st.success(f"★ Final cleaned data: `{final['path']}` · {final.get('rows', 0):,} rows · "
+                   f"gaps filled {filled:,} (residual {final.get('gaps_after', 0):,})")
+    st.caption("→ full breakdown in **Quality & remediation**; method comparison in the imputation tabs.")
+
+
 # ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
@@ -942,110 +1497,140 @@ def main() -> None:
         initial_sidebar_state="expanded",
     )
 
-    st.title("Time-series imputation — method comparison")
-    st.caption("Compare Darts / ImputeGAP / PyPOTS / WaveStitch+ outputs on the 6G-DALI EUR datasets.")
+    st.title("6G-DALI DataOps — data cleaning & imputation")
+    st.caption("One run, end to end: raw → cleaned → remediated → regularized → final (imputed). "
+               "Imputation method comparison (Darts / ImputeGAP / PyPOTS / WaveStitch+) is the "
+               "detail of the final step.")
 
-    # ---- Sidebar: dataset / subset / split ---------------------------------
+    # ---- Sidebar: pick a DataOps run (unified discovery) -------------------
+    if st.sidebar.button("Refresh runs", key="refresh_runs"):
+        discover_dataops_runs.clear()
+        discover_subsets.clear()
+    runs = discover_dataops_runs(REPO_ROOT / "reports", REPO_ROOT)
+    run_names = [r.name for r in runs]
+    run: Optional[DataOpsRun] = None
+    if run_names:
+        sel = st.sidebar.selectbox(
+            "DataOps run", run_names, index=0,
+            help="A pipeline report under `reports/*.json` (raw→…→final lineage).",
+        )
+        run = runs[run_names.index(sel)]
+    else:
+        st.sidebar.caption("No `reports/*.json` pipeline runs found.")
+
+    st.sidebar.divider()
+
+    # ---- Imputation workbench source: the run's bundle, else an experiment subset
     work_root = Path(st.sidebar.text_input(
-        "Work root", value=str(DEFAULT_WORK_ROOT),
-        help="Folder containing `<dataset>/prepared_<subset>/` and `<dataset>/generated_<subset>/`.",
+        "Bundle root (fallback)", value=str(DEFAULT_WORK_ROOT),
+        help="Folder holding prepared bundles (`*_prepared/` under data/processed, or "
+             "`prepared_<subset>/` under an experiments tree). Used only when no "
+             "DataOps run is selected above.",
     ))
     subsets = discover_subsets(work_root)
-    if not subsets:
-        st.error(f"No `prepared_*` folders found under {work_root}.")
+    subset: Optional[Subset] = run.to_subset() if run else None
+    if subset is None and subsets:
+        labels = [s.label for s in subsets]
+        chosen = st.sidebar.selectbox("Subset (experiment)", labels, index=0)
+        subset = subsets[labels.index(chosen)]
+
+    # No imputation source (no bundle, no experiment subset) → cleaning-only view.
+    if subset is None:
+        t_ov, t_q = st.tabs(["Overview", "Quality & remediation"])
+        with t_ov:
+            render_overview(run)
+        with t_q:
+            if run and run.report:
+                render_validation_comparison(run.report, run.data_type, impute_compare=run.compare)
+            else:
+                st.info("Select a DataOps run with a report to see quality & remediation.")
         return
 
-    labels = [s.label for s in subsets]
-    chosen = st.sidebar.selectbox("Subset", labels, index=0)
-    subset = subsets[labels.index(chosen)]
-
-    split = st.sidebar.radio("Split", options=["test", "train"], horizontal=True, index=0)
-
-    meta = load_meta(subset.prepared_dir)
-    target_cols: List[str] = list(meta.get("target_cols", []))
-    time_col: str = meta.get("time_col", "time")
-
-    input_path = subset.prepared_dir / INPUT_FILES[split]
-    if not input_path.exists():
-        st.error(f"Missing input file: {input_path}")
-        return
-
-    # ---- Sidebar: imputed-method picker -----------------------------------
-    available = discover_imputed_files(subset, split)
-    method_keys = sorted(available.keys())
-    if not method_keys:
-        st.sidebar.warning(f"No imputed CSVs found in {subset.generated_dir} for split='{split}'.")
-    else:
-        st.sidebar.caption(f"{len(method_keys)} imputed file(s) discovered.")
-
-    # Selection lives in session_state so it survives reruns. We do NOT pass
-    # ``default=`` to the widget (Streamlit warns when a key both has session
-    # state and a default). Instead, we (re)initialise the state on first render
-    # or when the subset/split changes, then optionally inject the method that a
-    # Run just produced so it auto-shows on rerun.
-    multi_key = "methods_multiselect"
-    sig = (str(subset.prepared_dir), split)
-    if multi_key not in st.session_state or st.session_state.get("_methods_sig") != sig:
-        st.session_state[multi_key] = method_keys[: min(3, len(method_keys))]
-        st.session_state["_methods_sig"] = sig
-    # Drop any stale selections that aren't valid for the current method_keys.
-    cur = [k for k in st.session_state[multi_key] if k in method_keys]
-    just_ran = st.session_state.pop("last_run_key", None)
-    if just_ran and just_ran in method_keys and just_ran not in cur:
-        cur.append(just_ran)
-    st.session_state[multi_key] = cur
-    selected = st.sidebar.multiselect(
-        "Methods to compare",
-        options=method_keys,
-        key=multi_key,
-        help="Loading 8+ methods is fine for the metrics tab but the time-series "
-             "plot renders fastest with ≤5.",
+    # ---- Top-level sections (cleaning-first) -------------------------------
+    tab_overview, tab_quality, tab_imp, tab_run_sec = st.tabs(
+        ["Overview", "Quality & remediation", "Imputation", "Run"]
     )
 
-    # ---- Sidebar: feature picker ------------------------------------------
-    feature_options = target_cols or [c for c in pd.read_csv(input_path, nrows=0).columns]
-    feature = st.sidebar.selectbox(
-        "Feature", options=feature_options, index=0,
-    )
+    with tab_overview:
+        render_overview(run)
 
-    # ---- Sidebar: plot tweaks ---------------------------------------------
-    with st.sidebar.expander("Plot options", expanded=False):
-        show_context_lines = st.checkbox(
-            "Draw per-method context line", value=False,
-            help="Faint dotted line through the full imputed series. Off by default to speed up rendering.",
+    with tab_quality:
+        if run and run.report:
+            render_validation_comparison(run.report, run.data_type, impute_compare=run.compare)
+        else:
+            st.info("No DataOps report for this source (experiment-only subset). Pick a "
+                    "pipeline run in the sidebar to see quality & remediation.")
+
+    # ---- Imputation: method comparison on the run's regularized bundle -----
+    #      (pickers live here, not in the sidebar; sub-tabs are children of the
+    #       Imputation section so the bodies below need no re-indentation).
+    with tab_imp:
+        meta = load_meta(subset.prepared_dir)
+        target_cols: List[str] = list(meta.get("target_cols", []))
+        time_col: str = meta.get("time_col", "time")
+
+        pick = st.columns([1, 3, 2])
+        split = pick[0].radio("Split", options=["test", "train"], horizontal=True, index=0)
+        input_path = subset.prepared_dir / INPUT_FILES[split]
+        if not input_path.exists():
+            st.error(f"Missing input file: {input_path}")
+            return
+
+        available = discover_imputed_files(subset, split)
+        method_keys = sorted(available.keys())
+
+        # Selection lives in session_state so it survives reruns. We do NOT pass
+        # ``default=`` (Streamlit warns when a key has both state and a default);
+        # we (re)initialise on first render / when subset|split changes, then inject
+        # the method a Run just produced so it auto-shows on rerun.
+        multi_key = "methods_multiselect"
+        sig = (str(subset.prepared_dir), split)
+        if multi_key not in st.session_state or st.session_state.get("_methods_sig") != sig:
+            st.session_state[multi_key] = method_keys[: min(3, len(method_keys))]
+            st.session_state["_methods_sig"] = sig
+        cur = [k for k in st.session_state[multi_key] if k in method_keys]
+        just_ran = st.session_state.pop("last_run_key", None)
+        if just_ran and just_ran in method_keys and just_ran not in cur:
+            cur.append(just_ran)
+        st.session_state[multi_key] = cur
+        selected = pick[1].multiselect(
+            "Methods to compare", options=method_keys, key=multi_key,
+            help="≤5 renders the time-series plot fastest; more is fine for Metrics.",
         )
-        max_bands = st.slider("Max gap bands", 0, 200, 30, step=10,
-                              help="Only the N longest 'truly missing' runs are shaded.")
+        feature_options = target_cols or [c for c in pd.read_csv(input_path, nrows=0).columns]
+        feature = pick[2].selectbox("Feature", options=feature_options, index=0)
+        if method_keys:
+            st.caption(f"{len(method_keys)} imputed file(s) discovered for split='{split}'.")
+        else:
+            st.caption(f"No imputed CSVs in {subset.generated_dir} for split='{split}'. "
+                       "Produce some in the **Run** tab.")
 
-    # ---- Targeted column reads (only the cols we'll plot/score) -----------
-    needed_for_plot = tuple(dict.fromkeys([time_col, feature]))
-    needed_for_metrics = tuple(dict.fromkeys([time_col, *target_cols]))
+        with st.expander("Plot options", expanded=False):
+            show_context_lines = st.checkbox(
+                "Draw per-method context line", value=False,
+                help="Faint dotted line through the full imputed series; off by default for speed.",
+            )
+            max_bands = st.slider("Max gap bands", 0, 200, 30, step=10,
+                                  help="Only the N longest 'truly missing' runs are shaded.")
 
-    input_df_plot = load_csv_subset(input_path, needed_for_plot)
-    gt_df_plot: Optional[pd.DataFrame] = None
-    gt_name = GT_FILES.get(split)
-    gt_path = (subset.prepared_dir / gt_name) if gt_name else None
-    if gt_path and gt_path.exists():
-        gt_df_plot = load_csv_subset(gt_path, needed_for_plot)
+        needed_for_plot = tuple(dict.fromkeys([time_col, feature]))
+        needed_for_metrics = tuple(dict.fromkeys([time_col, *target_cols]))
+        input_df_plot = load_csv_subset(input_path, needed_for_plot)
+        gt_df_plot: Optional[pd.DataFrame] = None
+        gt_name = GT_FILES.get(split)
+        gt_path = (subset.prepared_dir / gt_name) if gt_name else None
+        if gt_path and gt_path.exists():
+            gt_df_plot = load_csv_subset(gt_path, needed_for_plot)
+        imputed_dfs_plot = {k: load_csv_subset(available[k].path, needed_for_plot) for k in selected}
 
-    imputed_dfs_plot = {k: load_csv_subset(available[k].path, needed_for_plot) for k in selected}
+        sub_ts, sub_metrics, sub_dist, sub_longgap = st.tabs(
+            ["Time series", "Metrics", "Distribution", "Long-gap"]
+        )
 
-    # ---- Header info -------------------------------------------------------
-    cols = st.columns(4)
-    cols[0].metric("Subset", subset.label)
-    cols[1].metric("Split", split)
-    miss_feature = int(input_df_plot[feature].isna().sum()) if feature in input_df_plot.columns else 0
-    cols[2].metric(f"NaN in '{feature}'", f"{miss_feature:,}",
-                   delta=f"{miss_feature / max(len(input_df_plot), 1) * 100:.1f}%", delta_color="off")
-    cols[3].metric("Methods loaded", str(len(selected)))
+    sub_run, sub_pipe = tab_run_sec.tabs(["Run experiment", "Pipeline run"])
 
-    # ---- Tabs --------------------------------------------------------------
-    tab_ts, tab_metrics, tab_dist, tab_longgap, tab_run, tab_pipeline = st.tabs(
-        ["Time series", "Metrics", "Distribution", "Long-gap", "Run experiment", "Pipeline run"]
-    )
-
-    # ---- Tab 1: Time series ------------------------------------------------
-    with tab_ts:
+    # ---- Imputation › Time series -----------------------------------------
+    with sub_ts:
         holdout = load_holdout_mask(subset.prepared_dir) if split == "test" else None
         fig = plot_feature_comparison(
             input_df_plot, gt_df_plot, imputed_dfs_plot, feature, time_col,
@@ -1064,8 +1649,8 @@ def main() -> None:
 - **Gray vertical bands** — positions that are NaN in both input and GT (truly missing — no GT score possible).
 """)
 
-    # ---- Tab 2: Metrics ----------------------------------------------------
-    with tab_metrics:
+    # ---- Imputation › Metrics ---------------------------------------------
+    with sub_metrics:
         if not target_cols:
             st.info("No target columns declared in meta.json.")
         else:
@@ -1149,17 +1734,17 @@ def main() -> None:
             else:
                 st.info("Select at least one method to see metrics.")
 
-    # ---- Tab 3: Distribution -----------------------------------------------
-    with tab_dist:
+    # ---- Imputation › Distribution ----------------------------------------
+    with sub_dist:
         fig = plot_distribution(input_df_plot, imputed_dfs_plot, feature, gt_df=gt_df_plot)
         st.plotly_chart(fig, width="stretch")
 
-    # ---- Tab 4: Long-gap regime -------------------------------------------
-    with tab_longgap:
+    # ---- Imputation › Long-gap regime -------------------------------------
+    with sub_longgap:
         render_long_gap_tab(subset)
 
-    # ---- Tab 5: Run experiment --------------------------------------------
-    with tab_run:
+    # ---- Run › Run experiment ---------------------------------------------
+    with sub_run:
         st.write("Invoke a runner on the **currently selected subset** to add new imputed CSVs to "
                  f"`{subset.generated_dir}`. The dashboard will pick them up after the run finishes.")
         c1, c2, c3 = st.columns([1, 1, 1])
@@ -1346,8 +1931,8 @@ def main() -> None:
                 load_csv_subset.clear()
             st.rerun()
 
-    # ---- Tab 5: Pipeline run (compare with original source) ---------------
-    with tab_pipeline:
+    # ---- Run › Pipeline run (S3 / Airflow source comparison) -------------
+    with sub_pipe:
         st.write(
             "Compare a DAG-pipeline run against its **original source**. "
             "Pulls artifacts directly from the SeaweedFS S3 endpoint that the "

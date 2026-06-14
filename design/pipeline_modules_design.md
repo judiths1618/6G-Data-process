@@ -2,9 +2,12 @@
 
 Status: **implemented (v0.1)** · Date: 2026-05-21
 
-**Scope:** `dockers/tools/pipeline_modules/` is a set of reusable
+**Scope:** `src/data_process_modules/` is a set of reusable
 *data-pipeline modules* — profiling, quality checks, preprocessing/transformation,
 and splitting — the **non-imputation** building blocks for an end-to-end pipeline.
+The implementation is shared with the backward-compatible `src/dataops/` package;
+the Docker-local `dockers/tools/pipeline_modules/` copy is no longer the target
+integration surface.
 
 The imputation step is the sibling apps (`Darts_app`, `ImputeGAP_app`,
 `PyPOTS_app`, `WaveStitchPlus_app`); these modules are their **peers**, not a
@@ -24,8 +27,8 @@ left **intact** and is not the integration target.
 3. **I/O is a thin, separable layer.** Logic never reads/writes storage itself.
    A small `io_utils` adapter wraps a function so it *can* run from a path or
    `s3://…`, but the function underneath only sees DataFrames.
-4. **CLI is a convenience, not the contract.** `python -m pipeline_modules <method>` exists
-   for standalone runs and quick testing; the integration surface is `import pipeline_modules`.
+4. **CLI is a convenience, not the contract.** `python -m data_process_modules <method>` exists
+   for standalone runs and quick testing; the integration surface is `import data_process_modules`.
 5. **No hidden coupling between methods.** Each is usable on its own; they
    compose by passing DataFrames/artifacts, not by a shared runtime.
 
@@ -34,7 +37,7 @@ left **intact** and is not the integration target.
 ## 2. Package layout
 
 ```
-dockers/tools/pipeline_modules/        # importable package — NOT a Docker app
+src/data_process_modules/              # importable package — NOT a Docker app
 ├── __init__.py            # re-exports the modules
 ├── profiling.py           # is_time_series / primary-key / column typing
 ├── ts_checks.py           # time-series quality checks (gaps, missing, outliers)
@@ -45,9 +48,8 @@ dockers/tools/pipeline_modules/        # importable package — NOT a Docker app
 ├── registry.py            # MANIFEST: aggregates each module's METADATA
 ├── io_utils.py            # OPTIONAL local|S3 adapter (not imported by logic)
 ├── gx.py                  # OPTIONAL GX context shim (no Airflow)
-├── cli.py / __main__.py   # OPTIONAL argparse dispatcher (python -m pipeline_modules)
-├── requirements.txt       # dep list (pandas, numpy, great_expectations, boto3)
-└── README.md
+├── cli.py / __main__.py   # OPTIONAL argparse dispatcher (python -m data_process_modules)
+└── validation/            # Pandera validation helpers shared with the minimal pipeline
 ```
 
 Logic is **extracted**, from the top design, which can be used for Airflow data pipeline implementation and deployment. 
@@ -67,7 +69,7 @@ Logic is **extracted**, from the top design, which can be used for Airflow data 
 The host system imports and calls these directly; no files required.
 
 ```python
-from pipeline_modules import profiling, ts_checks, tabular_checks, transform, split
+from data_process_modules import profiling, ts_checks, tabular_checks, transform, split
 
 prof = profiling.profile(df, timestamp_col="time")          # -> dict
 report = ts_checks.run(df, ts_col="time", gap_factor=1.5)    # -> dict
@@ -88,7 +90,7 @@ Signatures (params shown are the tunables; all have sane defaults):
 | `profiling.profile` | `(df, timestamp_col=None, sample_ratio=0.9) -> dict{is_time_series, timestamp_column, detected_type, target_cols, primary_key, shape, columns}` |
 | `ts_checks.run` | `(df, ts_col, gap_factor=1.5, min_gap_seconds=None, miss_threshold=0.98, outlier_q=0.01) -> dict{mode, gx_passed, issues{ts_gaps,missing,outliers}, recommendations, summary}` |
 | `tabular_checks.run` | `(df, miss_threshold_numeric=0.95, miss_threshold_cat=0.90, outlier_q=0.01) -> dict{mode, gx_passed, missing_columns, outlier_columns, failed_columns, primary_key, recommendations, summary}` |
-| `transform.preprocess` | `(df, timestamp_col, target_cols=None, cond_cols=None, regularize=True, units_convert=True) -> (DataFrame, meta_dict)` plus `scaler`, `col_masks`, `outlier_report` returned in/alongside meta |
+| `transform.preprocess` | `(df, timestamp_col=None, target_cols=None, regularize=True) -> (DataFrame, meta_dict)` |
 | `split.train_test` | `(df, meta, split_ratio=0.8, holdout_frac=0.15, holdout_block_size=5, seed=0) -> Splits{train, test_input, test_gt, eval_mask, meta}` — ports `train_test_split_by_time` + `make_eval_holdout_mask` verbatim |
 
 Return dicts are kept **field-compatible with today's** `qc_result` / `ts_result`
@@ -123,9 +125,9 @@ detail of the I/O adapter, **not** part of the method contract.
 For standalone runs only. The CLI wraps a method with the local|S3 adapter:
 
 ```bash
-python -m pipeline_modules ts-qc      --input data.csv            --output report.json
-python -m pipeline_modules preprocess --input s3://bucket/raw.csv --prepared-dir s3://bucket/prep/
-python -m pipeline_modules split      --prepared-dir ./prepared_amf
+python -m data_process_modules ts-qc      --input data.csv            --output report.json
+python -m data_process_modules preprocess --input s3://bucket/raw.csv --prepared-dir s3://bucket/prep/
+python -m data_process_modules split      --prepared-dir ./prepared_amf
 ```
 
 `io_utils` resolves `--input/--output/--prepared-dir` to local FS or boto3 by
@@ -156,8 +158,8 @@ Remaining / nice-to-have:
 
 Because the host system must discover and wire these tools, **every module
 exposes a `METADATA` descriptor** and the package aggregates them into a
-`pipeline_modules.registry.MANIFEST` (also dumpable via
-`python -m pipeline_modules manifest`). Schema per module:
+`data_process_modules.registry.MANIFEST` (also dumpable via
+`python -m data_process_modules manifest`). Schema per module:
 
 ```python
 METADATA = {
@@ -165,7 +167,7 @@ METADATA = {
   "version": "0.1.0",
   "category": "quality_check",        # quality_check | profiling | transform | split
   "summary": "Time-series quality checks: gaps, missingness, outliers.",
-  "entrypoint": "pipeline_modules.ts_checks:run",
+  "entrypoint": "data_process_modules.ts_checks:run",
   "gpu": False,
   "dependencies": ["pandas", "numpy", "great_expectations"],
   "inputs": {
@@ -182,7 +184,7 @@ METADATA = {
 }
 ```
 
-`pipeline_modules.registry` exposes `MANIFEST: dict[str, METADATA]`, `get(name)`, and
+`data_process_modules.registry` exposes `MANIFEST: dict[str, METADATA]`, `get(name)`, and
 `list_modules()`. This is the contract the larger system reads to enumerate
 available tools, validate params, and chain them.
 

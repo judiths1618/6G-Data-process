@@ -2,8 +2,21 @@
 6GDALI_Datasets/KUL/
 6GDALI_Datasets/EUR/
 
+.claude/
+.venv/
+.pytest_cache/
 
 out/
+
+# DataOps runtime artifacts; track with DVC when needed.
+data/raw/*
+data/processed/*
+reports/*
+logs/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!reports/.gitkeep
+!logs/.gitkeep
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

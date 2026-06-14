@@ -1,3 +1,122 @@
+# Minimal DataOps Solution for 6G-DALI Data Cleaning
+
+This repo is organized around a small, production-friendly DataOps path:
+
+- Reusable data process modules in `src/data_process_modules/`
+- Backward-compatible Python cleaning functions in `src/dataops/`
+- `pytest` unit tests in `tests/`
+- Pandera validation in `src/dataops/validation/` and Great Expectations checks in `src/dataops/ts_checks.py` / `src/dataops/tabular_checks.py`
+- GitHub Actions CI in `.github/workflows/ci.yml`
+- DVC data/version pipeline in `dvc.yaml`
+- Airflow scheduling in `dags/minimal_dataops_dag.py`
+- Structured logs plus optional failure notification through `DATAOPS_WEBHOOK_URL`
+
+## Quick Start
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+python -m pytest
+```
+
+Run the minimal local pipeline:
+
+```bash
+python -m pipelines.minimal_dataops \
+  --config config/dataops.yaml
+```
+
+`config/dataops.yaml` controls input/output paths, validation mode, optional
+timestamp column, expected columns, numeric bounds, missingness threshold,
+timestamp uniqueness, and timestamp ordering. With `validation.mode: auto`, the
+pipeline classifies each dataset as `time_series` or `tabular`, records the
+classification reason in the report, validates as time-series when a real
+timestamp column is configured or detected, and otherwise validates as arbitrary
+tabular data. Monotonic numeric ids are treated as tabular by default; set
+`allow_step_index_timestamp: true` only when a step index really is your time
+axis. CLI flags such as `--input`, `--output`, `--report`, and
+`--timestamp-col` can still override the config for one-off runs.
+
+The pipeline runs a five-stage lineage and writes an artifact for each stage:
+
+```
+raw → cleaned → remediated → regularized (gaps explicit) → final (imputed, gap-free)
+```
+
+- **cleaned** (`<output_stem>_cleaned.csv`, key `report.cleaned_output`) — conservative
+  cleaning (snake_case columns, drop empty/duplicate rows, epoch-aware datetime coercion).
+- **remediated** (the configured `output`) — per-issue fixes from `data_process_modules.remediation`
+  (winsorize numeric outliers, type-aware tabular fill); time-series gaps are *deferred* to imputation.
+- **regularized** — when a time-series gap is detected, the timeline is regularized onto a
+  uniform grid (gaps become explicit NaN rows) and written as a prepared bundle.
+- **final** — the gap-filled, analysis-ready dataset (built by the imputation step, see below).
+
+The report's `quality` section comes from Great Expectations-backed checks and carries an
+`action_plan` tagging each issue with its `status` (`applied_by_remediation`,
+`deferred_to_imputation`, or `manual`) plus the concrete failed GX expectations. `quality_after`
+re-runs the checks on the remediated frame so the report holds a genuine GX **before/after**.
+`handoff` advertises the imputation method catalog and the config-selected `(app, method)`;
+`validation_comparison` is chart-ready data (raw → cleaned → remediated, GX/Pandera status) for
+the dashboard.
+
+**Imputation handoff → final dataset.** The pipeline never runs imputation itself; it regularizes
+and emits the handoff. Run the chosen method and build the final cleaned dataset with:
+
+```bash
+python scripts/auto_impute.py --report reports/<name>_report.json --method nearest
+# → writes <output_stem>_final.csv (gap-free) + <report_stem>_imputation_compare.json
+```
+
+`darts/<interp>` runs dependency-free through `dataops.imputation_runner` (bit-faithful to Darts'
+`MissingValuesFiller`); `--engine darts` shells out to the real Darts runner where it is installed.
+
+Run the DVC stage after placing data at `data/raw/input.csv`:
+
+```bash
+python -m pip install -e ".[dvc]"
+dvc repro
+```
+
+Failure notifications are opt-in:
+
+```bash
+export DATAOPS_WEBHOOK_URL="https://hooks.slack.com/services/..."
+python -m pipelines.minimal_dataops --config config/dataops.yaml
+```
+
+## Minimal Structure
+
+```text
+src/dataops/                 # installable Python package
+  cleaning.py                # conservative pandas cleaning helpers (epoch-aware)
+  config.py                  # YAML config loader
+  validation/                # Pandera validation schemas
+  profiling.py               # dataset profiling
+  ts_checks.py               # Great Expectations time-series checks
+  tabular_checks.py          # Great Expectations tabular checks
+  remediation.py             # per-issue fixes after the quality checks
+  transform.py               # timeline regularization → prepared bundle
+  imputation_catalog.py      # imputation app/method catalog + selection validation
+  imputation_runner.py       # automated imputation + clean-vs-imputed comparison + final dataset
+src/data_process_modules/    # public package name for the reusable modules (re-exports dataops)
+pipelines/minimal_dataops.py # local/DVC runner with logging + failure notification
+scripts/auto_impute.py       # handoff → imputation → comparison → final cleaned dataset
+dags/minimal_dataops_dag.py  # daily Airflow DAG wrapper
+config/dataops.yaml          # paths, validation contract, imputation selection
+tests/                       # pytest unit tests
+data/raw/                    # DVC-tracked input data location
+data/processed/              # cleaned/remediated/final CSVs + prepared bundles
+reports/                     # pipeline reports + *_imputation_compare.json
+logs/                        # local run logs
+```
+
+The original research and diffusion-imputation assets are still available below and under
+`dockers/`, `experiments/`, `scripts/`, `notebooks/`, and `dashboard/`.
+
+---
+
 # From Raw to Clean: An End-to-End Pipeline for Time-Series Cleaning with Diffusion Models
 
 ![Python](https://img.shields.io/badge/Python-3.10-blue?style=flat-square&logo=python)
@@ -27,7 +146,7 @@ The system is composed of four loosely coupled layers:
 |---|---|---|
 | **Orchestration** | Profiles the input, branches on time-series vs. tabular, runs duplicate / missing / outlier / TS-gap cleaning, validates with Great Expectations, and persists curated outputs. | Apache Airflow (DAG `data_quality_and_cleaning_pipeline`) |
 | **Cleaning engine** | WaveStitch+ imputation container launched by the cleaning task when TS repair is recommended. It runs `train`, `inference`, or `full` (train + inference) and stores artifacts back to the data lake. | PyTorch / CUDA, packaged as `wavestitchplus-gpu:latest` |
-| **Reusable modules** | Library-first profiling, quality-check, transform, and split components for integration outside the Airflow DAG. | `dockers/tools/pipeline_modules/` |
+| **Reusable modules** | Library-first profiling, quality-check, transform, and split components for local Python, Airflow, or external orchestrators. | `src/data_process_modules/` (`src/dataops/` kept as compatibility API) |
 | **Storage** | S3-compatible object store used as a versioned data lake (`raw/`, `prepared/`, `inference_results_*/`, `latest_inference/`). | SeaweedFS (master / filer / volume / S3) + Postgres for Airflow metadata |
 
 ---
@@ -78,6 +197,7 @@ The system is composed of four loosely coupled layers:
 | Service | Port (host) | Purpose |
 |---|---|---|
 | Airflow webserver | `8088` | UI / DAG runs (admin / admin) |
+| DataOps dashboard | `8502` | Cleaning-first run overview, remediation, and imputation comparison |
 | SeaweedFS S3 API | `8333` | S3-compatible endpoint |
 | SeaweedFS filer | `8888`, `18888` | Filer + admin |
 | SeaweedFS master | `9333` | Cluster master |
@@ -108,7 +228,7 @@ cd dockers/tools
 bash build_image.sh            # runs: docker build -f Dockerfile.wavestitchplus-gpu -t wavestitchplus-gpu:latest .
 ```
 
-### 3. Start Airflow + SeaweedFS
+### 3. Start Airflow + SeaweedFS + dashboard
 
 ```bash
 cd ../                         # back to dockers/
@@ -124,6 +244,7 @@ On first boot the Airflow container automatically:
 - starts the scheduler and webserver.
 
 Open **http://localhost:8088** and sign in as `admin / admin`.
+Open **http://localhost:8502** for the DataOps dashboard.
 
 ### 4. (Optional) Local Python env for the notebooks
 
@@ -259,24 +380,36 @@ jupyter lab
 
 The Airflow DAG remains the reference orchestration path, but the non-imputation
 pipeline logic is also exposed as reusable modules under
-[dockers/tools/pipeline_modules](dockers/tools/pipeline_modules). Use these
+[src/data_process_modules](src/data_process_modules). Use these
 modules when another system needs profiling, tabular or time-series quality
 checks, preprocessing, or train/test splitting without importing Airflow tasks.
 
 ```python
-from pipeline_modules import profiling, split, ts_checks
+from data_process_modules import profiling, split, ts_checks
 
 profile = profiling.profile(df, timestamp_col="time")
 ts_report = ts_checks.run(df, ts_col=profile["timestamp_column"])
 parts = split.train_test(df, profile, seed=0)
 ```
 
-`profiling`, `ts_checks`, `tabular_checks`, and `split` operate on DataFrames.
-`transform.preprocess_csv(...)` currently preserves the existing prepared-bundle
-writer, so it takes local input/output paths and writes the `prepared_<subset>/`
-artifacts consumed by the imputation apps and dashboard. See the module
-[README](dockers/tools/pipeline_modules/README.md) for the public API, optional
-CLI, dependencies, and tests.
+`profiling`, `ts_checks`, `tabular_checks`, `transform.preprocess(...)`, and
+`split` operate on DataFrames. `transform.preprocess_csv(...)` is still
+available when you need the existing `prepared_<subset>/` artifact bundle
+consumed by the imputation apps and dashboard. The same CLI is available with
+`python -m data_process_modules ...` or the installed `data-process-modules`
+script.
+
+The cleaning/imputation loop adds three more modules:
+
+- `remediation.remediate(df, quality_report)` — applies the concrete fix per detected
+  issue (winsorize outliers, type-aware tabular fill); defers time-series gaps to imputation.
+- `imputation_catalog` — the catalog of imputation apps/methods advertised in the handoff,
+  with `validate_selection(app, method)` (never raises; reports `ok` / `invalid` / `known_failing`).
+- `imputation_runner` — `impute_bundle(...)` (Darts-faithful pandas engine or real-Darts subprocess),
+  `compare_clean_vs_imputed(...)`, and `build_final_dataset(...)` (the gap-free final cleaned CSV).
+
+Every module exposes a `METADATA` descriptor aggregated into
+`data_process_modules.registry.MANIFEST` for host-system discovery.
 
 ---
 
@@ -398,51 +531,46 @@ Across the four EUR subsets, v2 cuts WaveStitch+'s holdout MAE 1.6–8.3× over 
 
 ## Comparison Dashboard
 
-A Streamlit dashboard under [dashboard/](dashboard) auto-discovers the prepared inputs and imputed outputs and lets you compare methods side-by-side without leaving the browser.
+A Streamlit dashboard under [dashboard/](dashboard) discovers each DataOps run from `reports/*.json` and walks its `raw → … → final` lineage, with imputation method comparison nested as the final-step detail.
 
 ```bash
 conda activate myenv
-bash dashboard/run.sh                    # opens http://localhost:8501
+bash dashboard/run.sh                    # opens http://localhost:8502
 # or:  streamlit run dashboard/app.py
 ```
 
 ### What the dashboard exposes
 
+The dashboard is **cleaning-first**: pick one *DataOps run* and the four sections
+walk its lineage. Imputation method comparison is nested as the detail of the final step.
+
 | Sidebar control | What it does |
 |---|---|
-| **Work root** | Folder containing `<dataset>/prepared_<subset>/` and `<dataset>/generated_<subset>/`. Defaults to `notebooks/work/`. |
-| **Subset** | Auto-discovered from every `prepared_*` folder that has a `meta.json` (e.g. `EUR / amf`, `EUR / golang`, …). |
-| **Split** | `test` (with ground-truth-on-eval-cells from `test_gt.csv` + `eval_holdout_mask.npy`) or `train`. |
-| **Methods to compare** | All `<lib>_<method>_<split>_imputed.csv` discovered in `generated_<subset>/` (WaveStitch+ v1 as `wavestitchplus`, v2 as `wavestitchplus/v2`), plus legacy test-only `wavestitchPlus_full_imputed.csv` files from older runs. |
-| **Feature** | Target column to focus on (driven by `meta.json:target_cols`). |
+| **DataOps run** | Auto-discovered from `reports/*.json` pipeline reports; one selection drives every section (resolves raw / cleaned / remediated / regularized / final + the imputation comparison). |
+| **Bundle root (fallback)** | Folder holding prepared bundles (`*_prepared/` under `data/processed`, or `prepared_<subset>/` under an experiments tree). Used only when no report run is selected. Defaults to `data/processed`. |
 
-### Tabs
+### Sections
 
-1. **Time series** — one Plotly figure per feature with four visually distinct layers:
-   - dark-blue line + markers for **original observations** (input cells that are *not* NaN),
-   - green open diamonds for **ground truth at masked-for-eval positions** (test split only),
-   - colored ×-markers for **imputed values** at the previously-NaN positions, one color per method,
-   - faint dotted line for the full per-method imputed series (toggle via legend),
-   - gray vertical bands over **truly-missing regions** where no GT exists.
-2. **Metrics** — table of MAE / RMSE / MAPE / fill-rate per method, computed only on cells that were NaN in the input *and* have a known GT. Includes a collapsible **per-feature MAE** breakdown.
-3. **Distribution** — overlaid histograms of observed vs ground-truth vs each method's imputed values for the selected feature.
-4. **Long-gap** — reads the [eval_long_gap.py](scripts/eval_long_gap.py) artifacts under `generated_<subset>/long_gap/` and plots overall MAE vs gap length and MAE vs gap *depth* (the interpolation ↔ diffusion crossover), plus a per-feature view of how each method fills one long gap.
-5. **Run experiment** — pick a library + method + splits and the dashboard runs the matching runner on the selected subset. PyPOTS exposes `epochs` / `batch_size`; **WaveStitch+** exposes a **Device** toggle plus EM iterations / epochs-per-EM / DDIM steps (a run retrains); **WaveStitch+ v2** (`wavestitchplus_v2`) reuses the saved model (synthesis only, no retrain) and exposes the anchoring knobs (prior / DDIM / tau / hard-prior). New CSVs appear under `generated_<subset>/` and are picked up automatically.
+1. **Overview** — the `raw → cleaned → remediated → regularized → final` lineage as stage cards (rows, artifact present/missing, key metric), GX **before/after**, the imputation handoff, and the final cleaned-data callout.
+2. **Quality & remediation** — GX detected vs after-remediation (with the concrete failed expectations), the issue → solution plan grouped by status (auto-handled / deferred-to-imputation / manual), the handoff, and the **clean-vs-imputed** comparison (fill rate + per-column MAE).
+3. **Imputation** — the method workbench; **split / methods / feature pickers live here**. Sub-tabs:
+   - **Time series** — observed / ground-truth-on-eval / per-method imputed / truly-missing bands, on a datetime x-axis;
+   - **Metrics** — MAE / RMSE / MAPE / fill-rate per method (+ per-feature breakdown, constraint violations);
+   - **Distribution** — observed vs GT vs imputed histograms;
+   - **Long-gap** — the [eval_long_gap.py](scripts/eval_long_gap.py) depth regime (interp ↔ diffusion crossover).
+4. **Run** — sub-tabs **Run experiment** (invoke a runner; Darts interpolation runs dependency-free via the built-in pandas engine — no `darts` install needed) and **Pipeline run** (compare a DAG run against its S3 source).
 
-### Screens at a glance
+### Screen at a glance
 
 ```
-┌─ Sidebar ────────────┐  ┌─ Tabs ─────────────────────────────────────────┐
-│ Work root            │  │ [Time series] [Metrics] [Distribution]         │
-│ Subset: EUR / amf    │  │ [Long-gap] [Run experiment]                    │
-│ Split:  ● test ○ train  │ ┌──────────────────────────────────────────────┐│
-│ Methods (multi):     │  │ │ feature: cpu_usage                           ││
-│  ☑ darts/linear      │  │ │   ── observed (dark blue line+markers)       ││
-│  ☑ darts/kalman      │  │ │   ◇  GT at masked-for-eval positions         ││
-│  ☑ pypots/saits      │  │ │   ×  per-method imputed values (one color)   ││
-│  ☑ wavestitchplus    │  │ │   ░░ gray bands → truly missing (no GT)      ││
-│  ☑ wavestitchplus/v2 │  │ └──────────────────────────────────────────────┘│
-│ Feature: cpu_usage   │  │                                                 │
+┌─ Sidebar ────────────┐  ┌─ Sections ─────────────────────────────────────┐
+│ DataOps run:         │  │ [Overview] [Quality & remediation]             │
+│  amf-performance_…   │  │ [Imputation] [Run]                             │
+│ Bundle root          │  │ ┌─ Overview ───────────────────────────────┐   │
+│  data/processed      │  │ │ raw → cleaned → remediated → regularized │   │
+│                      │  │ │     → final   (stage cards + GX before/  │   │
+│                      │  │ │      after + handoff + final callout)    │   │
+│                      │  │ └──────────────────────────────────────────┘   │
 └──────────────────────┘  └─────────────────────────────────────────────────┘
 ```
 
@@ -467,13 +595,13 @@ conda activate myenv
 pip install pytest                 # not bundled in the app requirements
 
 pytest dockers/tools                                 # everything
-pytest dockers/tools/pipeline_modules/tests          # pipeline modules only
+pytest tests                                         # local data process modules
 pytest dockers/tools/WaveStitchPlus_app/tests        # WaveStitch+ runner only
 ```
 
 | Test suite | Covers |
 |---|---|
-| [pipeline_modules/tests](dockers/tools/pipeline_modules/tests) | profiling, TS / tabular quality checks, time-gap detection, train/test split, I/O helpers, module registry |
+| [tests](tests) | local DataOps/data process modules, minimal pipeline, profiling, validation, and module registry |
 | [WaveStitchPlus_app/tests](dockers/tools/WaveStitchPlus_app/tests) | WaveStitch+ runner helpers (output naming, observed-cell-preserving merge, train-output publisher) and the v2 anchoring layer (prior, distance weighting, gap blend, scoring) |
 | [airflow/dags/test](dockers/airflow/dags/test) | imputation mask correctness |
 
@@ -532,7 +660,7 @@ Failed runs upload partial logs to `wavestitchplus/<dataset>/<version>/error_log
 │   │       ├── helpers/                 # object_store, dqc_metrics, gx_utils, ...
 │   │       ├── imputers/                # mask generation, ReMasker baselines
 │   │       └── test/
-│   ├── tools/                           # Imputation engines + reusable pipeline modules
+│   ├── tools/                           # Imputation engines and container assets
 │   │   ├── Dockerfile.wavestitchplus-gpu
 │   │   ├── Dockerfile.wavestitchplus-cpu     # no-GPU build of the same code
 │   │   ├── Dockerfile.darts
@@ -541,7 +669,6 @@ Failed runs upload partial logs to `wavestitchplus/<dataset>/<version>/error_log
 │   │   ├── requirements.txt             # shared base deps for WaveStitch+
 │   │   ├── build_image.sh
 │   │   ├── scripts/run_pipeline.py      # WaveStitch+ container entry point
-│   │   ├── pipeline_modules/             # profiling, QC, transform, split library + CLI
 │   │   ├── WaveStitchPlus_app/          # training / synthesis code (diffusion)
 │   │   │   ├── train_improved.py
 │   │   │   ├── synthesis_improved.py    # -test_csv / -ignore_col_masks for re-masked eval

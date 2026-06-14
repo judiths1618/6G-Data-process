@@ -1,0 +1,19 @@
+stages:
+  minimal_dataops:
+    cmd: >
+      python -m pipelines.minimal_dataops
+      --config config/dataops.yaml
+    deps:
+      - config/dataops.yaml
+      - data/raw/input.csv
+      - src/dataops
+      - pipelines/minimal_dataops.py
+    params:
+      - config/dataops.yaml:
+          - timestamp_col
+          - validation
+    outs:
+      - data/processed/clean.csv
+    metrics:
+      - reports/dataops_report.json:
+          cache: false

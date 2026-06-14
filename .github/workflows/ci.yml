@@ -37,17 +37,15 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: |
-            dockers/tools/pipeline_modules/requirements.txt
-            dashboard/requirements.txt
+            pyproject.toml
 
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest
-          python -m pip install -r dockers/tools/pipeline_modules/requirements.txt
-          python -m pip install -r dashboard/requirements.txt
+          python -m pip install -e ".[dev]"
 
       - name: Run unit tests
         run: |
+          python -m pytest tests -q
           python -m pytest dockers/tools/pipeline_modules/tests -q
           python -m pytest dockers/tools/WaveStitchPlus_app/tests -q

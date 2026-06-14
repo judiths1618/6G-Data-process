@@ -7,6 +7,9 @@ pandas ==2.0.3
 numpy
 boto3
 s3fs
+pyyaml>=6.0
+requests>=2.31
+pandera>=0.19
 
 einops
 pykeops
