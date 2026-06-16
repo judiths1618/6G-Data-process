@@ -1,10 +1,16 @@
 # input: data/raw/user_0_sample_0_antenna_0.csv
 # output: data/processed/user_0_sample_0_antenna_0_clean.csv
-input: data/raw/amf-performance.csv
-output: data/processed/amf-performance_clean.csv   # content = remediated frame
-cleaned_output:                                   # conservative-clean frame; null → <output_stem>_cleaned.csv
-report: reports/amf-performance_clean_report.json
-log_file: logs/amf-performance-dataops.log
+# input: data/raw/golang-web-server-performance.csv
+# output: data/processed/golang-web-server-performance_clean.csv   # content = remediated frame
+# input: data/raw/python-web-server-performance.csv
+# output: data/processed/python-web-server-performance_clean.csv   # content = remediated frame
+
+input: data/raw/rabbitmq-performance.csv
+output: data/processed/rabbitmq-performance_clean.csv
+soft_cleaned_output:                              # soft-cleaned frame; null → <output_stem>_cleaned.csv
+cleaned_output:                                   # backward-compatible alias for soft_cleaned_output
+report: reports/rabbitmq-performance_clean_report.json
+log_file: logs/rabbitmq-performance-dataops.log
 timestamp_col:
 
 validation:

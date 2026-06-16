@@ -1,5 +1,8 @@
 # Dockerfile.wavestitch-gpu
 # WaveStitch GPU Docker Image - S3 Only Storage
+# Build via the helper script (it vendors the preprocess helper into context):
+#     bash build_image.sh            # from dockers/tools/  (needs nvidia-docker host)
+# (A bare `docker build` fails the _wsp_helpers/ COPY unless you vendor it first.)
 
 FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
 
@@ -36,7 +39,14 @@ COPY WaveStitchPlus_app/ /app/WaveStitchPlus_app/
 
 COPY scripts/run_pipeline.py /app/run_pipeline.py
 
-# Use /tmp as a temporary working directory 
+# Bundle the canonical preprocess helper so the WaveStitchPlus shim
+# (WaveStitchPlus_app/custom_pipeline/preprocess.py) resolves it standalone — it
+# adds `<app>/../../airflow/dags/helpers` → /airflow/dags/helpers (in-image) to
+# sys.path. The file is outside this build context; build_image.sh vendors it
+# into ./_wsp_helpers/ before building.
+COPY _wsp_helpers/preprocess.py /airflow/dags/helpers/preprocess.py
+
+# Use /tmp as a temporary working directory
 # (automatically cleaned up after the container is destroyed).
 ENV WORK_DIR=/tmp/wavestitch
 

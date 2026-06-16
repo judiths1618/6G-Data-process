@@ -53,7 +53,14 @@ def _issue_count(value: Any) -> int:
 def _quality_issue_summary(quality_report: dict) -> dict:
     if quality_report.get("mode") == "time_series":
         issues = quality_report.get("issues", {})
+        timestamp_order = issues.get("timestamp_order", {})
+        timestamp_order_issues = (
+            int(timestamp_order.get("num_non_monotonic_steps", 0))
+            + int(timestamp_order.get("num_duplicate_timestamps", 0))
+            + int(timestamp_order.get("num_null_timestamps", 0))
+        )
         return {
+            "timestamp_order": timestamp_order_issues,
             "ts_gaps": int(issues.get("ts_gaps", {}).get("num_gaps", 0)),
             "missing": _issue_count(issues.get("missing", {})),
             "outliers": _issue_count(issues.get("outliers", [])),
@@ -73,6 +80,20 @@ def _quality_action_plan(quality_report: dict) -> list[dict]:
     mode = quality_report.get("mode")
     if mode == "time_series":
         issues = quality_report.get("issues", {})
+        timestamp_order = issues.get("timestamp_order", {})
+        if timestamp_order and (
+            not timestamp_order.get("is_monotonic_increasing", True)
+            or timestamp_order.get("num_duplicate_timestamps", 0)
+            or timestamp_order.get("num_null_timestamps", 0)
+        ):
+            actions.append({
+                "issue": "timestamp_not_monotonic",
+                "severity": "error",
+                "status": "marked_quality_issue",
+                "detected": timestamp_order,
+                "solution": "Keep the pipeline moving, but sort by timestamp and resolve null or duplicate timestamps before strict validation/model training. The transform handoff regularizes timelines in timestamp order.",
+                "module": "data_process_modules.ts_checks:inspect_timestamp_order",
+            })
         gaps = issues.get("ts_gaps", {})
         if gaps.get("has_gaps"):
             actions.append({
@@ -164,6 +185,7 @@ def _run_quality_checks(
     mode: str,
     timestamp_col: str | None,
     validation_config: dict[str, Any],
+    timestamp_order_override: dict | None = None,
 ) -> dict:
     try:
         if mode == "time_series" and timestamp_col:
@@ -205,6 +227,10 @@ def _run_quality_checks(
             "error": str(exc),
         }
 
+    if timestamp_order_override and report.get("mode") == "time_series":
+        report.setdefault("issues", {})["timestamp_order"] = timestamp_order_override
+        report.setdefault("recommendations", {})["structural_fix"] = True
+
     return {
         "mode": report.get("mode"),
         "gx_passed": report.get("gx_passed"),
@@ -212,6 +238,26 @@ def _run_quality_checks(
         "issue_summary": _quality_issue_summary(report),
         "action_plan": _quality_action_plan(report),
     }
+
+
+def _is_timestamp_contract_quality_issue(
+    error: Exception | None,
+    *,
+    validation_mode: str,
+    timestamp_col: str | None,
+) -> bool:
+    """Return True for timestamp ordering/integrity errors we report as quality issues."""
+    if error is None or validation_mode != "time_series" or not timestamp_col:
+        return False
+    message = str(error)
+    if f"timestamp column {timestamp_col!r}" not in message:
+        return False
+    quality_markers = (
+        "is not monotonic increasing",
+        "contains duplicate values",
+        "contains null values",
+    )
+    return any(marker in message for marker in quality_markers)
 
 
 def _build_handoff(
@@ -279,30 +325,42 @@ def _build_handoff(
 
 def _validation_comparison(
     raw: pd.DataFrame,
-    cleaned: pd.DataFrame,
+    soft_cleaned: pd.DataFrame,
     remediated: pd.DataFrame,
     *,
     cleaning_report: Any,
     remediation_report: Any,
     quality: dict,
     validation: dict,
+    duplicate_timestamps: int = 0,
+    non_monotonic_timestamps: int = 0,
 ) -> dict:
-    """Compact payload for dashboard charts comparing raw, cleaned, remediated,
+    """Compact payload for dashboard charts comparing raw, soft-cleaned, remediated,
     GX and Pandera."""
     quality_summary = quality.get("issue_summary", {})
     return {
         "dataset_shape": {
             "raw": {"rows": int(len(raw)), "cols": int(raw.shape[1])},
-            "cleaned": {"rows": int(len(cleaned)), "cols": int(cleaned.shape[1])},
+            "soft_cleaned": {
+                "rows": int(len(soft_cleaned)),
+                "cols": int(soft_cleaned.shape[1]),
+            },
+            # Backward-compatible alias for existing dashboard/report consumers.
+            "cleaned": {
+                "rows": int(len(soft_cleaned)),
+                "cols": int(soft_cleaned.shape[1]),
+            },
             "remediated": {"rows": int(len(remediated)), "cols": int(remediated.shape[1])},
         },
         "cleaning_effect": {
             "dropped_rows": int(getattr(cleaning_report, "dropped_empty_rows", 0))
             + int(getattr(cleaning_report, "dropped_duplicate_rows", 0)),
             "duplicate_rows_before": _duplicate_rows(raw),
-            "duplicate_rows_after": _duplicate_rows(cleaned),
+            "duplicate_rows_after": _duplicate_rows(soft_cleaned),
+            "duplicate_timestamps_collapsed": int(duplicate_timestamps),
+            "non_monotonic_timestamps_sorted": int(non_monotonic_timestamps),
             "missing_cells_before": _missing_cells(raw),
-            "missing_cells_after": _missing_cells(cleaned),
+            "missing_cells_after": _missing_cells(soft_cleaned),
         },
         "remediation_effect": {
             "missing_cells_before": int(getattr(remediation_report, "missing_cells_before", 0)),
@@ -318,10 +376,18 @@ def _validation_comparison(
         "issue_counts": quality_summary,
         "chart_ready": [
             {"stage": "raw", "metric": "missing_cells", "value": _missing_cells(raw)},
-            {"stage": "cleaned", "metric": "missing_cells", "value": _missing_cells(cleaned)},
+            {
+                "stage": "soft_cleaned",
+                "metric": "missing_cells",
+                "value": _missing_cells(soft_cleaned),
+            },
             {"stage": "remediated", "metric": "missing_cells", "value": _missing_cells(remediated)},
             {"stage": "raw", "metric": "duplicate_rows", "value": _duplicate_rows(raw)},
-            {"stage": "cleaned", "metric": "duplicate_rows", "value": _duplicate_rows(cleaned)},
+            {
+                "stage": "soft_cleaned",
+                "metric": "duplicate_rows",
+                "value": _duplicate_rows(soft_cleaned),
+            },
             {"stage": "remediated", "metric": "outlier_cells_clipped",
              "value": int(getattr(remediation_report, "outlier_cells_clipped", 0))},
             {"stage": "gx", "metric": "failed_issue_groups", "value": sum(quality_summary.values())},
@@ -362,14 +428,15 @@ def run_pipeline(
     timestamp_col: str | None = None,
     validation_config: dict[str, Any] | None = None,
     imputation_config: dict[str, Any] | None = None,
+    soft_cleaned_csv: str | None = None,
     cleaned_csv: str | None = None,
 ) -> dict:
     raw = pd.read_csv(input_csv)
-    cleaned, cleaning_report = clean_dataframe(raw, datetime_column=timestamp_col)
+    soft_cleaned, cleaning_report = clean_dataframe(raw, datetime_column=timestamp_col)
     validation_cfg = validation_config or {}
     configured_mode = validation_cfg.get("mode", "auto")
     detected_profile = profile(
-        cleaned,
+        soft_cleaned,
         timestamp_col=timestamp_col,
         allow_step_index_timestamp=bool(
             validation_cfg.get("allow_step_index_timestamp", False)
@@ -382,7 +449,7 @@ def run_pipeline(
     if configured_mode == "time_series":
         ts_col = configured_ts_col or detected_ts_col
     elif configured_mode == "auto":
-        if configured_ts_col and configured_ts_col in cleaned.columns:
+        if configured_ts_col and configured_ts_col in soft_cleaned.columns:
             ts_col = configured_ts_col
         elif detected_profile.get("data_type") == "time_series":
             ts_col = detected_ts_col
@@ -390,6 +457,36 @@ def run_pipeline(
     validation_mode = "time_series" if configured_mode == "auto" and ts_col else configured_mode
     if configured_mode == "auto" and not ts_col:
         validation_mode = "tabular"
+
+    # Mark & collapse duplicate timestamps on the *resolved* ts column (covers the
+    # auto-detected case where cleaning didn't know the column). Keep-last matches
+    # transform.preprocess, so the timeline is unique for validation/regularization
+    # and the issue is recorded instead of crashing.
+    duplicate_timestamps = int(getattr(cleaning_report, "duplicate_timestamps", 0))
+    timestamp_order_before: dict | None = None
+    non_monotonic_timestamps = 0
+    if validation_mode == "time_series" and ts_col and ts_col in soft_cleaned.columns:
+        extra_dups = int(soft_cleaned[ts_col].duplicated().sum())
+        if extra_dups:
+            soft_cleaned = soft_cleaned.drop_duplicates(subset=[ts_col], keep="last").reset_index(drop=True)
+            duplicate_timestamps += extra_dups
+            LOGGER.warning(
+                "collapsed %s duplicate timestamp(s) on %r (keep last)", extra_dups, ts_col
+            )
+        timestamp_order_before = ts_checks.inspect_timestamp_order(soft_cleaned, ts_col)
+        non_monotonic_timestamps = int(
+            timestamp_order_before.get("num_non_monotonic_steps", 0)
+        )
+        if non_monotonic_timestamps:
+            soft_cleaned = soft_cleaned.sort_values(
+                by=ts_col, kind="mergesort", na_position="last"
+            ).reset_index(drop=True)
+            LOGGER.warning(
+                "sorted %s non-monotonic timestamp step(s) on %r",
+                non_monotonic_timestamps,
+                ts_col,
+            )
+
     validation = {
         "configured_mode": configured_mode,
         "mode": validation_mode,
@@ -408,7 +505,7 @@ def run_pipeline(
         else:
             try:
                 validate_numeric_timeseries(
-                    cleaned,
+                    soft_cleaned,
                     timestamp_col=ts_col,
                     expected_columns=validation_cfg.get("expected_columns") or None,
                     numeric_bounds=validation_cfg.get("numeric_bounds") or None,
@@ -428,7 +525,7 @@ def run_pipeline(
     elif validation_mode == "tabular":
         try:
             validate_tabular_dataframe(
-                cleaned,
+                soft_cleaned,
                 expected_columns=validation_cfg.get("expected_columns") or None,
                 numeric_bounds=validation_cfg.get("numeric_bounds") or None,
                 missing_threshold=float(validation_cfg.get("missing_threshold", 0.0)),
@@ -447,25 +544,29 @@ def run_pipeline(
 
     output_path = Path(output_csv)
     report_path = Path(report_json)
-    cleaned_path = Path(cleaned_csv) if cleaned_csv else output_path.with_name(
+    soft_cleaned_csv = soft_cleaned_csv or cleaned_csv
+    soft_cleaned_path = Path(soft_cleaned_csv) if soft_cleaned_csv else output_path.with_name(
         output_path.stem + "_cleaned" + output_path.suffix
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    cleaned_path.parent.mkdir(parents=True, exist_ok=True)
+    soft_cleaned_path.parent.mkdir(parents=True, exist_ok=True)
 
     quality = _run_quality_checks(
-        cleaned,
+        soft_cleaned,
         mode=validation_mode,
         timestamp_col=ts_col,
         validation_config=validation_cfg,
+        timestamp_order_override=timestamp_order_before
+        if non_monotonic_timestamps
+        else None,
     )
 
     # Remediation: act on each detected issue (winsorize outliers, type-aware
     # fill for tabular missing). Time-series gaps are left for the imputation
     # handoff below.
     remediated, remediation_report = remediate(
-        cleaned,
+        soft_cleaned,
         quality["report"],
         outlier_q=float(validation_cfg.get("outlier_q", 0.01)),
     )
@@ -484,17 +585,19 @@ def run_pipeline(
 
     comparison = _validation_comparison(
         raw,
-        cleaned,
+        soft_cleaned,
         remediated,
         cleaning_report=cleaning_report,
         remediation_report=remediation_report,
         quality=quality,
         validation=validation,
+        duplicate_timestamps=duplicate_timestamps,
+        non_monotonic_timestamps=non_monotonic_timestamps,
     )
 
-    # Persist both stages as artifacts: the conservative-clean frame (before
+    # Persist both stages as artifacts: the soft-cleaned frame (before
     # per-issue remediation) and the remediated frame (the pipeline's output).
-    cleaned.to_csv(cleaned_path, index=False)
+    soft_cleaned.to_csv(soft_cleaned_path, index=False)
     remediated.to_csv(output_path, index=False)
 
     # Handoff: regularize a gappy timeline into the prepared-dir bundle and
@@ -510,10 +613,16 @@ def run_pipeline(
     report = {
         "input": input_csv,
         "output": output_csv,
-        "cleaned_output": str(cleaned_path),
+        "soft_cleaned_output": str(soft_cleaned_path),
+        # Backward-compatible alias for older dashboard/scripts/tests.
+        "cleaned_output": str(soft_cleaned_path),
         "report_path": report_json,
         "data_type": validation_mode if validation_mode in {"tabular", "time_series"} else None,
-        "cleaning": asdict(cleaning_report),
+        "cleaning": {
+            **asdict(cleaning_report),
+            "duplicate_timestamps": duplicate_timestamps,
+            "non_monotonic_timestamps": non_monotonic_timestamps,
+        },
         "remediation": asdict(remediation_report),
         "profile": detected_profile,
         "quality": quality,
@@ -523,7 +632,11 @@ def run_pipeline(
         "handoff": handoff,
     }
     report_path.write_text(json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8")
-    if validation_error:
+    if validation_error and not _is_timestamp_contract_quality_issue(
+        validation_error,
+        validation_mode=validation_mode,
+        timestamp_col=ts_col,
+    ):
         raise validation_error
     return report
 
@@ -531,9 +644,18 @@ def run_pipeline(
 def run_from_config(config_path: str | None = None, **overrides: str | None) -> dict:
     """Run the pipeline from YAML config with optional CLI/env overrides."""
     cfg = load_config(config_path)
-    for key in ("input", "output", "report", "log_file", "timestamp_col", "cleaned_output"):
+    for key in (
+        "input",
+        "output",
+        "report",
+        "log_file",
+        "timestamp_col",
+        "soft_cleaned_output",
+        "cleaned_output",
+    ):
         if overrides.get(key) is not None:
             cfg[key] = overrides[key]
+    soft_cleaned_output = cfg.get("soft_cleaned_output") or cfg.get("cleaned_output")
     return run_pipeline(
         cfg["input"],
         cfg["output"],
@@ -541,7 +663,7 @@ def run_from_config(config_path: str | None = None, **overrides: str | None) -> 
         timestamp_col=cfg.get("timestamp_col"),
         validation_config=cfg.get("validation", {}),
         imputation_config=cfg.get("imputation", {}),
-        cleaned_csv=cfg.get("cleaned_output"),
+        soft_cleaned_csv=soft_cleaned_output,
     )
 
 

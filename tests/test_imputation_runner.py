@@ -7,6 +7,7 @@ import pandas as pd
 
 from dataops.imputation_runner import (
     INTERP_METHODS,
+    builtin_methods,
     compare_clean_vs_imputed,
     impute_bundle,
     impute_dataframe,
@@ -80,3 +81,21 @@ def test_pandas_engine_rejects_non_interp_method(tmp_path):
     with pytest.raises(ValueError, match="kalman"):
         impute_bundle(prepared, method="kalman", output_dir=str(tmp_path / "g"),
                       engine="pandas")
+
+
+def test_imputegap_statistics_run_dependency_free(tmp_path):
+    assert set(builtin_methods("imputegap")) >= {"interpolation", "mean", "min", "zero"}
+    assert builtin_methods("pypots") == []   # heavy-only library: no built-ins
+
+    prepared = _make_bundle(tmp_path)
+    out_dir = tmp_path / "gen"
+    res = impute_bundle(prepared, method="mean", lib="imputegap",
+                        output_dir=str(out_dir), engine="pandas")
+    assert res["lib"] == "imputegap"
+    assert (out_dir / "imputegap_mean_test_imputed.csv").exists()
+    assert res["files"]["test"]["nan_after"] == 0
+
+    # imputegap/mean fills with the column mean; imputegap/zero fills 0.
+    df = pd.DataFrame({"a": [1.0, np.nan, 3.0]})
+    assert impute_dataframe(df, ["a"], "mean", lib="imputegap")["a"].tolist() == [1.0, 2.0, 3.0]
+    assert impute_dataframe(df, ["a"], "zero", lib="imputegap")["a"].tolist() == [1.0, 0.0, 3.0]

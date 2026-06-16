@@ -28,6 +28,7 @@ import pandas as pd
 
 __all__ = [
     "INTERP_METHODS",
+    "builtin_methods",
     "impute_dataframe",
     "impute_bundle",
     "compare_clean_vs_imputed",
@@ -40,30 +41,71 @@ INTERP_METHODS = {"auto", "linear", "quadratic", "cubic", "nearest", "slinear", 
 INPUT_FILES = {"train": "train.csv", "test": "test_input.csv"}
 GT_FILES = {"train": None, "test": "test_gt.csv"}
 
+# Dependency-free, **library-scoped** built-in methods. Standard, unambiguous ops
+# only — each maps to ``(kind, arg)``. Library-specific algorithms (darts kalman,
+# PyPOTS SAITS, ImputeGAP CDRec/BRITS, …) are NOT here; they still need the real
+# library (run it via the app runner / ``DATAOPS_IMPUTE_CONDA_ENV``). Note that the
+# same name can differ across libraries (darts ``zero`` = zero-order-hold interp;
+# ImputeGAP ``zero`` = fill 0), which is exactly why the table is keyed by library.
+_BUILTIN: dict[str, dict[str, tuple]] = {
+    # darts interpolation family — bit-faithful to Darts' MissingValuesFiller.
+    "darts": {m: ("interp", "linear" if m == "auto" else m) for m in INTERP_METHODS},
+    # ImputeGAP statistics family — standard equivalents (not the ImputeGAP lib).
+    "imputegap": {
+        "interpolation": ("interp", "linear"),
+        "mean": ("fill", "mean"),
+        "mean_by_series": ("fill", "mean"),
+        "min": ("fill", "min"),
+        "zero": ("fill", "zero"),
+    },
+}
+
+
+def builtin_methods(lib: str = "darts") -> list[str]:
+    """Dependency-free method names available for ``lib`` (empty for heavy-only libs)."""
+    return sorted(_BUILTIN.get(lib, {}))
+
 
 def _load_meta(prepared_dir: Path) -> dict:
     with (prepared_dir / "meta.json").open() as f:
         return json.load(f)
 
 
-def impute_dataframe(df: pd.DataFrame, target_cols: list[str], method: str) -> pd.DataFrame:
-    """Fill NaNs in ``target_cols`` per column — faithful to Darts MissingValuesFiller.
-
-    ``method`` is forwarded to ``pandas.Series.interpolate``; ``auto`` uses the
-    pandas default (linear). Edge NaNs left by some methods are ff/bf filled,
-    matching the Darts runner.
-    """
-    out = df.copy()
-    pandas_method = "linear" if method == "auto" else method
-    for col in target_cols:
-        if col not in out.columns or out[col].notna().sum() == 0:
-            continue
-        series = pd.to_numeric(out[col], errors="coerce")
+def _fill_series(series: pd.Series, kind: str, arg) -> pd.Series:
+    s = pd.to_numeric(series, errors="coerce")
+    if kind == "interp":
         # interpolate over integer position, matching Darts' synthetic RangeIndex.
-        filled = series.interpolate(method=pandas_method, limit_direction="both")
-        if filled.isna().any():
-            filled = filled.ffill().bfill()
-        out[col] = filled
+        filled = s.interpolate(method=arg, limit_direction="both")
+        return filled.ffill().bfill() if filled.isna().any() else filled
+    if kind == "fill":
+        value = {"mean": s.mean(), "min": s.min(), "zero": 0.0}[arg]
+        return s.fillna(value)
+    raise ValueError(f"unknown built-in op {kind!r}")
+
+
+def impute_dataframe(
+    df: pd.DataFrame, target_cols: list[str], method: str, lib: str = "darts"
+) -> pd.DataFrame:
+    """Fill NaNs in ``target_cols`` per column using ``lib``'s built-in ``method``.
+
+    ``darts`` interpolation is bit-faithful to Darts' MissingValuesFiller; the
+    ``imputegap`` statistics methods are standard equivalents (not the ImputeGAP
+    library). Raises ``ValueError`` for a non-built-in ``(lib, method)``.
+    """
+    spec = _BUILTIN.get(lib, {}).get(method)
+    if spec is None:
+        raise ValueError(
+            f"{lib}/{method} is not a dependency-free built-in "
+            f"(built-ins for {lib}: {builtin_methods(lib)})"
+        )
+    kind, arg = spec
+    out = df.copy()
+    for col in target_cols:
+        if col not in out.columns:
+            continue
+        if pd.to_numeric(out[col], errors="coerce").notna().sum() == 0:
+            continue
+        out[col] = _fill_series(out[col], kind, arg)
     return out
 
 
@@ -89,16 +131,19 @@ def impute_bundle(
     prepared_dir: str | Path,
     *,
     method: str = "nearest",
+    lib: str = "darts",
     output_dir: str | Path | None = None,
     inputs: Iterable[str] = ("train", "test"),
     engine: str = "pandas",
     python_exe: str | None = None,
     runner_path: str | Path | None = None,
 ) -> dict:
-    """Impute the bundle's input CSVs and write ``darts_<method>_<kind>_imputed.csv``.
+    """Impute the bundle's input CSVs and write ``<lib>_<method>_<kind>_imputed.csv``.
 
-    Returns ``{method, engine, output_dir, files:{kind: {path, rows, nan_before,
-    nan_after, filled}}}``.
+    With ``engine="pandas"`` the dependency-free built-ins for ``lib`` are used
+    (see :data:`_BUILTIN`); ``engine="darts"`` subprocesses the real Darts runner.
+    Returns ``{method, lib, engine, output_dir, files:{kind: {path, rows,
+    nan_before, nan_after, filled}}}``.
     """
     prepared = Path(prepared_dir)
     out_dir = Path(output_dir) if output_dir else prepared.parent / f"generated_{prepared.name.removeprefix('prepared_')}"
@@ -108,6 +153,8 @@ def impute_bundle(
     inputs = list(inputs)
 
     if engine == "darts":
+        if lib != "darts":
+            raise ValueError("engine='darts' only applies to lib='darts'")
         runner = Path(runner_path) if runner_path else (
             Path(__file__).resolve().parents[2]
             / "dockers" / "tools" / "Darts_app" / "run_imputation.py"
@@ -116,10 +163,10 @@ def impute_bundle(
                               python_exe or sys.executable, runner)
     elif engine != "pandas":
         raise ValueError(f"engine must be 'pandas' or 'darts', got {engine!r}")
-    if engine == "pandas" and method not in INTERP_METHODS:
+    if engine == "pandas" and method not in _BUILTIN.get(lib, {}):
         raise ValueError(
-            f"method {method!r} needs engine='darts' (pandas engine supports "
-            f"{sorted(INTERP_METHODS)})"
+            f"{lib}/{method} needs the real library (pandas built-ins for "
+            f"{lib}: {builtin_methods(lib)})"
         )
 
     files: dict[str, dict] = {}
@@ -127,11 +174,11 @@ def impute_bundle(
         src = prepared / INPUT_FILES[kind]
         if not src.exists():
             continue
-        out_path = out_dir / f"darts_{method}_{kind}_imputed.csv"
+        out_path = out_dir / f"{lib}_{method}_{kind}_imputed.csv"
         df = pd.read_csv(src)
         nan_before = int(df[target_cols].isna().sum().sum())
         if engine == "pandas":
-            out_df = impute_dataframe(df, target_cols, method)
+            out_df = impute_dataframe(df, target_cols, method, lib=lib)
             out_df.to_csv(out_path, index=False)
         else:  # darts engine already wrote the file
             out_df = pd.read_csv(out_path)
@@ -145,6 +192,7 @@ def impute_bundle(
         }
     return {
         "method": method,
+        "lib": lib,
         "engine": engine,
         "output_dir": str(out_dir),
         "target_cols": target_cols,
@@ -316,8 +364,9 @@ METADATA = {
     "name": "imputation_runner",
     "version": "0.1.0",
     "category": "imputation",
-    "summary": "Automated interpolation-family imputation over a prepared bundle "
-               "(Darts-faithful pandas engine or real Darts subprocess) + clean-vs-imputed comparison.",
+    "summary": "Automated dependency-free imputation over a prepared bundle "
+               "(darts interpolation + imputegap statistics built-ins, or real Darts "
+               "subprocess) + clean-vs-imputed comparison + final dataset.",
     "entrypoint": "dataops.imputation_runner:impute_bundle",
     "gpu": False,
     "dependencies": ["pandas", "numpy", "scipy"],

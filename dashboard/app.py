@@ -80,8 +80,41 @@ RUNNER_IMPORT_CHECKS = {
     "imputegap": ("imputegap", "python -m pip install -r dockers/tools/ImputeGAP_app/requirements.txt"),
     "pypots": ("pypots", "python -m pip install -r dockers/tools/PyPOTS_app/requirements.txt"),
     "wavestitchplus": ("torch", "python -m pip install -r dockers/tools/requirements.txt"),
-    "wavestitchplus_v2": ("torch", "python -m pip install -r dockers/tools/requirements.txt"),
+    # wavestitchplus_v2 is NOT torch-gated: its anchoring is pure-python (wsp_v2),
+    # so `--reuse-diffusion <v1 output>` runs torch-free. Only the (optional)
+    # synthesis fallback needs torch, and that surfaces from the runner itself.
     "wavestitchplus_harpoon": ("torch", "python -m pip install -r dockers/tools/requirements.txt"),
+}
+
+# Prebuilt Docker images per app (tags from each app's build_image.sh). Override
+# any with ``DATAOPS_IMPUTE_IMAGE_<LIB>``. Running a method in its image means the
+# dashboard env needs no heavy deps at all.
+RUNNER_IMAGES = {
+    "darts": "darts-baseline:latest",
+    "imputegap": "imputegap-baseline:latest",
+    "pypots": "pypots-baseline:latest",
+    # CPU default so it runs without nvidia-docker (e.g. on a Mac). Override with
+    # DATAOPS_IMPUTE_IMAGE_WAVESTITCHPLUS=wavestitchplus-gpu:latest where a GPU exists.
+    "wavestitchplus": "wavestitchplus-cpu:latest",
+    "wavestitchplus_v2": "wavestitchplus-cpu:latest",
+    "wavestitchplus_harpoon": "wavestitchplus-cpu:latest",
+}
+# The WaveStitch+ image's CMD is run_pipeline.py, so the imputation runner is
+# invoked by overriding the entrypoint with the in-image script path.
+WSP_SCRIPTS = {
+    "wavestitchplus": "/app/WaveStitchPlus_app/run_imputation.py",
+    "wavestitchplus_v2": "/app/WaveStitchPlus_app/run_imputation_v2.py",
+    "wavestitchplus_harpoon": "/app/WaveStitchPlus_app/run_imputation_harpoon.py",
+}
+
+# Human-readable description of what each heavy library actually needs — so the
+# "not available" message is accurate per method, not just "needs <module>".
+RUNNER_NEEDS = {
+    "darts": "the `darts` library (only the `kalman` method; interpolation runs here built-in)",
+    "imputegap": "the `imputegap` library (only the matrix/ML/deep methods; statistics run here built-in)",
+    "pypots": "`pypots` + `torch` (trains a neural imputer; GPU recommended)",
+    "wavestitchplus": "`torch`, and it retrains a diffusion model (slow; GPU recommended)",
+    "wavestitchplus_harpoon": "`torch` + a pretrained WaveStitch+ model (inference-time guidance)",
 }
 
 INPUT_FILES = {"train": "train.csv", "test": "test_input.csv"}
@@ -137,6 +170,19 @@ class Subset:
         return f"{self.dataset} / {self.name}"
 
 
+@dataclass
+class RawDataset:
+    """A selectable raw CSV plus the DataOps runs generated from it."""
+    name: str
+    path: Path
+    runs: List["DataOpsRun"]
+
+    @property
+    def label(self) -> str:
+        suffix = f" · {len(self.runs)} run(s)" if self.runs else " · no runs yet"
+        return f"{self.name}{suffix}"
+
+
 @st.cache_data(show_spinner=False)
 def discover_subsets(work_root: Path) -> List[Subset]:
     """Discover prepared bundles under ``work_root`` (fallback for the run picker).
@@ -169,7 +215,7 @@ def discover_subsets(work_root: Path) -> List[Subset]:
                 dataset=ds_dir.name,
                 name=name,
                 prepared_dir=prep,
-                generated_dir=gen if gen.exists() else None,
+                generated_dir=gen,   # may not exist yet; a Run creates it here
             ))
     return out
 
@@ -178,7 +224,7 @@ def discover_subsets(work_root: Path) -> List[Subset]:
 class DataOpsRun:
     """One end-to-end DataOps run, discovered from a pipeline report JSON.
 
-    Unifies the cleaning lineage (raw→cleaned→remediated→regularized→final) and
+    Unifies the cleaning lineage (raw→soft-cleaned→remediated→regularized→final) and
     the imputation bundle (prepared/generated dirs) behind a single selectable
     run, so the dashboard no longer needs two separate data-source mental models.
     """
@@ -187,7 +233,7 @@ class DataOpsRun:
     report: Optional[dict]
     compare: Optional[dict]         # *_imputation_compare.json, if present
     raw_csv: Optional[Path]
-    cleaned_csv: Optional[Path]
+    soft_cleaned_csv: Optional[Path]
     remediated_csv: Optional[Path]
     prepared_dir: Optional[Path]    # regularized bundle (drives the imputation views)
     generated_dir: Optional[Path]
@@ -204,7 +250,9 @@ class DataOpsRun:
         """Expose the regularized bundle as a Subset for the imputation workbench."""
         if not self.prepared_dir or not (self.prepared_dir / "meta.json").exists():
             return None
-        gen = self.generated_dir if (self.generated_dir and self.generated_dir.exists()) else None
+        gen = self.generated_dir or (
+            self.prepared_dir.parent / f"generated_{self.prepared_dir.name}"
+        )
         return Subset(dataset=self.name, name="run", prepared_dir=self.prepared_dir,
                       generated_dir=gen)
 
@@ -253,12 +301,38 @@ def discover_dataops_runs(reports_dir: Path, repo_root: Path) -> List[DataOpsRun
             report=rep,
             compare=compare,
             raw_csv=_abs(rep.get("input")),
-            cleaned_csv=_abs(rep.get("cleaned_output")),
+            soft_cleaned_csv=_abs(rep.get("soft_cleaned_output") or rep.get("cleaned_output")),
             remediated_csv=_abs(rep.get("output")),
             prepared_dir=_abs((rep.get("handoff") or {}).get("prepared_dir")),
             generated_dir=generated,
             final_csv=final_csv,
         ))
+    return out
+
+
+def _path_key(path: Optional[Path]) -> str:
+    if path is None:
+        return ""
+    try:
+        return str(path.resolve())
+    except Exception:
+        return str(path.absolute())
+
+
+def discover_raw_datasets(raw_dir: Path, runs: List[DataOpsRun]) -> List[RawDataset]:
+    """Discover raw CSVs and attach all pipeline reports that used each one."""
+    paths: dict[str, Path] = {}
+    if raw_dir.exists():
+        for path in sorted(raw_dir.glob("*.csv")):
+            paths[_path_key(path)] = path
+    for run in runs:
+        if run.raw_csv:
+            paths.setdefault(_path_key(run.raw_csv), run.raw_csv)
+
+    out: List[RawDataset] = []
+    for key, path in sorted(paths.items(), key=lambda kv: kv[1].name.lower()):
+        linked = [r for r in runs if _path_key(r.raw_csv) == key]
+        out.append(RawDataset(name=path.stem, path=path, runs=linked))
     return out
 
 
@@ -857,52 +931,203 @@ def latency_violation_rates(
 # Run-experiment subprocess
 # ---------------------------------------------------------------------------
 
+def _find_v1_output(generated_dir: Optional[Path], split: str = "test") -> Optional[Path]:
+    """Locate an existing WaveStitch+ v1 diffusion output to anchor for v2 reuse."""
+    if not generated_dir or not generated_dir.exists():
+        return None
+    for name in (f"wavestitchplus_v1_{split}_imputed.csv",
+                 f"wavestitchplus_{split}_imputed.csv"):
+        cand = generated_dir / name
+        if cand.exists():
+            return cand
+    return None
+
+
+def _runner_image(library: str) -> Optional[str]:
+    """Docker image for ``library`` (env override wins over the built-in default)."""
+    return os.environ.get(f"DATAOPS_IMPUTE_IMAGE_{library.upper()}") or RUNNER_IMAGES.get(library)
+
+
+def _run_in_docker(library: str, method: str, subset: Subset, splits: List[str],
+                   extra_args: List[str], output_dir: Path, gpu: bool,
+                   image: Optional[str] = None) -> Tuple[int, str]:
+    """Run an imputation method inside its prebuilt Docker image.
+
+    The bundle's parent dir is mounted at ``/work`` and host paths (prepared dir,
+    output dir, and any path-valued ``extra_args`` such as ``--reuse-diffusion``)
+    are rewritten to container paths. WaveStitch+ images override the entrypoint
+    to reach the in-image runner script.
+    """
+    image = image or _runner_image(library)
+    if not image:
+        return 127, (f"No Docker image configured for `{library}`. Set "
+                     f"`DATAOPS_IMPUTE_IMAGE_{library.upper()}=<image:tag>`.")
+
+    # Fail fast & clearly if the image isn't built locally — otherwise `docker run`
+    # tries to pull it and reports a misleading "pull access denied".
+    try:
+        chk = subprocess.run(["docker", "image", "inspect", image],
+                             capture_output=True, text=True)
+    except FileNotFoundError:
+        return 127, "`docker` not found on PATH. Install Docker, or uncheck 'Run in Docker image'."
+    if chk.returncode != 0:
+        return 127, (
+            f"Docker image `{image}` is not built locally.\n\n"
+            f"• List your images:   docker images\n"
+            f"• Use the right tag:  set the **Docker image** field in the Run tab "
+            f"(or `export DATAOPS_IMPUTE_IMAGE_{library.upper()}=<repo:tag>`)\n"
+            f"• Or build it:        bash dockers/tools/<App>/build_image.sh\n\n"
+            f"(Docker did not attempt a registry pull.)"
+        )
+
+    host_root = subset.prepared_dir.parent.resolve()
+
+    def cpath(p) -> str:
+        # Relative to the mounted /work (the container workdir), so every run arg
+        # is a relative path — portable across machines and mount points.
+        rp = Path(p).resolve()
+        try:
+            return str(rp.relative_to(host_root))
+        except ValueError:
+            return str(p)
+
+    def maybe_path(arg: str) -> str:
+        try:
+            if os.sep in arg and Path(arg).exists():
+                return cpath(arg)
+        except Exception:
+            pass
+        return arg
+
+    runner_args = [
+        "--prepared-dir", cpath(subset.prepared_dir),
+        "--output-dir", cpath(output_dir),
+        "--method", method,
+        "--inputs", *splits,
+    ] + [maybe_path(a) for a in extra_args]
+
+    docker = ["docker", "run", "--rm", "-v", f"{host_root}:/work", "-w", "/work"]
+    if gpu or os.environ.get("DATAOPS_IMPUTE_GPU"):
+        docker += ["--gpus", "all"]
+    if os.environ.get("DATAOPS_IMPUTE_DOCKER_USER", "1").lower() not in ("0", "", "false", "no"):
+        try:
+            docker += ["--user", f"{os.getuid()}:{os.getgid()}"]   # avoid root-owned outputs
+        except AttributeError:
+            pass
+    if library.startswith("wavestitchplus"):
+        docker += ["--entrypoint", "python", image, WSP_SCRIPTS[library]] + runner_args
+    else:
+        docker += [image] + runner_args
+
+    try:
+        proc = subprocess.run(docker, capture_output=True, text=True)
+    except FileNotFoundError:
+        return 127, "`docker` not found on PATH. Install Docker, or uncheck 'Run in Docker image'."
+    head = (f"ran {library}/{method} in Docker image `{image}`:\n"
+            f"  {' '.join(docker)}\n\n")
+    return proc.returncode, head + (proc.stdout or "") + "\n" + (proc.stderr or "")
+
+
+def _impute_python() -> Tuple[List[str], bool]:
+    """Resolve the interpreter that runs the imputation app runners.
+
+    The heavy imputation libraries (PyPOTS/torch, ImputeGAP, WaveStitch+) can live
+    in a different env than the light dashboard env. Returns ``(argv_prefix, is_custom)``:
+
+      * ``DATAOPS_IMPUTE_PYTHON=/path/to/python`` → that interpreter;
+      * ``DATAOPS_IMPUTE_CONDA_ENV=autofeat-6g``  → ``conda run -n <env> python``;
+      * neither                                   → the dashboard's own ``python``.
+    """
+    py = os.environ.get("DATAOPS_IMPUTE_PYTHON")
+    if py:
+        return [py], True
+    env = os.environ.get("DATAOPS_IMPUTE_CONDA_ENV")
+    if env:
+        return ["conda", "run", "--no-capture-output", "-n", env, "python"], True
+    return [sys.executable], False
+
+
 def run_experiment(library: str,
                    method: str,
                    subset: Subset,
                    splits: List[str],
-                   extra_args: List[str]) -> Tuple[int, str]:
-    """Invoke a runner and return (exit_code, combined_output).
+                   extra_args: List[str],
+                   *,
+                   use_docker: bool = False,
+                   gpu: bool = False,
+                   image: Optional[str] = None) -> Tuple[int, str]:
+    """Invoke an imputation runner and return (exit_code, combined_output).
 
-    Darts interpolation methods run dependency-free through the pandas engine in
-    :mod:`dataops.imputation_runner` (bit-faithful to Darts' MissingValuesFiller),
-    so the Run tab works without a local ``darts`` install. Everything else
-    (darts kalman, PyPOTS, WaveStitch+, …) shells out to its app runner.
+    Works across all listed libraries via three execution paths:
+      * **Dependency-free built-ins** — darts interpolation + ImputeGAP statistics
+        (pandas engine), and WaveStitch+ v2 reusing an existing v1 output.
+      * **Docker** (``use_docker``) — run the method inside its prebuilt image
+        (the deps live there; the dashboard env needs nothing).
+      * **Subprocess** — the app runner via :func:`_impute_python` (the dashboard
+        env, or one pointed to by ``DATAOPS_IMPUTE_CONDA_ENV`` / ``_PYTHON``).
     """
-    output_dir = subset.generated_dir or (subset.prepared_dir.parent / f"generated_{subset.name}")
+    output_dir = subset.generated_dir or (
+        subset.prepared_dir.parent / f"generated_{subset.prepared_dir.name}"
+    )
 
-    if library == "darts":
-        from dataops.imputation_runner import INTERP_METHODS, impute_bundle
-        if method in INTERP_METHODS:
-            try:
-                res = impute_bundle(subset.prepared_dir, method=method,
-                                    output_dir=str(output_dir), inputs=splits, engine="pandas")
-            except Exception as exc:  # noqa: BLE001 - surface as a run failure
-                return 1, f"darts/{method} (pandas engine) failed: {exc}"
-            lines = [f"darts/{method} via built-in pandas engine (no `darts` dependency):"]
-            for kind, info in res["files"].items():
-                lines.append(f"  {kind}: filled {info['filled']:,}/{info['nan_before']:,} "
-                             f"NaN target cells → {Path(info['path']).name}")
-            return 0, "\n".join(lines)
+    # Dependency-free built-ins (skipped when Docker is explicitly requested).
+    from dataops.imputation_runner import builtin_methods, impute_bundle
+    if not use_docker and method in builtin_methods(library):
+        try:
+            res = impute_bundle(subset.prepared_dir, method=method, lib=library,
+                                output_dir=str(output_dir), inputs=splits, engine="pandas")
+        except Exception as exc:  # noqa: BLE001 - surface as a run failure
+            return 1, f"{library}/{method} (built-in) failed: {exc}"
+        note = "" if library == "darts" else f" — standard equivalent, not the {library} library"
+        lines = [f"{library}/{method} via built-in engine (no `{library}` dependency{note}):"]
+        for kind, info in res["files"].items():
+            lines.append(f"  {kind}: filled {info['filled']:,}/{info['nan_before']:,} "
+                         f"NaN target cells → {Path(info['path']).name}")
+        return 0, "\n".join(lines)
 
     runner = RUNNERS[library]
-    if not runner.exists():
+    if not use_docker and not runner.exists():
         return 127, f"runner not found: {runner}"
+
+    # WaveStitch+ v2 anchoring is pure-python (wsp_v2). When a v1 diffusion output
+    # already exists, reuse it (`--reuse-diffusion`) so v2 runs torch-free / no
+    # retrain. Applies to both the Docker and subprocess paths.
+    reuse_note = ""
+    if library == "wavestitchplus_v2" and "--reuse-diffusion" not in extra_args:
+        v1 = _find_v1_output(output_dir, splits[0] if splits else "test")
+        if v1 is not None:
+            extra_args = list(extra_args) + ["--reuse-diffusion", str(v1)]
+            reuse_note = (f"v2 anchored an existing v1 output (`{v1.name}`) — "
+                          "no diffusion synthesis.\n")
+
+    if use_docker:
+        rc, out = _run_in_docker(library, method, subset, splits, extra_args,
+                                 output_dir, gpu, image=image)
+        return rc, reuse_note + out
+
+    impute_py, custom_env = _impute_python()
     module_name, install_hint = RUNNER_IMPORT_CHECKS.get(library, (None, None))
-    if module_name:
+    # Only gate on the *dashboard* env when we'd run in it. With a custom
+    # imputation env the dep lives there, so let the subprocess report for real.
+    if module_name and not custom_env:
         import importlib.util
 
         if importlib.util.find_spec(module_name) is None:
+            needs = RUNNER_NEEDS.get(library, f"`{module_name}`")
             return 127, (
-                f"Optional dependency for {library}/{method} is not installed: "
-                f"`{module_name}`.\n\n"
-                f"Install it in the dashboard Python environment first:\n"
+                f"`{library}/{method}` isn't available in the dashboard Python env — "
+                f"it needs {needs}.\n\n"
+                f"Run it without changing this env by ticking **Run in Docker image**, "
+                f"or point imputation at an env that has the deps:\n"
+                f"  export DATAOPS_IMPUTE_CONDA_ENV=autofeat-6g    # conda env with the deps\n"
+                f"  export DATAOPS_IMPUTE_PYTHON=/path/to/python   # or an explicit interpreter\n"
+                f"or install them here:\n"
                 f"  {install_hint}\n\n"
-                "The dashboard keeps method execution as the final-step detail; "
-                "the cleaning lineage and existing imputation outputs remain usable."
+                f"Dependency-free in this env: darts interpolation, imputegap statistics, "
+                f"and WaveStitch+ v2 (when a v1 output exists to anchor)."
             )
-    cmd = [
-        sys.executable, str(runner),
+    cmd = impute_py + [
+        str(runner),
         "--prepared-dir", str(subset.prepared_dir),
         "--output-dir", str(output_dir),
         "--method", method,
@@ -910,7 +1135,7 @@ def run_experiment(library: str,
     ] + extra_args
     env = os.environ.copy()
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    return proc.returncode, (proc.stdout or "") + "\n" + (proc.stderr or "")
+    return proc.returncode, reuse_note + (proc.stdout or "") + "\n" + (proc.stderr or "")
 
 
 # ---------------------------------------------------------------------------
@@ -1024,10 +1249,10 @@ def _coerce_time_axis(series: pd.Series) -> Tuple[pd.Series, str]:
     return series, series.name or "time"
 
 
-def _pipeline_compare_plot(raw: pd.DataFrame, cleaned: pd.DataFrame,
+def _pipeline_compare_plot(raw: pd.DataFrame, soft_cleaned: pd.DataFrame,
                            curated: Optional[pd.DataFrame], column: str,
                            time_col: str) -> go.Figure:
-    """Three-line plot: raw vs cleaned vs curated for one numeric column."""
+    """Three-line plot: raw vs soft-cleaned vs curated for one numeric column."""
     fig = go.Figure()
     x_label = "row index"
     # Use row index when both frames share length; otherwise fall back to time
@@ -1046,8 +1271,8 @@ def _pipeline_compare_plot(raw: pd.DataFrame, cleaned: pd.DataFrame,
         opacity=0.55,
     ))
     fig.add_trace(go.Scattergl(
-        x=_x(cleaned), y=cleaned[column].astype(float),
-        name="cleaned", mode="lines",
+        x=_x(soft_cleaned), y=soft_cleaned[column].astype(float),
+        name="soft-cleaned", mode="lines",
         line=dict(color="#ff7f0e", width=1.4),
     ))
     if curated is not None and column in curated.columns:
@@ -1057,7 +1282,7 @@ def _pipeline_compare_plot(raw: pd.DataFrame, cleaned: pd.DataFrame,
             line=dict(color="#2ca02c", width=1, dash="dot"),
         ))
     fig.update_layout(
-        title=f"{column} — raw vs cleaned vs curated",
+        title=f"{column} — raw vs soft-cleaned vs curated",
         xaxis_title=x_label,
         yaxis_title=column,
         height=420, margin=dict(l=40, r=20, t=50, b=40),
@@ -1070,6 +1295,7 @@ _SEVERITY_COLORS = {"error": "#d62728", "warning": "#e8820c", "info": "#1f77b4"}
 _STATUS_BADGES = {
     "applied_by_remediation": ("#2ca02c", "✓ applied"),
     "deferred_to_imputation": ("#7e57c2", "→ imputation"),
+    "marked_quality_issue": ("#e8820c", "marked"),
     "manual": ("#6c757d", "manual"),
 }
 
@@ -1099,9 +1325,10 @@ def _bool_badge(value: Optional[bool], yes: str, no: str) -> str:
 
 
 def _issue_counts_chart(before: dict, after: Optional[dict]) -> Optional[go.Figure]:
-    families = ["ts_gaps", "missing", "outliers", "failed_columns"]
+    families = ["timestamp_order", "ts_gaps", "missing", "outliers", "failed_columns"]
     nice = {"ts_gaps": "time gaps", "missing": "missing",
-            "outliers": "outliers", "failed_columns": "GX failed cols"}
+            "outliers": "outliers", "failed_columns": "GX failed cols",
+            "timestamp_order": "timestamp order"}
     bvals = [int(before.get(f, 0)) for f in families]
     if not any(bvals) and not after:
         return None
@@ -1136,7 +1363,7 @@ def _lifecycle_chart(comparison: dict) -> Optional[go.Figure]:
     ]
     if all(v is None for v in miss):
         return None
-    stages = ["raw", "cleaned", "remediated"]
+    stages = ["raw", "soft-cleaned", "remediated"]
     vals = [int(v) if v is not None else 0 for v in miss]
     fig = go.Figure(go.Bar(
         x=stages, y=vals, marker_color=["#1f77b4", "#e8820c", "#2ca02c"],
@@ -1314,6 +1541,91 @@ def _render_imputation_compare(impute_compare: dict) -> None:
         )
 
 
+def _guess_time_column(df: pd.DataFrame) -> str:
+    for name in df.columns:
+        low = str(name).lower()
+        if low in {"time", "timestamp", "date", "datetime"} or "time" in low:
+            return str(name)
+    return str(df.columns[0]) if len(df.columns) else "index"
+
+
+def render_raw_data_view(raw: Optional[RawDataset], selected_run: Optional["DataOpsRun"]) -> None:
+    """Raw-data landing view: source preview, quick quality, and linked runs."""
+    if raw is None:
+        st.info("No raw CSV found under `data/raw/`, and no selected report references a raw input.")
+        return
+    st.markdown(f"#### Raw data `{raw.name}`")
+    st.caption(f"Source: `{raw.path}`")
+    if not raw.path.exists():
+        st.warning("The selected raw CSV path is referenced by a report but is not present locally.")
+        return
+
+    df = load_csv(raw.path)
+    missing_cells = int(df.isna().sum().sum())
+    duplicate_rows = int(df.duplicated().sum())
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    m = st.columns(4)
+    m[0].metric("Rows", f"{len(df):,}")
+    m[1].metric("Columns", f"{df.shape[1]:,}")
+    m[2].metric("Missing cells", f"{missing_cells:,}", delta_color="inverse")
+    m[3].metric("Duplicate rows", f"{duplicate_rows:,}", delta_color="inverse")
+
+    if raw.runs:
+        rows = []
+        for r in raw.runs:
+            status = ((r.report or {}).get("validation_comparison") or {}).get(
+                "validation_status", {}
+            )
+            qsum = ((r.report or {}).get("quality") or {}).get("issue_summary", {})
+            rows.append({
+                "run": r.name,
+                "type": r.data_type,
+                "pandera": status.get("pandera_passed"),
+                "gx": ((r.report or {}).get("quality") or {}).get("gx_passed"),
+                "issues": int(sum(int(v) for v in qsum.values())),
+                "final": bool(r.final_csv and r.final_csv.exists()),
+                "report": str(r.report_path) if r.report_path else "",
+            })
+        st.markdown("##### Runs for this raw data")
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        if selected_run:
+            st.caption(f"Current dashboard context: `{selected_run.name}`")
+    else:
+        st.info("No DataOps run has been generated for this raw dataset yet.")
+
+    st.markdown("##### Raw preview & visualization")
+    p1, p2 = st.columns([1, 2])
+    with p1:
+        st.dataframe(df.head(100), width="stretch")
+    with p2:
+        if not numeric_cols:
+            st.info("No numeric columns available for quick visualization.")
+        else:
+            time_col = _guess_time_column(df)
+            feature = st.selectbox(
+                "Raw feature", options=[c for c in numeric_cols if c != time_col] or numeric_cols,
+                key=f"raw_feature_{raw.name}",
+            )
+            x = df[time_col] if time_col in df.columns else pd.Series(np.arange(len(df)))
+            x, x_label = _coerce_time_axis(x)
+            fig = go.Figure()
+            fig.add_trace(go.Scattergl(
+                x=x,
+                y=pd.to_numeric(df[feature], errors="coerce"),
+                mode="lines",
+                name=feature,
+                line=dict(color="#1f77b4", width=1.2),
+            ))
+            fig.update_layout(
+                title=f"Raw {feature}",
+                xaxis_title=x_label,
+                yaxis_title=feature,
+                height=360,
+                margin=dict(l=35, r=20, t=45, b=35),
+            )
+            st.plotly_chart(fig, width="stretch")
+
+
 def render_validation_comparison(report: dict, data_type: str,
                                  impute_compare: Optional[dict] = None) -> None:
     comparison = report.get("validation_comparison", {})
@@ -1327,7 +1639,7 @@ def render_validation_comparison(report: dict, data_type: str,
                 "`python -m pipelines.minimal_dataops` to populate it.")
         return
 
-    st.caption("Lineage:  raw → cleaned → remediated → regularized (gaps explicit) "
+    st.caption("Lineage:  raw → soft-cleaned → remediated → regularized (gaps explicit) "
                "→ **final** (imputed, gap-free)")
 
     # ---- Validation status badges ----------------------------------------
@@ -1358,7 +1670,8 @@ def render_validation_comparison(report: dict, data_type: str,
     cleaning = comparison.get("cleaning_effect", {})
     remed = comparison.get("remediation_effect", {})
     raw_rows = shape.get("raw", {}).get("rows")
-    remed_rows = shape.get("remediated", {}).get("rows", shape.get("cleaned", {}).get("rows"))
+    soft_shape = shape.get("soft_cleaned") or shape.get("cleaned", {})
+    remed_rows = shape.get("remediated", {}).get("rows", soft_shape.get("rows"))
     miss_raw = cleaning.get("missing_cells_before")
     miss_remed = remed.get("missing_cells_after", cleaning.get("missing_cells_after"))
 
@@ -1366,7 +1679,7 @@ def render_validation_comparison(report: dict, data_type: str,
     m[0].metric(
         "Final rows", f"{remed_rows:,}" if remed_rows is not None else "—",
         delta=(f"{remed_rows - raw_rows:+,}" if raw_rows is not None and remed_rows is not None else None),
-        help="raw → cleaned → remediated",
+        help="raw → soft-cleaned → remediated",
     )
     m[1].metric(
         "Missing cells", f"{miss_remed:,}" if miss_remed is not None else "—",
@@ -1419,7 +1732,7 @@ def render_validation_comparison(report: dict, data_type: str,
 
 
 def render_overview(run: Optional["DataOpsRun"]) -> None:
-    """Cleaning-first landing view: the raw→…→final lineage for one run."""
+    """Cleaning-first landing view: the raw→...→final lineage for one run."""
     if run is None or not run.report:
         st.info("No DataOps pipeline run selected. Pick a run (`reports/*.json`) in the "
                 "sidebar, or generate one with "
@@ -1436,7 +1749,7 @@ def render_overview(run: Optional["DataOpsRun"]) -> None:
     qa = rep.get("quality_after") or {}
 
     st.markdown(f"#### Run `{run.name}` · type `{run.data_type}`")
-    st.caption("Lineage:  raw → cleaned → remediated → regularized (gaps explicit) "
+    st.caption("Lineage:  raw → soft-cleaned → remediated → regularized (gaps explicit) "
                "→ **final** (imputed, gap-free)")
 
     reg_rows = None
@@ -1446,9 +1759,10 @@ def render_overview(run: Optional["DataOpsRun"]) -> None:
         except Exception:
             reg_rows = None
 
+    soft_shape = shape.get("soft_cleaned") or shape.get("cleaned", {})
     cards = [
         ("raw", run.raw_csv, shape.get("raw", {}).get("rows"), None),
-        ("cleaned", run.cleaned_csv, shape.get("cleaned", {}).get("rows"), None),
+        ("soft-cleaned", run.soft_cleaned_csv, soft_shape.get("rows"), None),
         ("remediated", run.remediated_csv, shape.get("remediated", {}).get("rows"),
          f"{remed.get('outlier_cells_clipped', 0):,} clipped"),
         ("regularized", run.prepared_dir, reg_rows, "gaps explicit"),
@@ -1498,25 +1812,45 @@ def main() -> None:
     )
 
     st.title("6G-DALI DataOps — data cleaning & imputation")
-    st.caption("One run, end to end: raw → cleaned → remediated → regularized → final (imputed). "
+    st.caption("One run, end to end: raw → soft-cleaned → remediated → regularized → final (imputed). "
                "Imputation method comparison (Darts / ImputeGAP / PyPOTS / WaveStitch+) is the "
                "detail of the final step.")
 
-    # ---- Sidebar: pick a DataOps run (unified discovery) -------------------
+    # ---- Sidebar: pick raw data first, then the run derived from it ----------
     if st.sidebar.button("Refresh runs", key="refresh_runs"):
         discover_dataops_runs.clear()
         discover_subsets.clear()
+        load_csv.clear()
+        load_csv_subset.clear()
     runs = discover_dataops_runs(REPO_ROOT / "reports", REPO_ROOT)
-    run_names = [r.name for r in runs]
+    raw_datasets = discover_raw_datasets(REPO_ROOT / "data" / "raw", runs)
+    raw: Optional[RawDataset] = None
+    if raw_datasets:
+        raw_labels = [r.label for r in raw_datasets]
+        raw_sel = st.sidebar.selectbox(
+            "Raw data",
+            raw_labels,
+            index=0,
+            help="CSV sources discovered from `data/raw/*.csv` and pipeline reports.",
+        )
+        raw = raw_datasets[raw_labels.index(raw_sel)]
+        scoped_runs = raw.runs
+    else:
+        st.sidebar.caption("No raw CSVs found under `data/raw/`.")
+        scoped_runs = runs
+
+    run_names = [r.name for r in scoped_runs]
     run: Optional[DataOpsRun] = None
     if run_names:
         sel = st.sidebar.selectbox(
-            "DataOps run", run_names, index=0,
-            help="A pipeline report under `reports/*.json` (raw→…→final lineage).",
+            "DataOps run",
+            run_names,
+            index=0,
+            help="A pipeline report for the selected raw data.",
         )
-        run = runs[run_names.index(sel)]
+        run = scoped_runs[run_names.index(sel)]
     else:
-        st.sidebar.caption("No `reports/*.json` pipeline runs found.")
+        st.sidebar.caption("No pipeline reports found for this raw data.")
 
     st.sidebar.divider()
 
@@ -1536,7 +1870,9 @@ def main() -> None:
 
     # No imputation source (no bundle, no experiment subset) → cleaning-only view.
     if subset is None:
-        t_ov, t_q = st.tabs(["Overview", "Quality & remediation"])
+        t_raw, t_ov, t_q = st.tabs(["Raw data", "Overview", "Quality & remediation"])
+        with t_raw:
+            render_raw_data_view(raw, run)
         with t_ov:
             render_overview(run)
         with t_q:
@@ -1547,9 +1883,12 @@ def main() -> None:
         return
 
     # ---- Top-level sections (cleaning-first) -------------------------------
-    tab_overview, tab_quality, tab_imp, tab_run_sec = st.tabs(
-        ["Overview", "Quality & remediation", "Imputation", "Run"]
+    tab_raw, tab_overview, tab_quality, tab_imp, tab_run_sec = st.tabs(
+        ["Raw data", "Overview", "Quality & remediation", "Imputation", "Run"]
     )
+
+    with tab_raw:
+        render_raw_data_view(raw, run)
 
     with tab_overview:
         render_overview(run)
@@ -1747,6 +2086,17 @@ def main() -> None:
     with sub_run:
         st.write("Invoke a runner on the **currently selected subset** to add new imputed CSVs to "
                  f"`{subset.generated_dir}`. The dashboard will pick them up after the run finishes.")
+        _impy, _custom = _impute_python()
+        if _custom:
+            st.caption(f"Imputation runs via `{' '.join(_impy)}` "
+                       "(`DATAOPS_IMPUTE_PYTHON` / `DATAOPS_IMPUTE_CONDA_ENV`).")
+        else:
+            st.caption("Dependency-free here: **darts** interpolation, **imputegap** statistics "
+                       "(interpolation / mean / min / zero), and **WaveStitch+ v2** when a v1 output "
+                       "exists to anchor. For methods needing a trained model / GPU libs "
+                       "(WaveStitch+ v1 & harpoon, PyPOTS, darts-kalman, imputegap cdrec/brits/…), "
+                       "tick **Run in Docker image** below, or set "
+                       "`DATAOPS_IMPUTE_CONDA_ENV=<env-with-deps>` / `DATAOPS_IMPUTE_PYTHON=…`.")
         c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
             lib = st.selectbox("Library", options=list(RUNNERS.keys()), index=0)
@@ -1905,6 +2255,26 @@ def main() -> None:
 
         # Persisted result of the previous run (survives the st.rerun() below
         # that re-renders the sidebar with the newly-produced method discovered).
+        # ---- Execution backend: Docker image vs local/conda subprocess --------
+        use_docker = st.checkbox(
+            "Run in Docker image", value=bool(os.environ.get("DATAOPS_IMPUTE_DOCKER")),
+            help="Run the method inside its prebuilt image — no heavy deps needed "
+                 "in the dashboard env. The image must be built locally.",
+        )
+        docker_image: Optional[str] = None
+        gpu = False
+        if use_docker:
+            di1, di2 = st.columns([3, 1])
+            docker_image = di1.text_input(
+                "Docker image", value=_runner_image(lib) or "",
+                key=f"docker_image_{lib}",
+                help="Your local image tag — run `docker images` to find it. Default comes "
+                     "from each app's build_image.sh; override here or via "
+                     f"DATAOPS_IMPUTE_IMAGE_{lib.upper()}.",
+            ) or None
+            gpu = di2.checkbox("GPU", value=bool(os.environ.get("DATAOPS_IMPUTE_GPU")),
+                               help="`--gpus all` (needs nvidia-docker).")
+
         prev = st.session_state.pop("last_run_result", None)
         if prev is not None:
             (st.success if prev["rc"] == 0 else st.error)(prev["msg"])
@@ -1914,8 +2284,11 @@ def main() -> None:
         run_btn = st.button("Run on selected subset", type="primary",
                             disabled=(len(splits) == 0))
         if run_btn:
-            with st.spinner(f"Running {lib}/{method} on {subset.label} ({', '.join(splits)})..."):
-                rc, out = run_experiment(lib, method, subset, splits, extra_args)
+            where = f"Docker `{docker_image or _runner_image(lib)}`" if use_docker else "subprocess"
+            with st.spinner(f"Running {lib}/{method} on {subset.label} "
+                            f"({', '.join(splits)}) via {where}..."):
+                rc, out = run_experiment(lib, method, subset, splits, extra_args,
+                                         use_docker=use_docker, gpu=gpu, image=docker_image)
             st.session_state["last_run_result"] = {
                 "rc": rc,
                 "msg": (f"{lib}/{method} done." if rc == 0
@@ -1988,13 +2361,13 @@ def main() -> None:
                 # ---- High-level summary -----------------------------------
                 summary_cols = st.columns(4)
                 summary_cols[0].metric("Raw rows",     f"{len(raw_df):,}")
-                summary_cols[1].metric("Cleaned rows", f"{len(cleaned_df):,}",
+                summary_cols[1].metric("Soft-cleaned rows", f"{len(cleaned_df):,}",
                                        delta=f"{len(cleaned_df)-len(raw_df):+d}")
                 summary_cols[2].metric("Curated rows",
                                        f"{len(curated_df):,}" if curated_df is not None else "—")
                 imputer = (report.get("ts_imputation") or {}).get("method", "—")
                 summary_cols[3].metric("Imputer", imputer)
-                st.caption(f"Raw key: `{raw_key}` · Cleaned: `{cleaned_key}` · "
+                st.caption(f"Raw key: `{raw_key}` · Soft-cleaned: `{cleaned_key}` · "
                            f"Curated: `{curated_key}`")
 
                 # ---- Column picker + plot ---------------------------------
@@ -2004,7 +2377,7 @@ def main() -> None:
                                         if pd.api.types.is_numeric_dtype(cleaned_df[c])]
                 shared = [c for c in numeric_cols_raw if c in numeric_cols_cleaned]
                 if not shared:
-                    st.warning("No numeric columns in common between raw and cleaned.")
+                    st.warning("No numeric columns in common between raw and soft-cleaned data.")
                 else:
                     time_guess = (curated_meta_dict.get("time_col") or
                                   curated_meta_dict.get("timestamp_column") or
@@ -2032,16 +2405,16 @@ def main() -> None:
                         diff_rows.append({
                             "column": c,
                             "raw_NaN": int(r.isna().sum()),
-                            "cleaned_NaN": int(cl.isna().sum()),
+                            "soft_cleaned_NaN": int(cl.isna().sum()),
                             "cells_changed": changed,
                             "mean_delta": float(diff.mean()) if len(diff) else float("nan"),
                             "max_abs_delta": float(diff.abs().max()) if len(diff) else float("nan"),
                         })
-                    st.subheader("Per-column impact (cleaned vs raw)")
+                    st.subheader("Per-column impact (soft-cleaned vs raw)")
                     diff_df = pd.DataFrame(diff_rows).set_index("column")
                     st.dataframe(
                         diff_df.style.format({
-                            "raw_NaN": "{:,}", "cleaned_NaN": "{:,}",
+                            "raw_NaN": "{:,}", "soft_cleaned_NaN": "{:,}",
                             "cells_changed": "{:,}",
                             "mean_delta": "{:.4g}", "max_abs_delta": "{:.4g}",
                         }),

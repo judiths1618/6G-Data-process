@@ -16,7 +16,7 @@ import pandas as pd
 
 from .gx import get_gx_context, summarize_gx as _summarize_gx
 
-__all__ = ["detect_time_gaps", "run", "METADATA"]
+__all__ = ["detect_time_gaps", "inspect_timestamp_order", "run", "METADATA"]
 
 
 # --------------------------------------------------------------------------- #
@@ -94,6 +94,20 @@ def detect_time_gaps(
     if grid_rows > 0:
         info["gap_pct"] = max(0.0, 1.0 - len(ts) / grid_rows)
     return info
+
+
+def inspect_timestamp_order(df: pd.DataFrame, ts_col: str) -> dict:
+    """Inspect timestamp contract issues without reordering the source frame."""
+    ts = df[ts_col]
+    diffs = _diffs_in_seconds(ts)
+    backward_steps = diffs[diffs < 0]
+    return {
+        "is_monotonic_increasing": bool(ts.is_monotonic_increasing),
+        "num_non_monotonic_steps": int(len(backward_steps)),
+        "num_duplicate_timestamps": int(ts.duplicated().sum()),
+        "num_null_timestamps": int(ts.isna().sum()),
+        "sample_non_monotonic_indices": backward_steps.index[:5].tolist(),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -194,7 +208,8 @@ def run(
                 "missing_ratio": round(float(miss_ratio), 4),
             }
 
-    # --- gaps ----------------------------------------------------------------
+    # --- timestamp integrity and gaps ----------------------------------------
+    timestamp_order = inspect_timestamp_order(df, ts_col)
     ts_diag = detect_time_gaps(
         df, ts_col, gap_factor=gap_factor, min_gap_seconds=min_gap_seconds
     )
@@ -203,7 +218,12 @@ def run(
         "ts_imputation": bool(ts_diag.get("has_gaps")),
         "tabular_imputation": bool(missing_info),
         "outlier_handling": bool(outlier_cols),
-        "structural_fix": not gx_passed,
+        "structural_fix": (
+            not gx_passed
+            or not timestamp_order["is_monotonic_increasing"]
+            or timestamp_order["num_duplicate_timestamps"] > 0
+            or timestamp_order["num_null_timestamps"] > 0
+        ),
     }
 
     return {
@@ -211,6 +231,7 @@ def run(
         "gx_passed": gx_passed,
         "gx": gx_detail,
         "issues": {
+            "timestamp_order": timestamp_order,
             "ts_gaps": ts_diag,
             "missing": missing_info,
             "outliers": sorted(set(outlier_cols)),

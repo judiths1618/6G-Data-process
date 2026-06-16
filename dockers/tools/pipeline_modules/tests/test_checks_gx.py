@@ -23,7 +23,9 @@ pytestmark = pytest.mark.skipif(
 def test_ts_checks_clean_series(regular_ts_df):
     from pipeline_modules import ts_checks
     r = ts_checks.run(regular_ts_df, ts_col="time")
-    assert set(r) == {"mode", "gx_passed", "issues", "recommendations", "summary"}
+    # ``gx`` carries the per-expectation pass/fail breakdown (added for the
+    # dashboard's failed-expectations panel) alongside the boolean ``gx_passed``.
+    assert set(r) == {"mode", "gx_passed", "gx", "issues", "recommendations", "summary"}
     assert r["mode"] == "time_series"
     assert r["issues"]["ts_gaps"]["has_gaps"] is False
     assert r["recommendations"]["ts_imputation"] is False

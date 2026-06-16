@@ -120,7 +120,7 @@ def calc_diffusion_hyperparams(T, beta_0, beta_T):
 
 
 def sampling(net, size, diffusion_hyperparams, cond, mask, only_generate_missing=0, guidance_weight=0):
-    """
+    r"""
     Perform the complete sampling step according to p(x_0|x_T) = \prod_{t=1}^T p_{\theta}(x_{t-1}|x_t)
 
     Parameters:

@@ -1,6 +1,7 @@
 # WaveStitch+ CPU image — same code as the GPU image, no CUDA runtime.
-# Build from dockers/tools/ :
-#     docker build -f Dockerfile.wavestitchplus-cpu -t wavestitchplus-cpu:latest .
+# Build via the helper script (it vendors the preprocess helper into context):
+#     bash build_image_cpu.sh            # from dockers/tools/
+# (A bare `docker build` fails the _wsp_helpers/ COPY unless you vendor it first.)
 
 FROM python:3.10-slim
 
@@ -29,6 +30,14 @@ RUN sed -i '/^torch/d; /^torchvision/d; /^torchaudio/d' /app/requirements.txt \
 
 COPY WaveStitchPlus_app/ /app/WaveStitchPlus_app/
 COPY scripts/run_pipeline.py /app/run_pipeline.py
+
+# Bundle the canonical preprocess helper so the WaveStitchPlus shim
+# (WaveStitchPlus_app/custom_pipeline/preprocess.py) resolves it standalone.
+# That shim adds `<app>/../../airflow/dags/helpers` → /airflow/dags/helpers
+# (in-image) to sys.path, so we place the file exactly there — no PYTHONPATH or
+# shim edit needed. The file lives outside this build context; build_image_cpu.sh
+# vendors it into ./_wsp_helpers/ before building.
+COPY _wsp_helpers/preprocess.py /airflow/dags/helpers/preprocess.py
 
 ENV WORK_DIR=/tmp/wavestitch
 

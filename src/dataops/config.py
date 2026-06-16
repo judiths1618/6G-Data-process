@@ -10,7 +10,9 @@ import yaml
 DEFAULT_CONFIG: dict[str, Any] = {
     "input": "data/raw/input.csv",
     "output": "data/processed/clean.csv",
-    # Conservative-clean frame (before remediation). null → <output_stem>_cleaned.csv.
+    # Soft-cleaned frame (before remediation). null → <output_stem>_cleaned.csv.
+    "soft_cleaned_output": None,
+    # Backward-compatible alias for older configs/reports.
     "cleaned_output": None,
     "report": "reports/dataops_report.json",
     "log_file": "logs/dataops.log",

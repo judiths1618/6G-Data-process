@@ -19,6 +19,7 @@ class CleaningReport:
     dropped_duplicate_rows: int
     dropped_empty_rows: int
     column_mapping: dict[str, str]
+    duplicate_timestamps: int = 0   # rows collapsed because they shared a timestamp (keep last)
 
 
 def snake_case(name: object) -> str:
@@ -106,8 +107,21 @@ def clean_dataframe(
     after_empty = len(cleaned)
     before_dupes = len(cleaned)
     cleaned = drop_duplicate_rows(cleaned, subset=duplicate_subset)
+    dropped_duplicate_rows = before_dupes - len(cleaned)
+
+    # Duplicate timestamps (same time, possibly different values) are a quality
+    # issue for a time series — a unique timeline is required downstream
+    # (regularization, validation). Collapse them keep-last (the policy
+    # transform.preprocess also uses) and record the count so it's marked rather
+    # than crashing later validation.
+    duplicate_timestamps = 0
     if datetime_column:
-        cleaned = coerce_datetime(cleaned, snake_case(datetime_column))
+        ts = snake_case(datetime_column)
+        cleaned = coerce_datetime(cleaned, ts)
+        if ts in cleaned.columns and cleaned[ts].duplicated().any():
+            before_ts = len(cleaned)
+            cleaned = cleaned.drop_duplicates(subset=[ts], keep="last")
+            duplicate_timestamps = before_ts - len(cleaned)
 
     report = CleaningReport(
         input_rows=input_rows,
@@ -115,8 +129,9 @@ def clean_dataframe(
         input_columns=input_columns,
         output_columns=len(cleaned.columns),
         dropped_empty_rows=before_empty - after_empty,
-        dropped_duplicate_rows=before_dupes - len(cleaned),
+        dropped_duplicate_rows=dropped_duplicate_rows,
         column_mapping=column_mapping,
+        duplicate_timestamps=duplicate_timestamps,
     )
     return cleaned.reset_index(drop=True), report
 

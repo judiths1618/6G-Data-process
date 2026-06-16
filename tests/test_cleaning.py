@@ -50,3 +50,17 @@ def test_coerce_datetime_still_parses_iso_strings():
     df = pd.DataFrame({"time": ["2026-01-01 00:00:00", "2026-01-01 00:01:00"]})
     out = coerce_datetime(df, "time")
     assert out["time"].dt.year.eq(2026).all()
+
+
+def test_clean_dataframe_collapses_duplicate_timestamps_keep_last():
+    # same timestamp, different values → collapse keep-last (not a crash later)
+    df = pd.DataFrame({
+        "time": [1636553178, 1636553178, 1636553188],
+        "value": [1.0, 2.0, 3.0],
+    })
+    cleaned, report = clean_dataframe(df, datetime_column="time")
+    assert report.duplicate_timestamps == 1
+    assert cleaned["time"].is_unique
+    assert len(cleaned) == 2
+    # keep-last → the duplicate timestamp keeps value 2.0
+    assert cleaned.loc[cleaned["time"] == cleaned["time"].min(), "value"].iloc[0] == 2.0

@@ -33,10 +33,11 @@ def test_minimal_pipeline_writes_clean_data_and_report(tmp_path):
     assert report["cleaning"]["column_mapping"] == {"Time": "time", "CPU Usage": "cpu_usage"}
     assert report_json.exists()
     # the conservative-clean frame is also persisted as its own artifact
-    cleaned_artifact = Path(report["cleaned_output"])
-    assert cleaned_artifact.exists()
-    assert cleaned_artifact.name == "clean_cleaned.csv"
-    assert list(pd.read_csv(cleaned_artifact).columns) == ["time", "cpu_usage"]
+    soft_cleaned_artifact = Path(report["soft_cleaned_output"])
+    assert soft_cleaned_artifact.exists()
+    assert soft_cleaned_artifact.name == "clean_cleaned.csv"
+    assert report["cleaned_output"] == report["soft_cleaned_output"]
+    assert list(pd.read_csv(soft_cleaned_artifact).columns) == ["time", "cpu_usage"]
 
 
 def test_minimal_pipeline_can_run_from_config(tmp_path):
@@ -84,6 +85,41 @@ def test_minimal_pipeline_writes_report_on_validation_failure(tmp_path):
 
     assert report_json.exists()
     assert '"pandera_passed": false' in report_json.read_text(encoding="utf-8")
+
+
+def test_minimal_pipeline_marks_non_monotonic_timestamp_as_quality_issue(tmp_path):
+    input_csv = tmp_path / "raw.csv"
+    output_csv = tmp_path / "processed" / "clean.csv"
+    report_json = tmp_path / "reports" / "report.json"
+    pd.DataFrame({"time": [1, 3, 2, 4], "value": [0.5, 0.7, 0.6, 0.8]}).to_csv(
+        input_csv, index=False
+    )
+
+    report = run_pipeline(
+        str(input_csv),
+        str(output_csv),
+        str(report_json),
+        timestamp_col="time",
+        validation_config={
+            "mode": "time_series",
+            "require_timestamp_monotonic": True,
+        },
+    )
+
+    assert output_csv.exists()
+    assert report_json.exists()
+    assert report["validation"]["pandera_passed"] is True
+    assert report["validation"]["errors"] == []
+    assert report["cleaning"]["non_monotonic_timestamps"] == 1
+    assert report["quality"]["issue_summary"]["timestamp_order"] >= 1
+    assert any(
+        action["issue"] == "timestamp_not_monotonic"
+        for action in report["quality"]["action_plan"]
+    )
+    assert report["validation_comparison"]["cleaning_effect"][
+        "non_monotonic_timestamps_sorted"
+    ] == 1
+    assert report["validation_comparison"]["validation_status"]["pandera_passed"] is True
 
 
 def test_minimal_pipeline_handles_arbitrary_tabular_data(tmp_path):
@@ -222,5 +258,10 @@ def test_minimal_pipeline_reports_quality_actions_and_visual_comparison(tmp_path
         for action in report["quality"]["action_plan"]
     )
     assert report["validation_comparison"]["dataset_shape"]["raw"]["rows"] == 4
+    assert report["validation_comparison"]["dataset_shape"]["soft_cleaned"]["rows"] == 4
     assert report["validation_comparison"]["dataset_shape"]["cleaned"]["rows"] == 4
+    assert any(
+        row["stage"] == "soft_cleaned"
+        for row in report["validation_comparison"]["chart_ready"]
+    )
     assert report["validation_comparison"]["chart_ready"]
