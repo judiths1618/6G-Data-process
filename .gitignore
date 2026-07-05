@@ -18,6 +18,14 @@ logs/*
 !reports/.gitkeep
 !logs/.gitkeep
 
+# Regenerable experiment / scratch outputs (never source — recreate by running
+# the pipeline + method runners; see the GPU-server instructions in the README).
+# Unanchored `generated/` matches a dir named exactly `generated` at any depth
+# (the pipeline's <name>_generated/ dirs are covered by data/processed/* above).
+generated/
+/experiments/
+notebooks/work/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

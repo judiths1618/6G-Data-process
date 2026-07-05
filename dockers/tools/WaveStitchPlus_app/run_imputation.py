@@ -260,6 +260,16 @@ def run(args: argparse.Namespace) -> List[Path]:
         written.append(out_csv)
 
     _cleanup_native_artifacts(prepared, output_dir)
+
+    # ---- final: stitch the imputed train + imputed test into one gap-free CSV
+    if str(APP_DIR) not in sys.path:
+        sys.path.insert(0, str(APP_DIR))
+    from wsp_final import build_wsp_final
+
+    final = build_wsp_final(prepared, output_dir, args.method)
+    if final is not None:
+        written.append(final)
+
     return written
 
 

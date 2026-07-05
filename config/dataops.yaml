@@ -1,15 +1,22 @@
-# input: data/raw/user_0_sample_0_antenna_0.csv
-# output: data/processed/user_0_sample_0_antenna_0_clean.csv
-# input: data/raw/golang-web-server-performance.csv
-# output: data/processed/golang-web-server-performance_clean.csv   # content = remediated frame
-# input: data/raw/python-web-server-performance.csv
-# output: data/processed/python-web-server-performance_clean.csv   # content = remediated frame
+# Stage-based file naming — every artifact derives from the dataset <name>:
+#   data/processed/<name>_soft_cleaned.csv   (conservative cleaning)
+#   data/processed/<name>_remediated.csv     (= `output`; per-issue fixes)
+#   data/processed/<name>_regularized/       (prepared bundle; gaps explicit)
+#   data/processed/<name>_generated/         (imputed splits + *_final)
+#   data/processed/<name>_final.csv          (gap-free; imputed train + test)
+#   reports/<name>_report.json  ·  reports/<name>_imputation_compare.json
+#
+# Other datasets (swap the two paths, or override with --input/--output/--report):
+#   data/raw/amf-performance.csv                 → data/processed/amf-performance_remediated.csv
+#   data/raw/golang-web-server-performance.csv   → ..._remediated.csv
+#   data/raw/python-web-server-performance.csv   → ..._remediated.csv
+#   data/raw/user_0_sample_0_antenna_0.csv       → ..._remediated.csv  (tabular; no imputation)
 
 input: data/raw/rabbitmq-performance.csv
-output: data/processed/rabbitmq-performance_clean.csv
-soft_cleaned_output:                              # soft-cleaned frame; null → <output_stem>_cleaned.csv
+output: data/processed/rabbitmq-performance_remediated.csv
+soft_cleaned_output:                              # null → <name>_soft_cleaned.csv
 cleaned_output:                                   # backward-compatible alias for soft_cleaned_output
-report: reports/rabbitmq-performance_clean_report.json
+report: reports/rabbitmq-performance_report.json
 log_file: logs/rabbitmq-performance-dataops.log
 timestamp_col:
 

@@ -94,13 +94,16 @@ def main(argv: list[str] | None = None) -> int:
         final_path = Path(args.final_path)
     else:
         out_csv = Path(report.get("output", "data/processed/clean.csv"))
-        final_path = out_csv.with_name(out_csv.stem + "_final.csv")
+        base = out_csv.stem.removesuffix("_remediated")
+        final_path = out_csv.with_name(f"{base}_final.csv")
     final = build_final_dataset(
         prepared_dir, method=method, output_path=final_path, engine=args.engine,
+        lib=result["lib"], bundle_result=result, imputed_dir=result["output_dir"],
     )
 
     out = {"imputation": result, "comparison": comparison, "final_dataset": final}
-    compare_path = report_path.with_name(report_path.stem + "_imputation_compare.json")
+    cbase = report_path.stem.removesuffix("_report")
+    compare_path = report_path.with_name(f"{cbase}_imputation_compare.json")
     compare_path.write_text(json.dumps(out, indent=2, default=str) + "\n", encoding="utf-8")
 
     # ---- summary ----------------------------------------------------------

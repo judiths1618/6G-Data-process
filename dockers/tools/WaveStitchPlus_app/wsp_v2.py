@@ -26,8 +26,8 @@ nearest observed value:
 Cells adjacent to an observation (d=1 → w≈1) follow the prior (where it is
 near-optimal); cells deep inside a long gap (large d → w→0) fall back to the
 diffusion, which is where its multivariate/long-range structure is the only
-signal available. ``hard_prior`` forces full-prior up to a distance, and a
-large ``tau`` makes the prior dominate everywhere (best on these smooth series).
+signal available. ``hard_prior`` forces full-prior up to a distance. Keep it
+small if v2 should remain visibly different from the nearest baseline.
 
 This module is import-friendly (no side effects) so the runner and the
 comparison harness can both call :func:`anchor_blend` and :func:`build_prior`.
@@ -111,6 +111,47 @@ def load_meta(prepared_dir: Path) -> dict:
         return json.load(f)
 
 
+def _pick_prior_per_col(
+    full: pd.DataFrame,
+    target_cols: List[str],
+    *,
+    frac: float = 0.2,
+    min_obs: int = 8,
+    seed: int = 0,
+) -> Dict[str, str]:
+    """Per-column choose ``"nearest"`` vs ``"linear"`` using ONLY observed data.
+
+    Internal, unsupervised cross-check (never touches ``test_gt``): hide a random
+    subset of *interior* observed points in each column, interpolate the rest
+    with each method, and keep the lower-MAE method for that column. Trending
+    columns (latency, ram) pick ``linear``; near-constant / noisy ones pick
+    ``nearest``. Columns with too few observations default to ``linear``.
+    """
+    rng = np.random.default_rng(seed)
+    choice: Dict[str, str] = {}
+    for c in target_cols:
+        s = full[c]
+        vals = s.to_numpy(dtype=float)
+        obs = np.where(~np.isnan(vals))[0]
+        if len(obs) < min_obs:
+            choice[c] = "linear"
+            continue
+        interior = obs[1:-1]  # keep endpoints so held points are interpolatable
+        k = max(1, int(round(len(interior) * frac)))
+        held = rng.choice(interior, size=min(k, len(interior)), replace=False)
+        truth = vals[held]
+        errs = {}
+        for m in ("nearest", "linear"):
+            s2 = s.copy()
+            s2.iloc[held] = np.nan
+            f = s2.interpolate(method=m, limit_direction="both").ffill().bfill()
+            pred = f.to_numpy(dtype=float)[held]
+            good = ~np.isnan(pred) & ~np.isnan(truth)
+            errs[m] = float(np.mean(np.abs(pred[good] - truth[good]))) if good.any() else np.inf
+        choice[c] = "nearest" if errs["nearest"] < errs["linear"] else "linear"
+    return choice
+
+
 def build_prior(
     train_df: Optional[pd.DataFrame],
     test_input: pd.DataFrame,
@@ -123,7 +164,9 @@ def build_prior(
     are anchored by the trailing train history (the context v1 synthesis lacks),
     then returns only the test rows. Observed test cells are preserved exactly.
 
-    ``method``: "linear" (pandas interpolate) or "nearest" (nearest observed).
+    ``method``: ``"linear"``, ``"nearest"``, or ``"auto"`` — the last selects
+    per column (unsupervised, on observed data) via :func:`_pick_prior_per_col`,
+    so trending columns use linear and near-constant ones use nearest.
     """
     n_train = 0 if train_df is None else len(train_df)
     if train_df is None:
@@ -133,13 +176,17 @@ def build_prior(
             [train_df[target_cols], test_input[target_cols]], ignore_index=True
         )
 
+    per_col = _pick_prior_per_col(full, target_cols) if method == "auto" else None
+    if per_col is not None:
+        n_lin = sum(v == "linear" for v in per_col.values())
+        print(f"[WaveStitch+ v2] auto prior: {n_lin} linear / "
+              f"{len(per_col) - n_lin} nearest (per column, unsupervised)")
+
     filled = full.copy()
     for c in target_cols:
         s = full[c]
-        if method == "nearest":
-            f = s.interpolate(method="nearest", limit_direction="both")
-        else:
-            f = s.interpolate(method="linear", limit_direction="both")
+        col_method = per_col[c] if per_col is not None else method
+        f = s.interpolate(method=col_method, limit_direction="both")
         # Edges / all-NaN columns: ffill+bfill, then column mean, then 0.
         f = f.ffill().bfill()
         if f.isna().any():
@@ -180,8 +227,8 @@ def anchor_blend(
     diffusion: pd.DataFrame,
     prior: pd.DataFrame,
     target_cols: List[str],
-    tau: float = 12.0,
-    hard_prior: int = 4,
+    tau: float = 4.0,
+    hard_prior: int = 1,
     has_left_context: bool = True,
     monotone_groups: Optional[List[List[str]]] = None,
 ) -> pd.DataFrame:

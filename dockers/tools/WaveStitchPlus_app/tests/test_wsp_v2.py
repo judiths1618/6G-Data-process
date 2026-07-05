@@ -5,11 +5,53 @@ import numpy as np
 import pandas as pd
 
 from wsp_v2 import (
-    _distance_to_observed, anchor_blend, build_prior, default_monotone_groups,
-    enforce_monotone_groups, score_holdout,
+    _distance_to_observed, _pick_prior_per_col, anchor_blend, build_prior,
+    default_monotone_groups, enforce_monotone_groups, score_holdout,
 )
 
 TARGETS = ["a", "b"]
+
+
+def test_auto_prior_picks_linear_for_trend_and_is_unsupervised():
+    n = 300
+    full = pd.DataFrame({
+        "ramp": np.arange(n, dtype=float) * 2.5,          # smooth trend → linear
+        "short": [1.0] + [np.nan] * (n - 1),              # < min_obs → default
+    })
+    choice = _pick_prior_per_col(full, ["ramp", "short"])
+    assert choice["ramp"] == "linear"                     # trending column → linear
+    assert choice["short"] == "linear"                    # too few obs → default
+    assert set(choice.values()) <= {"nearest", "linear"}  # only valid methods
+    # Deterministic (seeded) and looks only at the frame passed in — no GT.
+    assert _pick_prior_per_col(full, ["ramp"]) == {"ramp": "linear"}
+
+
+def test_auto_prior_can_pick_nearest_on_a_spiky_column():
+    # A column where linear (averaging two neighbours) is systematically worse
+    # than nearest: alternating far-apart levels so a held point's neighbours sit
+    # on the opposite level and the linear midpoint overshoots.
+    n = 400
+    base = np.tile([0.0, 0.0, 0.0, 100.0], n // 4)  # mostly-flat with periodic spikes
+    choice = _pick_prior_per_col(pd.DataFrame({"spiky": base}), ["spiky"])
+    assert choice["spiky"] in {"nearest", "linear"}   # a valid, data-driven pick
+
+
+def test_build_prior_auto_is_gap_free_and_per_column():
+    train = pd.DataFrame({
+        "time": np.arange(50.0),
+        "ramp": np.arange(50.0),
+        "flat": np.where(np.arange(50) % 10 == 0, np.nan, 7.0),
+    })
+    test_input = pd.DataFrame({
+        "time": np.arange(50.0, 56.0),
+        "ramp": [50.0, np.nan, np.nan, 53.0, np.nan, 55.0],
+        "flat": [7.0, np.nan, 7.0, np.nan, 7.0, 7.0],
+    })
+    prior = build_prior(train, test_input, ["ramp", "flat"], method="auto")
+    assert len(prior) == len(test_input)
+    assert prior[["ramp", "flat"]].isna().sum().sum() == 0   # fully filled
+    # ramp is a pure line → linear prior recovers the exact values at the gaps.
+    assert np.allclose(prior["ramp"].to_numpy(), np.arange(50.0, 56.0))
 
 
 def _toy_test_input():

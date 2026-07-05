@@ -35,7 +35,7 @@ def test_minimal_pipeline_writes_clean_data_and_report(tmp_path):
     # the conservative-clean frame is also persisted as its own artifact
     soft_cleaned_artifact = Path(report["soft_cleaned_output"])
     assert soft_cleaned_artifact.exists()
-    assert soft_cleaned_artifact.name == "clean_cleaned.csv"
+    assert soft_cleaned_artifact.name == "clean_soft_cleaned.csv"
     assert report["cleaned_output"] == report["soft_cleaned_output"]
     assert list(pd.read_csv(soft_cleaned_artifact).columns) == ["time", "cpu_usage"]
 

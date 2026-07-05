@@ -296,8 +296,9 @@ def _build_handoff(
         return handoff
 
     if imputation_cfg.get("build_bundle", True) and ts_col:
-        prepared_dir = imputation_cfg.get("prepared_dir") or (
-            str(Path(output_csv).with_suffix("")) + "_prepared"
+        _base = Path(output_csv).stem.removesuffix("_remediated")
+        prepared_dir = imputation_cfg.get("prepared_dir") or str(
+            Path(output_csv).with_name(f"{_base}_regularized")
         )
         try:
             from data_process_modules.transform import preprocess_csv
@@ -545,8 +546,9 @@ def run_pipeline(
     output_path = Path(output_csv)
     report_path = Path(report_json)
     soft_cleaned_csv = soft_cleaned_csv or cleaned_csv
+    _base = output_path.stem.removesuffix("_remediated")
     soft_cleaned_path = Path(soft_cleaned_csv) if soft_cleaned_csv else output_path.with_name(
-        output_path.stem + "_cleaned" + output_path.suffix
+        f"{_base}_soft_cleaned{output_path.suffix}"
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)

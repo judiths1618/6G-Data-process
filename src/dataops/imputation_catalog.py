@@ -56,7 +56,7 @@ CATALOG: dict[str, dict] = {
         "known_failing": ["saits"],
     },
     "WaveStitchPlus": {
-        "methods": ["v1", "v2"],
+        "methods": ["v1", "v2", "v2_tuned"],
         "default": "v2",
         "known_failing": [],
     },

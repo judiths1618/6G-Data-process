@@ -13,6 +13,11 @@ both `train.csv` and `test_input.csv` and de-standardizes back. Original
 observed cells are kept exactly as-is so the comparison reflects imputation
 quality, not reconstruction noise.
 
+Long series are handled by **windowed inference** (``--window``): the series is
+tiled into fixed-length windows batched along the sample axis, so attention cost
+stays O(window**2) instead of O(series_len**2). Without this a 100k-step series
+OOMs. Overlapping windows (``--stride`` < window) are averaged on stitch.
+
 Methods: saits, brits, transformer, gpvae, mrnn, csdi, usgan, timesnet
 (only those available in your installed PyPOTS will work).
 """
@@ -45,6 +50,67 @@ def fit_train_scaler(train: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
 def to_pypots_sample(arr: np.ndarray) -> np.ndarray:
     return arr.astype(np.float32)[None, ...]
+
+
+# --- Windowed inference ---------------------------------------------------
+# PyPOTS models fix ``n_steps`` at build time and attention is O(n_steps**2),
+# so feeding a whole long series as one (1, n_steps, F) window OOMs. Instead we
+# tile the series into fixed-length windows, batch them along the sample axis
+# (n_windows, window, F), and stitch overlaps back by averaging.
+
+def _window_starts(n_rows: int, window: int, stride: int) -> List[int]:
+    """Window start indices covering ``[0, n_rows)``; the last is aligned to the
+    end so the tail is never dropped."""
+    if n_rows <= window:
+        return [0]
+    starts = list(range(0, n_rows - window + 1, stride))
+    if starts[-1] != n_rows - window:
+        starts.append(n_rows - window)
+    return starts
+
+
+def _to_windows(arr: np.ndarray, starts: List[int], window: int) -> np.ndarray:
+    """Stack ``(n_windows, window, F)`` float32 windows; the array is padded with
+    NaN (treated as missing by PyPOTS) when shorter than one window."""
+    if arr.shape[0] < window:
+        pad = np.full((window - arr.shape[0], arr.shape[1]), np.nan, dtype=arr.dtype)
+        arr = np.concatenate([arr, pad], axis=0)
+    return np.stack([arr[s:s + window] for s in starts]).astype(np.float32)
+
+
+def _stitch(win_arr: np.ndarray, starts: List[int], window: int,
+            n_rows: int, n_features: int) -> np.ndarray:
+    """Reconstruct ``(n_rows, F)`` from windows, averaging overlapping cells."""
+    acc = np.zeros((n_rows, n_features), dtype=np.float64)
+    cnt = np.zeros((n_rows, 1), dtype=np.float64)
+    for i, s in enumerate(starts):
+        end = min(s + window, n_rows)
+        acc[s:end] += win_arr[i, : end - s]
+        cnt[s:end] += 1.0
+    cnt[cnt == 0] = 1.0
+    return acc / cnt
+
+
+def _impute_batch(model, windows: np.ndarray) -> np.ndarray:
+    """Impute a batch of windows → ``(n_windows, window, F)``."""
+    out = model.impute({"X": windows.astype(np.float32)})
+    if isinstance(out, dict):
+        out = out.get("imputation", out.get("X"))
+    out = np.asarray(out)
+    if out.ndim == 2:
+        out = out[None, ...]
+    return out
+
+
+def _impute_series(model, series_norm: np.ndarray, window: int, stride: int) -> np.ndarray:
+    """Window → impute → stitch a normalized ``(L, F)`` series (same L back)."""
+    L, F = series_norm.shape
+    starts = _window_starts(L, window, stride)
+    wins = _to_windows(series_norm, starts, window)
+    out = _impute_batch(model, wins)
+    if L <= window:
+        return out[0, :L]
+    return _stitch(out, starts, window, L, F)
 
 
 def build_model(method: str, n_steps: int, n_features: int, args: argparse.Namespace):
@@ -107,16 +173,6 @@ def build_model(method: str, n_steps: int, n_features: int, args: argparse.Names
     raise ValueError(f"Unknown PyPOTS method '{method}'")
 
 
-def _impute_window(model, normalized: np.ndarray) -> np.ndarray:
-    out = model.impute({"X": to_pypots_sample(normalized)})
-    if isinstance(out, dict):
-        out = out.get("imputation", out.get("X"))
-    out = np.asarray(out)
-    if out.ndim == 3:
-        out = out[0]
-    return out
-
-
 def _ckpt_path(model_path: str, method: str, n_steps: int, n_features: int) -> Path:
     """Checkpoint file for a (method, window-length, feature-count) combination.
 
@@ -128,8 +184,9 @@ def _ckpt_path(model_path: str, method: str, n_steps: int, n_features: int) -> P
 
 
 def _prepare_model(method: str, n_steps: int, n_features: int,
-                   args: argparse.Namespace, normalized: np.ndarray):
-    """Build a model and either load saved weights (skipping training) or fit it.
+                   args: argparse.Namespace, train_windows: np.ndarray):
+    """Build a model and either load saved weights (skipping training) or fit it
+    on ``train_windows`` — a ``(n_windows, n_steps, n_features)`` batch.
 
     With ``--load-model`` and an existing checkpoint for this exact shape, the
     weights are loaded and training is skipped — the WaveStitch+-style
@@ -144,7 +201,7 @@ def _prepare_model(method: str, n_steps: int, n_features: int,
         print(f"[PyPOTS] loaded {ckpt} (training skipped)")
         return model
 
-    model.fit({"X": to_pypots_sample(normalized)})
+    model.fit({"X": train_windows.astype(np.float32)})
     if args.save_model and ckpt is not None:
         ckpt.parent.mkdir(parents=True, exist_ok=True)
         model.save(str(ckpt), overwrite=True)
@@ -168,10 +225,20 @@ def run(args: argparse.Namespace) -> List[Path]:
     mean, std = fit_train_scaler(train_arr)
     train_norm = (train_arr - mean) / std
 
-    print(f"[PyPOTS] train shape={train_arr.shape}  method={args.method}  "
+    # Window length caps attention cost; the model is built with n_steps=window,
+    # so train and every inference series are tiled into equal windows.
+    n_rows, n_features = train_arr.shape
+    window = args.window if args.window and args.window > 0 else n_rows
+    window = min(window, n_rows)
+    stride = args.stride if args.stride and args.stride > 0 else window
+    stride = min(stride, window)
+    train_starts = _window_starts(n_rows, window, stride)
+    train_windows = _to_windows(train_norm, train_starts, window)
+
+    print(f"[PyPOTS] train shape={train_arr.shape}  window={window}  "
+          f"n_windows={len(train_starts)}  method={args.method}  "
           f"epochs={args.epochs}  batch_size={args.batch_size}")
-    model = _prepare_model(args.method, train_arr.shape[0], train_arr.shape[1],
-                           args, train_norm)
+    model = _prepare_model(args.method, window, n_features, args, train_windows)
 
     written: List[Path] = []
     for kind in args.inputs:
@@ -188,21 +255,10 @@ def run(args: argparse.Namespace) -> List[Path]:
         arr = df[cur_targets].to_numpy(dtype=np.float64)
         nan_before = int(np.isnan(arr).sum())
 
-        # If shape differs from the training window, build a fresh model of the
-        # right size and warm-start it from the fitted weights when possible.
-        if arr.shape != train_arr.shape:
-            print(f"[PyPOTS]   {kind} window {arr.shape} != train {train_arr.shape}; "
-                  f"using a same-size model for {kind}")
-            local_mean, local_std = fit_train_scaler(arr)
-            local_norm = (arr - local_mean) / local_std
-            local_model = _prepare_model(args.method, arr.shape[0], arr.shape[1],
-                                         args, local_norm)
-            imputed_norm = _impute_window(local_model, local_norm)
-            filled = imputed_norm * local_std + local_mean
-        else:
-            arr_norm = (arr - mean) / std
-            imputed_norm = _impute_window(model, arr_norm)
-            filled = imputed_norm * std + mean
+        # Same window length as training; tile → impute → stitch.
+        arr_norm = (arr - mean) / std
+        imputed_norm = _impute_series(model, arr_norm, window, stride)
+        filled = imputed_norm * std + mean
 
         # Only fill cells that were originally missing.
         miss_mask = np.isnan(arr)
@@ -234,7 +290,14 @@ def main() -> None:
     p.add_argument("--inputs", nargs="+", default=["train", "test"],
                    choices=list(INPUT_FILES.keys()))
     p.add_argument("--epochs", type=int, default=200)
-    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--window", type=int, default=100,
+                   help="window length (n_steps) the model is built for; the series is "
+                        "tiled into windows of this size. 0 = whole series (legacy; OOMs "
+                        "on long series because attention is O(n_steps**2)).")
+    p.add_argument("--stride", type=int, default=0,
+                   help="window stride; 0 → = window (non-overlapping). Smaller = more "
+                        "overlap, averaged on stitch.")
     # Optional checkpointing — the WaveStitch+-style train-once / reuse pattern.
     p.add_argument("--model-path", default=None,
                    help="directory for checkpoints; required by --save-model/--load-model")

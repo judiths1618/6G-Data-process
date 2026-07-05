@@ -1,5 +1,7 @@
 import numpy as np
 # import random
+import os
+
 import torch
 # from torch.optim import Adam
 # from tqdm import tqdm
@@ -58,6 +60,8 @@ except:
     has_cauchy_extension = False
 
 try:  # Try pykeops
+    if os.getenv("WAVESTITCH_DISABLE_PYKEOPS") == "1":
+        raise ImportError("pykeops disabled by WAVESTITCH_DISABLE_PYKEOPS")
     import pykeops
     from pykeops.torch import Genred
 

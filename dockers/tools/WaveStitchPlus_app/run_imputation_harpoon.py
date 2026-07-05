@@ -23,6 +23,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import List
 
@@ -33,6 +34,14 @@ APP_DIR = Path(__file__).resolve().parent
 
 def _env_for_device(device: str) -> dict:
     env = os.environ.copy()
+    cache_root = Path(tempfile.gettempdir())
+    mpl_cache = cache_root / "wavestitchplus_matplotlib"
+    keops_cache = cache_root / "wavestitchplus_keops"
+    mpl_cache.mkdir(parents=True, exist_ok=True)
+    keops_cache.mkdir(parents=True, exist_ok=True)
+    env.setdefault("MPLCONFIGDIR", str(mpl_cache))
+    env.setdefault("PYKEOPS_CACHE_FOLDER", str(keops_cache))
+    env.setdefault("KEOPS_CACHE_FOLDER", str(keops_cache))
     if device == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
     return env
@@ -60,8 +69,15 @@ def _publish_train_output(prepared: Path, output_dir: Path) -> Path | None:
     train_imputed = prepared / "train_imputed_denorm.csv"
     train_input = prepared / "train.csv"
     if not train_imputed.exists():
-        print("[HARPOON] skip train output: train_imputed_denorm.csv not present")
-        return None
+        # v1's run_imputation.py removes train_imputed_denorm.csv from the bundle
+        # after publishing it as wavestitchplus_v1_train_imputed.csv; reuse that so
+        # a v1→harpoon sequence still emits the train split (and a full final).
+        published = output_dir / "wavestitchplus_v1_train_imputed.csv"
+        if published.exists():
+            train_imputed = published
+        else:
+            print("[HARPOON] skip train output: train_imputed_denorm.csv not present")
+            return None
     imp = pd.read_csv(train_imputed)
     if train_input.exists():
         imp = _fill_missing_only(pd.read_csv(train_input), imp)
@@ -80,6 +96,7 @@ def _run_synthesis(prepared: Path, out_csv: Path, args: argparse.Namespace,
         "-prepared_dir", str(prepared.resolve()),
         "-out_csv", str(out_csv.resolve()),
         "-model_type", "em",
+        "-model_tag", args.model_tag,
         "-clamp_mode", "bounds",
         "-repaint_rounds", str(args.repaint_rounds),
         "-guidance_scale", str(args.guidance_scale),
@@ -87,6 +104,11 @@ def _run_synthesis(prepared: Path, out_csv: Path, args: argparse.Namespace,
         "-n_trials", "1",
         "-bound_lambda", str(args.bound_lambda),
         "-bound_power", str(args.bound_power),
+        "-project_bounds", str(args.project_bounds),
+        "-prior_lambda", str(args.prior_lambda),
+        "-prior_method", str(args.prior_method),
+        "-smooth_lambda", str(args.smooth_lambda),
+        "-monotone_lambda", str(args.monotone_lambda),
         "-pos_eps", str(args.pos_eps),
         "-auto_ub_q", str(args.auto_ub_q),
         "-auto_ub_pad", str(args.auto_ub_pad),
@@ -123,6 +145,15 @@ def run(args: argparse.Namespace) -> List[Path]:
         if tr is not None:
             written.append(tr)
 
+    # ---- final: stitch the imputed train + imputed test into one gap-free CSV
+    if str(APP_DIR) not in sys.path:
+        sys.path.insert(0, str(APP_DIR))
+    from wsp_final import build_wsp_final
+
+    final = build_wsp_final(prepared, output_dir, "harpoon")
+    if final is not None:
+        written.append(final)
+
     return written
 
 
@@ -140,11 +171,25 @@ def main() -> None:
     p.add_argument("--ddim-steps", type=int, default=50)
     p.add_argument("--repaint-rounds", type=int, default=3)
     p.add_argument("--guidance-scale", type=float, default=0.1)
+    p.add_argument("--model-tag", default="v1",
+                   help="checkpoint tag produced by WaveStitch+ v1 training")
     # HARPOON-specific knobs.
     p.add_argument("--bound-lambda", type=float, default=0.3,
                    help="weight on the manifold-bound penalty (0 = vanilla v1)")
     p.add_argument("--bound-power", type=float, default=2.0,
                    help="hinge-penalty exponent (HARPOON p)")
+    p.add_argument("--project-bounds", type=str, default="True",
+                   choices=["True", "False", "true", "false"],
+                   help="project imputed x0 cells into HARPOON bounds after "
+                        "the gradient step")
+    p.add_argument("--prior-lambda", type=float, default=0.25,
+                   help="soft HARPOON guidance weight toward a local prior")
+    p.add_argument("--prior-method", default="nearest", choices=["nearest", "linear"],
+                   help="local prior used by HARPOON's manifold guidance")
+    p.add_argument("--smooth-lambda", type=float, default=0.02,
+                   help="soft temporal smoothness guidance weight")
+    p.add_argument("--monotone-lambda", type=float, default=0.05,
+                   help="soft latency-percentile monotonicity guidance weight")
     p.add_argument("--pos-eps", type=float, default=1e-6,
                    help="positivity epsilon (raw-scale lb floor)")
     p.add_argument("--auto-ub-q", type=float, default=0.99,

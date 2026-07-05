@@ -47,8 +47,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-# All demo results live under experiments/ (local-demo convention). The canonical
-# imputation tree is experiments/EUR/{prepared_<subset>, generated_<subset>}.
+# Canonical results live under data/processed: the pipeline writes each stage as
+# <name>_{soft_cleaned,remediated,regularized/,generated/,final}, and every method's
+# outputs + finals land in <name>_generated/. The dashboard reads this one place.
 DEFAULT_WORK_ROOT = REPO_ROOT / "data" / "processed"
 
 RUNNERS = {
@@ -71,7 +72,7 @@ RUNNER_METHODS = {
     ],
     "pypots": ["saits", "brits", "transformer", "gpvae", "mrnn", "csdi", "usgan", "timesnet"],
     "wavestitchplus": ["v1", "em", "standard"],
-    "wavestitchplus_v2": ["anchored"],
+    "wavestitchplus_v2": ["anchored", "tuned"],
     "wavestitchplus_harpoon": ["harpoon"],
 }
 
@@ -183,7 +184,20 @@ class RawDataset:
         return f"{self.name}{suffix}"
 
 
-@st.cache_data(show_spinner=False)
+def _generated_dir_for(prepared: Path) -> Path:
+    """Sibling generated dir for a regularized/prepared bundle. Handles the
+    stage-based ``<base>_regularized`` → ``<base>_generated`` layout and the
+    legacy ``prepared_<base>`` / ``<base>_prepared`` → ``generated_...`` ones."""
+    n = prepared.name
+    if n.endswith("_regularized"):
+        return prepared.parent / f"{n.removesuffix('_regularized')}_generated"
+    if n.startswith("prepared_"):
+        return prepared.parent / f"generated_{n.removeprefix('prepared_')}"
+    return prepared.parent / f"generated_{n}"
+
+
+# NOT @st.cache_data: returns script-defined Subset dataclasses, which st.cache_data
+# cannot pickle (UnserializableReturnValueError). Directory scan is cheap.
 def discover_subsets(work_root: Path) -> List[Subset]:
     """Discover prepared bundles under ``work_root`` (fallback for the run picker).
 
@@ -201,16 +215,18 @@ def discover_subsets(work_root: Path) -> List[Subset]:
     candidates = [work_root] + sorted(p for p in work_root.iterdir() if p.is_dir())
     seen: set = set()
     for ds_dir in candidates:
-        for prep in sorted(ds_dir.glob("*prepared*")):
+        bundles = sorted({*ds_dir.glob("*regularized*"), *ds_dir.glob("*prepared*")})
+        for prep in bundles:
             if prep in seen or not prep.is_dir() or not (prep / "meta.json").exists():
                 continue
             seen.add(prep)
-            if prep.name.startswith("prepared_"):       # experiments/EUR layout
+            if prep.name.endswith("_regularized"):        # stage-based layout
+                name = prep.name.removesuffix("_regularized")
+            elif prep.name.startswith("prepared_"):       # experiments/EUR layout
                 name = prep.name.removeprefix("prepared_")
-                gen = ds_dir / f"generated_{name}"
-            else:                                         # data/processed layout
+            else:                                         # legacy data/processed layout
                 name = prep.name.removesuffix("_prepared")
-                gen = ds_dir / f"generated_{prep.name}"
+            gen = _generated_dir_for(prep)
             out.append(Subset(
                 dataset=ds_dir.name,
                 name=name,
@@ -250,9 +266,7 @@ class DataOpsRun:
         """Expose the regularized bundle as a Subset for the imputation workbench."""
         if not self.prepared_dir or not (self.prepared_dir / "meta.json").exists():
             return None
-        gen = self.generated_dir or (
-            self.prepared_dir.parent / f"generated_{self.prepared_dir.name}"
-        )
+        gen = self.generated_dir or _generated_dir_for(self.prepared_dir)
         return Subset(dataset=self.name, name="run", prepared_dir=self.prepared_dir,
                       generated_dir=gen)
 
@@ -357,7 +371,9 @@ def _produced_key(lib: str, method: str) -> str:
     return f"{lib}/{method}"
 
 
-@st.cache_data(show_spinner=False)
+# NOT @st.cache_data: it pickles the return, and pickling the script-defined
+# ImputedFile dataclass fails (UnserializableReturnValueError). The glob is cheap
+# and staying uncached means newly-produced method outputs appear immediately.
 def _discover_imputed_files_by_dir(generated_dir: Optional[Path], split: str) -> Dict[str, "ImputedFile"]:
     out: Dict[str, ImputedFile] = {}
     if not generated_dir or not generated_dir.exists():
@@ -420,6 +436,52 @@ def discover_imputed_files(subset: Subset, split: str) -> Dict[str, ImputedFile]
     """Public wrapper around the cached discoverer (keyed on the path, not the
     unhashable Subset dataclass)."""
     return _discover_imputed_files_by_dir(subset.generated_dir, split)
+
+
+# Gap-free final datasets: ``wavestitchplus_<variant>_final.csv`` (imputed train +
+# imputed test) plus the DataOps report's own ``*_final.csv``.
+FINAL_WSP_RE = re.compile(r"^wavestitchplus_(?P<variant>.+)_final\.csv$")
+
+
+def discover_final_files(generated_dir: Optional[Path],
+                         run: Optional["DataOpsRun"] = None) -> Dict[str, Path]:
+    """Map label → path for gap-free ``*_final.csv`` datasets found in the
+    generated dir, plus the pipeline run's own final (auto_impute)."""
+    out: Dict[str, Path] = {}
+    if generated_dir and generated_dir.exists():
+        for p in sorted(generated_dir.glob("*_final.csv")):
+            m = FINAL_WSP_RE.match(p.name)
+            label = f"wavestitchplus/{m.group('variant')}" if m else p.stem
+            out[label] = p
+    final_csv = getattr(run, "final_csv", None)
+    if final_csv and Path(final_csv).exists():
+        out.setdefault(f"pipeline · {Path(final_csv).name}", Path(final_csv))
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def load_raw_timeline(prepared_dir: Path, feature: str, time_col: str
+                      ) -> Tuple[Optional[pd.DataFrame], Optional[float]]:
+    """Concat the RAW gappy inputs (train.csv + test_input.csv) on time+feature so
+    a final can be diffed against the cells it filled. Returns (df, train→test
+    boundary time)."""
+    frames: List[pd.DataFrame] = []
+    boundary: Optional[float] = None
+    for split in ("train", "test"):
+        fp = prepared_dir / INPUT_FILES[split]
+        if not fp.exists():
+            continue
+        try:
+            d = pd.read_csv(fp, usecols=[time_col, feature])
+        except (ValueError, KeyError):
+            continue
+        if split == "train" and len(d):
+            boundary = float(pd.to_numeric(d[time_col], errors="coerce").max())
+        frames.append(d)
+    if not frames:
+        return None, None
+    raw = pd.concat(frames, ignore_index=True).drop_duplicates(subset=[time_col], keep="last")
+    return raw, boundary
 
 
 @st.cache_data(show_spinner=False)
@@ -501,7 +563,9 @@ def plot_feature_comparison(input_df: pd.DataFrame,
                             time_col: str,
                             holdout_mask: Optional[np.ndarray] = None,
                             show_context_lines: bool = False,
-                            max_bands: int = 30) -> go.Figure:
+                            max_bands: int = 30,
+                            final_overlays: Optional[Dict[str, pd.DataFrame]] = None,
+                            ) -> go.Figure:
     fig = go.Figure()
 
     # Render the time axis as wall-clock dates whenever the column is datetime
@@ -598,6 +662,29 @@ def plot_feature_comparison(input_df: pd.DataFrame,
                 showlegend=True, hoverinfo="skip", visible="legendonly",
             ))
 
+    # 6) Final overlay(s): the gap-free final's values aligned to this split by
+    #    time — a solid line + filled circles at the fill positions, so on the
+    #    train split you can see the final carries this split's imputed values.
+    if final_overlays:
+        fin_colors = ["#111111", "#5b2c6f", "#0b5345", "#8c6d31"]
+        for i, (key, fdf) in enumerate(final_overlays.items()):
+            if feature not in fdf.columns or len(fdf) != len(miss_mask):
+                continue
+            fvals = fdf[feature].to_numpy(dtype=float)
+            c = fin_colors[i % len(fin_colors)]
+            fig.add_trace(go.Scattergl(
+                x=x, y=fvals, mode="lines", name=f"{key} (final)",
+                line=dict(color=c, width=1.5), opacity=0.8, connectgaps=False,
+                hovertemplate=f"<b>{key} final</b><br>t=%{{x}}<br>y=%{{y}}<extra></extra>",
+            ))
+            if miss_mask.any():
+                fig.add_trace(go.Scattergl(
+                    x=x_arr[miss_mask], y=fvals[miss_mask], mode="markers",
+                    name=f"{key} (final) · fill", marker=dict(symbol="circle", size=6, color=c),
+                    showlegend=False,
+                    hovertemplate=f"<b>{key} final fill</b><br>t=%{{x}}<br>y=%{{y}}<extra></extra>",
+                ))
+
     fig.update_layout(
         height=520,
         margin=dict(l=40, r=20, t=40, b=40),
@@ -607,6 +694,77 @@ def plot_feature_comparison(input_df: pd.DataFrame,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="closest",
         uirevision="ts-plot",
+    )
+    return fig
+
+
+def plot_final_timeline(final_df: pd.DataFrame,
+                        raw_df: Optional[pd.DataFrame],
+                        feature: str,
+                        time_col: str,
+                        boundary_x: Optional[float] = None,
+                        max_bands: int = 30) -> go.Figure:
+    """Full stitched timeline for a FINAL dataset (imputed train + imputed test).
+
+    Observed cells (kept from the raw input) draw as the connected series; cells
+    that were NaN in the raw ``train.csv``/``test_input.csv`` draw as imputed-fill
+    ×-markers over a "was gap" band. A dashed line marks the train→test boundary.
+    """
+    fig = go.Figure()
+    fdf = (final_df.sort_values(time_col).reset_index(drop=True)
+           if time_col in final_df.columns else final_df.reset_index(drop=True))
+    if time_col in fdf.columns:
+        x, x_label = _coerce_time_axis(fdf[time_col])
+    else:
+        x, x_label = pd.Series(fdf.index), "row index"
+    x_arr = np.asarray(x)
+    final_vals = fdf[feature].to_numpy(dtype=float)
+
+    # "was gap" = NaN in the raw input at this time, present in the final.
+    was_gap = np.zeros(len(fdf), dtype=bool)
+    if raw_df is not None and feature in raw_df.columns and time_col in raw_df.columns:
+        merged = fdf[[time_col]].merge(
+            raw_df[[time_col, feature]].rename(columns={feature: "_raw"}),
+            on=time_col, how="left")
+        raw_vals = merged["_raw"].to_numpy(dtype=float)
+        was_gap = np.isnan(raw_vals) & ~np.isnan(final_vals)
+        _add_missing_bands(fig, x, np.isnan(raw_vals), label="was gap", max_bands=max_bands)
+
+    # Observed series (break the line at the imputed cells so fills read as ×).
+    obs_vals = final_vals.copy()
+    obs_vals[was_gap] = np.nan
+    fig.add_trace(go.Scattergl(
+        x=x, y=obs_vals, mode="lines+markers", name="observed",
+        connectgaps=False, line=dict(color="#1f3b73", width=2),
+        marker=dict(size=4, color="#1f3b73"),
+        hovertemplate="<b>observed</b><br>t=%{x}<br>y=%{y}<extra></extra>",
+    ))
+    if was_gap.any():
+        fig.add_trace(go.Scattergl(
+            x=x_arr[was_gap], y=final_vals[was_gap], mode="markers",
+            name="imputed (final)",
+            marker=dict(symbol="x", size=7, color="#d62728",
+                        line=dict(width=1, color="#d62728")),
+            hovertemplate="<b>imputed</b><br>t=%{x}<br>y=%{y}<extra></extra>",
+        ))
+    if boundary_x is not None:
+        bx, _ = _coerce_time_axis(pd.Series([boundary_x]))
+        bxv = np.asarray(bx)[0]
+        # add_shape/add_annotation avoid add_vline's annotation-center math, which
+        # does (x0+x1)/2 and blows up on a datetime axis (datetime + datetime).
+        fig.add_shape(type="line", x0=bxv, x1=bxv, y0=0, y1=1,
+                      xref="x", yref="paper",
+                      line=dict(color="#888", width=1, dash="dash"))
+        fig.add_annotation(x=bxv, y=1.0, xref="x", yref="paper", showarrow=False,
+                           text="train → test", xanchor="left",
+                           font=dict(size=10, color="#888"))
+
+    fig.update_layout(
+        height=520, margin=dict(l=40, r=20, t=40, b=40),
+        title=f"{feature}  —  final (imputed train + imputed test)",
+        xaxis_title=x_label, yaxis_title=feature,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        hovermode="closest", uirevision="final-plot",
     )
     return fig
 
@@ -738,7 +896,7 @@ def load_long_gap_fills(generated_dir: Optional[Path], prepared_dir: Path, gap_l
     train = pd.read_csv(prepared_dir / "train.csv") if (prepared_dir / "train.csv").exists() else None
     near = v2.build_prior(train, ti, tcols, method="nearest")
     lin = v2.build_prior(train, ti, tcols, method="linear")
-    wsp2 = v2.anchor_blend(ti, diff, near, tcols, tau=20.0, hard_prior=8,
+    wsp2 = v2.anchor_blend(ti, diff, near, tcols, tau=4.0, hard_prior=1,
                            has_left_context=train is not None)
     preds = {"nearest": near, "linear": lin, "wsp_v1": diff, "wsp_v2": wsp2}
     return ti, gt, preds, tcols
@@ -1094,7 +1252,9 @@ def run_experiment(library: str,
     # retrain. Applies to both the Docker and subprocess paths.
     reuse_note = ""
     if library == "wavestitchplus_v2" and "--reuse-diffusion" not in extra_args:
-        v1 = _find_v1_output(output_dir, splits[0] if splits else "test")
+        # v2 always anchors the TEST split internally, so --reuse-diffusion must be
+        # the v1 TEST output regardless of which split(s) the user selected.
+        v1 = _find_v1_output(output_dir, "test")
         if v1 is not None:
             extra_args = list(extra_args) + ["--reuse-diffusion", str(v1)]
             reuse_note = (f"v2 anchored an existing v1 output (`{v1.name}`) — "
@@ -1495,14 +1655,16 @@ def _render_imputation_compare(impute_compare: dict) -> None:
     comp = impute_compare.get("comparison") or {}
     imp = impute_compare.get("imputation") or {}
     method = imp.get("method") or comp.get("method") or "?"
+    lib = imp.get("lib") or "darts"
 
     if final:
         filled = final.get("gaps_before", 0) - final.get("gaps_after", 0)
         st.success(
-            f"**Final cleaned data** → `{final.get('path')}`  ·  "
+            f"**Final cleaned data** (imputed train + imputed test) → "
+            f"`{final.get('path')}`  ·  "
             f"{final.get('rows', 0):,} rows × {len(final.get('columns', []))} cols  ·  "
             f"gaps filled {filled:,}/{final.get('gaps_before', 0):,} via "
-            f"darts/{method} (residual {final.get('gaps_after', 0):,})"
+            f"{lib}/{method} (residual {final.get('gaps_after', 0):,})"
         )
 
     splits = comp.get("splits", {})
@@ -1731,6 +1893,15 @@ def render_validation_comparison(report: dict, data_type: str,
         )
 
 
+@st.cache_data(show_spinner=False)
+def _row_count(path: Path) -> Optional[int]:
+    """Row count of a CSV (reads one column; cached)."""
+    try:
+        return int(pd.read_csv(path, usecols=[0]).shape[0])
+    except Exception:
+        return None
+
+
 def render_overview(run: Optional["DataOpsRun"]) -> None:
     """Cleaning-first landing view: the raw→...→final lineage for one run."""
     if run is None or not run.report:
@@ -1752,6 +1923,34 @@ def render_overview(run: Optional["DataOpsRun"]) -> None:
     st.caption("Lineage:  raw → soft-cleaned → remediated → regularized (gaps explicit) "
                "→ **final** (imputed, gap-free)")
 
+    # ---- pick the DELIVERED final among all this run's gap-free finals ----------
+    finals_all = discover_final_files(run.generated_dir, run)
+    pipeline_final_name = Path(final["path"]).name if final.get("path") else None
+    canon_label, canon_path = None, None
+    if finals_all:
+        labels = list(finals_all)
+        default_ix = next((i for i, k in enumerate(labels)
+                           if pipeline_final_name and Path(finals_all[k]).name == pipeline_final_name), 0)
+        key = f"delivered_final::{run.name}"
+        if key not in st.session_state:
+            st.session_state[key] = labels[default_ix]
+        canon_label = st.selectbox(
+            "Delivered final (交付版)", options=labels, key=key,
+            help="Which gap-free final to treat as THE delivered dataset for this run — "
+                 "it drives the `final` stage below. All finals live under "
+                 "data/processed; WaveStitch+ v2 usually beats the pipeline `nearest` default.",
+        )
+        canon_path = Path(finals_all[canon_label])
+    elif final.get("path"):
+        canon_path = Path(final["path"])
+    elif run.final_csv:
+        canon_path = Path(run.final_csv)
+
+    canon_exists = bool(canon_path and Path(canon_path).exists())
+    canon_rows = (_row_count(canon_path) if canon_exists else None) or final.get("rows")
+    is_pipeline_canon = bool(pipeline_final_name and canon_path
+                             and Path(canon_path).name == pipeline_final_name)
+
     reg_rows = None
     if run.prepared_dir and (run.prepared_dir / "meta.json").exists():
         try:
@@ -1766,7 +1965,8 @@ def render_overview(run: Optional["DataOpsRun"]) -> None:
         ("remediated", run.remediated_csv, shape.get("remediated", {}).get("rows"),
          f"{remed.get('outlier_cells_clipped', 0):,} clipped"),
         ("regularized", run.prepared_dir, reg_rows, "gaps explicit"),
-        ("final", run.final_csv, final.get("rows"), "gap-free" if final else "not built yet"),
+        ("final", canon_path, canon_rows, f"gap-free · {canon_label}" if canon_exists
+         else "not built yet"),
     ]
     cols = st.columns(5)
     for c, (stage, path, rows, note) in zip(cols, cards):
@@ -1793,11 +1993,28 @@ def render_overview(run: Optional["DataOpsRun"]) -> None:
         f"<span style='color:#888;font-size:.85em'>({handoff.get('reason', '')})</span>",
         unsafe_allow_html=True,
     )
-    if final.get("path"):
-        filled = final.get("gaps_before", 0) - final.get("gaps_after", 0)
-        st.success(f"★ Final cleaned data: `{final['path']}` · {final.get('rows', 0):,} rows · "
-                   f"gaps filled {filled:,} (residual {final.get('gaps_after', 0):,})")
-    st.caption("→ full breakdown in **Quality & remediation**; method comparison in the imputation tabs.")
+    if canon_exists:
+        if is_pipeline_canon and final.get("path"):
+            filled = final.get("gaps_before", 0) - final.get("gaps_after", 0)
+            st.success(f"★ Delivered final [{canon_label or 'pipeline'}]: `{canon_path}` · "
+                       f"{canon_rows:,} rows · gaps filled {filled:,} "
+                       f"(residual {final.get('gaps_after', 0):,})")
+        else:
+            st.success(f"★ Delivered final [{canon_label}]: `{canon_path}` · "
+                       f"{canon_rows:,} rows · gap-free")
+
+    # Every gap-free FINAL for this run, all under data/processed; the selected one
+    # (★ delivered) drives the `final` stage card above.
+    if finals_all:
+        with st.expander(f"All final datasets for this run ({len(finals_all)}) "
+                         f"— unified under `data/processed/`", expanded=True):
+            for label, p in finals_all.items():
+                n = _row_count(Path(p))
+                star = " ★ delivered" if label == canon_label else ""
+                st.caption(f"　✓ **{label}**{star} → `{p}`"
+                           + (f" · {n:,} rows · gap-free" if n else ""))
+    st.caption("→ full breakdown in **Quality & remediation**; per-method comparison and the "
+               "stitched-timeline plot in the **Imputation → Final** tab.")
 
 
 # ---------------------------------------------------------------------------
@@ -1819,7 +2036,7 @@ def main() -> None:
     # ---- Sidebar: pick raw data first, then the run derived from it ----------
     if st.sidebar.button("Refresh runs", key="refresh_runs"):
         discover_dataops_runs.clear()
-        discover_subsets.clear()
+        # discover_subsets is no longer cached (returns script-defined dataclasses).
         load_csv.clear()
         load_csv_subset.clear()
     runs = discover_dataops_runs(REPO_ROOT / "reports", REPO_ROOT)
@@ -1962,31 +2179,98 @@ def main() -> None:
             gt_df_plot = load_csv_subset(gt_path, needed_for_plot)
         imputed_dfs_plot = {k: load_csv_subset(available[k].path, needed_for_plot) for k in selected}
 
-        sub_ts, sub_metrics, sub_dist, sub_longgap = st.tabs(
-            ["Time series", "Metrics", "Distribution", "Long-gap"]
+        sub_ts, sub_metrics, sub_dist, sub_final, sub_longgap = st.tabs(
+            ["Time series", "Metrics", "Distribution", "Final", "Long-gap"]
         )
 
     sub_run, sub_pipe = tab_run_sec.tabs(["Run experiment", "Pipeline run"])
 
     # ---- Imputation › Time series -----------------------------------------
     with sub_ts:
+        # Optionally overlay the gap-free final(s), aligned to THIS split by time —
+        # on the train split this shows the final carries the imputed-train values.
+        final_overlays_plot: Dict[str, pd.DataFrame] = {}
+        finals_ts = discover_final_files(subset.generated_dir, run)
+        if finals_ts:
+            overlay_keys = st.multiselect(
+                f"Overlay final(s) on the '{split}' split", options=list(finals_ts),
+                default=[], key="final_overlay_pick",
+                help="Aligns each gap-free *_final.csv to this split by timestamp — "
+                     "confirms the final carries this split's imputed values.",
+            )
+            for k in overlay_keys:
+                fdf = load_csv_subset(finals_ts[k], needed_for_plot)
+                if time_col in fdf.columns and time_col in input_df_plot.columns:
+                    aligned = input_df_plot[[time_col]].merge(
+                        fdf[[time_col, feature]], on=time_col, how="left")
+                    final_overlays_plot[k] = aligned
+
         holdout = load_holdout_mask(subset.prepared_dir) if split == "test" else None
         fig = plot_feature_comparison(
             input_df_plot, gt_df_plot, imputed_dfs_plot, feature, time_col,
             holdout_mask=holdout,
             show_context_lines=show_context_lines,
             max_bands=max_bands,
+            final_overlays=final_overlays_plot,
         )
         st.plotly_chart(fig, width="stretch")
 
         with st.expander("How to read this plot"):
             st.markdown("""
+This view is **per split** (`test` or `train`). It compares each method's fill
+against the *observed* input and, on `test`, the held-out *ground truth*:
+
 - **Dark-blue line + markers** — values *observed* in the input (no imputation applied).
 - **Green open diamonds** — ground-truth values at *masked-for-evaluation* positions (only available on the `test` split).
 - **Colored ×-markers** — values produced by each selected method at positions that were NaN in the input.
 - **Light dotted lines** — the full per-method imputed series for context (off by default; enable in *Plot options*).
 - **Gray vertical bands** — positions that are NaN in both input and GT (truly missing — no GT score possible).
+- **Dark solid line + filled circles** — an overlaid **final** dataset aligned to this split (enable via *Overlay final(s)*); circles mark its fill at the missing cells. On the `train` split this is how the imputed-train data surfaces.
+
+The **Final** sub-tab shows the same final as one gap-free `train`+`test`
+timeline; its `test`-range fill is the *imputed* value, **not** the ground truth.
 """)
+
+    # ---- Imputation › Final (imputed train + imputed test) ----------------
+    with sub_final:
+        finals = discover_final_files(subset.generated_dir, run)
+        if not finals:
+            st.info(
+                "No `*_final.csv` yet. The pipeline writes one via "
+                "`scripts/auto_impute.py`, and each WaveStitch+ run writes "
+                "`wavestitchplus_<variant>_final.csv`. The final stitches the "
+                "**imputed train + imputed test** into one gap-free timeline."
+            )
+        else:
+            fc = st.columns([2, 2])
+            fkey = fc[0].selectbox("Final dataset", options=list(finals),
+                                   key="final_pick")
+            f_idx = feature_options.index(feature) if feature in feature_options else 0
+            ffeat = fc[1].selectbox("Feature", options=feature_options, index=f_idx,
+                                    key="final_feature")
+            fpath = finals[fkey]
+            fdf = load_csv_subset(fpath, tuple(dict.fromkeys([time_col, ffeat])))
+            raw_df, boundary = load_raw_timeline(subset.prepared_dir, ffeat, time_col)
+            st.plotly_chart(
+                plot_final_timeline(fdf, raw_df, ffeat, time_col,
+                                    boundary_x=boundary, max_bands=max_bands),
+                width="stretch",
+            )
+            if raw_df is not None and ffeat in raw_df.columns:
+                merged = fdf[[time_col]].merge(
+                    raw_df[[time_col, ffeat]].rename(columns={ffeat: "_r"}),
+                    on=time_col, how="left")
+                n_imp = int(merged["_r"].isna().sum())
+                residual = int(fdf[ffeat].isna().sum())
+                st.caption(
+                    f"`{fpath.name}` · {len(fdf):,} rows · **{ffeat}**: "
+                    f"{len(fdf) - n_imp:,} observed + {n_imp:,} imputed · "
+                    f"{residual} gaps remaining. The `test`-range fill is the "
+                    f"**imputed** value, not `test_gt` ground truth."
+                )
+            else:
+                st.caption(f"`{fpath.name}` · {len(fdf):,} rows "
+                           "(raw inputs unavailable to mark imputed cells).")
 
     # ---- Imputation › Metrics ---------------------------------------------
     with sub_metrics:
@@ -2171,10 +2455,16 @@ def main() -> None:
                 "WaveStitch+ **v2** reuses the existing trained model (synthesis only, "
                 "no retrain) and **locally anchors** the diffusion output to a "
                 "context-aware interpolation prior. It reads the saved model for this "
-                "subset and writes `wavestitchplus_v2_<split>_imputed.csv` — the prepared "
-                "dir is not mutated.",
+                "subset and writes `wavestitchplus_v2_<split>_imputed.csv` (or "
+                "`wavestitchplus_v2_tuned_<split>_imputed.csv` for tuned mode) — "
+                "the prepared dir is not mutated.",
                 icon="🧭",
             )
+            if method == "tuned":
+                st.caption(
+                    "`tuned` scans prior/tau/hard-prior on this subset's `test_gt.csv`; "
+                    "use it as an evaluation preset, not an unsupervised production default."
+                )
             device = st.radio(
                 "Device", options=["auto", "cpu", "gpu"], index=0, horizontal=True,
                 key="wsp_v2_device",
@@ -2182,21 +2472,25 @@ def main() -> None:
             )
             cv1, cv2, cv3, cv4 = st.columns(4)
             prior = cv1.selectbox(
-                "Prior", options=["nearest", "linear"], index=0,
-                help="interpolation prior on concat(train,test); 'nearest' matches the "
-                     "strongest darts baseline.",
+                "Prior", options=["auto", "nearest", "linear"], index=0,
+                help="interpolation prior on concat(train,test); 'auto' picks nearest vs "
+                     "linear per column (unsupervised) — this is what lets v2 beat the "
+                     "single nearest/linear baselines.",
             )
             ddim = cv2.number_input("DDIM steps", min_value=5, max_value=200, value=50,
                                     step=5, help="synthesis steps for the diffusion output")
             tau = cv3.number_input(
-                "tau (prior reach)", min_value=1.0, max_value=200.0, value=20.0, step=1.0,
+                "tau (prior reach)", min_value=1.0, max_value=200.0, value=8.0, step=1.0,
                 help="prior-weight decay length; larger = trust the prior deeper into gaps. "
-                     "The smooth 6G series favour a large tau.",
+                     "Conservative by default — on these holdouts the diffusion is weaker "
+                     "than nearest even at depth.",
             )
             hard_prior = cv4.number_input(
-                "hard-prior dist", min_value=0, max_value=64, value=8, step=1,
-                help="cells within this distance of an observation follow the prior exactly "
-                     "(where interpolation is near-optimal and the diffusion adds only noise).",
+                "hard-prior dist", min_value=0, max_value=64, value=32, step=1,
+                help="cells within this distance of an observation follow the prior exactly; "
+                     "diffusion blends in only beyond it. Default 32 (≈ receptive field) makes "
+                     "v2 ≈ the auto interpolation on natural holdouts; lower it to expose more "
+                     "diffusion in long gaps.",
             )
             extra_args = [
                 "--device", device,
@@ -2208,10 +2502,9 @@ def main() -> None:
 
         elif lib == "wavestitchplus_harpoon":
             st.info(
-                "WaveStitch+ **HARPOON** runs inference-time *manifold-bound* "
-                "guidance on the pre-trained model (no retrain). The penalty "
-                "is auto-derived from observed data: `[pos_eps, "
-                "quantile(observed, auto_ub_q) * (1 + auto_ub_pad)]` per target.",
+                "WaveStitch+ **HARPOON** runs inference-time manifold guidance "
+                "on the pre-trained model (no retrain): value bounds plus local "
+                "prior, smoothness, and latency-percentile monotonicity penalties.",
                 icon="🎯",
             )
             device = st.radio(
@@ -2243,10 +2536,31 @@ def main() -> None:
                 "hard-project positive (final pass: floor at pos_eps)",
                 value=False, key="harpoon_hard_pos",
             )
+            hp1, hp2, hp3, hp4 = st.columns(4)
+            prior_lambda = hp1.number_input(
+                "prior_lambda", min_value=0.0, max_value=10.0, value=0.25, step=0.05,
+                help="soft guidance toward a context-aware nearest/linear prior.",
+            )
+            prior_method = hp2.selectbox(
+                "prior", options=["nearest", "linear"], index=0,
+                help="local prior used inside HARPOON guidance.",
+            )
+            smooth_lambda = hp3.number_input(
+                "smooth_lambda", min_value=0.0, max_value=10.0, value=0.02, step=0.01,
+                help="soft temporal smoothness guidance.",
+            )
+            monotone_lambda = hp4.number_input(
+                "monotone_lambda", min_value=0.0, max_value=10.0, value=0.05, step=0.01,
+                help="soft monotonicity guidance for latency percentile groups.",
+            )
             extra_args = [
                 "--device", device,
                 "--ddim-steps", str(int(ddim)),
                 "--bound-lambda", str(float(bound_lambda)),
+                "--prior-lambda", str(float(prior_lambda)),
+                "--prior-method", prior_method,
+                "--smooth-lambda", str(float(smooth_lambda)),
+                "--monotone-lambda", str(float(monotone_lambda)),
                 "--auto-ub-q", str(float(auto_ub_q)),
                 "--auto-ub-pad", str(float(auto_ub_pad)),
             ]
@@ -2299,7 +2613,8 @@ def main() -> None:
                 # Drop cached lookups and rerun so the sidebar's multiselect picks
                 # up the new file in the same click; auto-select the produced key.
                 st.session_state["last_run_key"] = _produced_key(lib, method)
-                _discover_imputed_files_by_dir.clear()
+                # _discover_imputed_files_by_dir is no longer cached (always fresh);
+                # only the CSV-content caches need clearing to pick up the new file.
                 load_csv.clear()
                 load_csv_subset.clear()
             st.rerun()

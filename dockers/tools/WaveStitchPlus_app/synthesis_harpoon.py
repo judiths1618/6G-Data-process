@@ -3,8 +3,9 @@
 Applies HARPOON's inference-time manifold-bound guidance during the RePaint-DDIM
 reverse loop — no retraining required. The pre-trained WaveStitch+ checkpoint
 acts as the unconditional denoiser; HARPOON guides each step toward the
-observed-data feasible box ``[lb, ub]`` (in z-space), with an optional hard
-positive projection at the end.
+observed-data feasible box ``[lb, ub]`` (in z-space), and can additionally
+guide imputed cells toward a context-aware local prior, temporal smoothness,
+and latency-percentile monotonicity.
 
 The script mirrors ``synthesis_improved.py``'s I/O so it integrates with the
 existing pipeline (``prepared_<subset>/`` layout, FlexibleScaler, ValueBounds,
@@ -13,8 +14,12 @@ existing pipeline (``prepared_<subset>/`` layout, FlexibleScaler, ValueBounds,
 
 Algorithm (per imputed target cell):
     pen(x) = ReLU(x - ub)^p + ReLU(lb - x)^p
-    loss_HARPOON = bound_lambda * Σ over imputed-cells [ pen(x0_pred) ]
-    total guidance loss = l1 (stitch) + l2 (obs consistency) + loss_HARPOON
+    loss = bound_lambda * pen(x0)
+         + prior_lambda * ||x0 - local_prior||²
+         + smooth_lambda * ||Δx0||²
+         + monotone_lambda * ReLU(lat_p - lat_q)²
+    x0 <- x0 - guidance_scale * ∇ loss
+    x0 <- project(x0, [lb, ub])  # optional, on imputed target cells only
 
 Bounds are auto-derived from observed data (per target column) as
 ``[pos_eps, quantile(observed, auto_ub_q) * (1 + auto_ub_pad)]``, then mapped
@@ -47,6 +52,7 @@ sys.path.insert(0, str(APP_DIR))
 from helper.training_utils import MyDataset, fetchModel, fetchDiffusionConfig  # noqa: E402
 import synthesis_improved as si  # noqa: E402
 from custom_pipeline.directory_manager import get_save_dir, get_generated_dir  # noqa: E402
+from wsp_v2 import build_prior, default_monotone_groups  # noqa: E402
 
 
 # =============================================================================
@@ -108,26 +114,101 @@ class HarpoonDDIMSynthesizer(si.RePaintDDIMSynthesizer):
     """RePaint-DDIM + HARPOON manifold-bound guidance.
 
     ``lb``/``ub`` are *normalized* (z-space) per-target tensors of shape
-    ``[n_target]`` matching the model's input space; ``bound_lambda`` scales
-    the penalty within the same autograd target as l1/l2.
+    ``[n_target]`` matching the model's input space. Unlike the legacy version,
+    HARPOON guidance is applied directly to the current clean-sample estimate
+    (the dirty estimate) before the DDIM transition is formed.
     """
 
     def __init__(self, *args, lb: torch.Tensor, ub: torch.Tensor,
-                 bound_lambda: float = 0.3, bound_power: float = 2.0, **kw):
+                 bound_lambda: float = 0.3, bound_power: float = 2.0,
+                 project_bounds: bool = True, prior_lambda: float = 0.0,
+                 smooth_lambda: float = 0.0, monotone_lambda: float = 0.0,
+                 monotone_groups: list | None = None, **kw):
         super().__init__(*args, **kw)
         self.lb = lb
         self.ub = ub
         self.bound_lambda = float(bound_lambda)
         self.bound_power = float(bound_power)
-        print(f"[HARPOON] bound_lambda={self.bound_lambda} bound_power={self.bound_power}")
+        self.project_bounds = bool(project_bounds)
+        self.prior_lambda = float(prior_lambda)
+        self.smooth_lambda = float(smooth_lambda)
+        self.monotone_lambda = float(monotone_lambda)
+        self.monotone_groups = monotone_groups or []
+        self._prior_batch = None
+        print(f"[HARPOON] bound_lambda={self.bound_lambda} "
+              f"bound_power={self.bound_power} project_bounds={self.project_bounds} "
+              f"prior_lambda={self.prior_lambda} smooth_lambda={self.smooth_lambda} "
+              f"monotone_lambda={self.monotone_lambda}")
+
+    def synthesize_batch(self, test_batch, synth_mask_batch, obs_mask_batch, prior_batch=None):
+        self._prior_batch = prior_batch
+        try:
+            return super().synthesize_batch(test_batch, synth_mask_batch, obs_mask_batch)
+        finally:
+            self._prior_batch = None
 
     def _extra_guidance_loss(self, x0c, obs_mask_batch_f, synth_mask_batch_f, test_batch):
-        if self.bound_lambda <= 0 or self.lb is None:
-            return torch.zeros((), device=x0c.device)
-        tgt = x0c[:, :, self.target_indices]                 # [B, W, n_target]
-        pen = bound_penalty(tgt, synth_mask_batch_f,
-                            self.lb, self.ub, self.bound_power)
-        return self.bound_lambda * pen
+        # HARPOON is handled by _correct_x0 below. Keeping this as zero avoids
+        # mixing a manifold penalty into the older indirect gradient on x_in.
+        return torch.zeros((), device=x0c.device)
+
+    def _correct_x0(self, x0c, obs_mask_batch_f, synth_mask_batch_f, test_batch):
+        if (
+            self.bound_lambda <= 0
+            and self.prior_lambda <= 0
+            and self.smooth_lambda <= 0
+            and self.monotone_lambda <= 0
+        ):
+            return x0c
+
+        out = x0c.clone()
+        tgt = out[:, :, self.target_indices].detach().requires_grad_(True)
+        mask = synth_mask_batch_f
+        loss = torch.zeros((), device=x0c.device)
+
+        if self.bound_lambda > 0 and self.lb is not None:
+            loss = loss + self.bound_lambda * bound_penalty(
+                tgt, mask, self.lb, self.ub, self.bound_power,
+            ).sum()
+
+        if self.prior_lambda > 0 and self._prior_batch is not None:
+            prior = self._prior_batch.to(device=x0c.device, dtype=tgt.dtype)
+            loss = loss + self.prior_lambda * ((tgt - prior).pow(2) * mask).sum()
+
+        if self.smooth_lambda > 0 and tgt.shape[1] > 1:
+            dm = torch.maximum(mask[:, 1:, :], mask[:, :-1, :])
+            loss = loss + self.smooth_lambda * (
+                (tgt[:, 1:, :] - tgt[:, :-1, :]).pow(2) * dm
+            ).sum()
+
+        if self.monotone_lambda > 0 and self.monotone_groups:
+            for group in self.monotone_groups:
+                idx = [i for i in group if 0 <= i < tgt.shape[2]]
+                if len(idx) < 2:
+                    continue
+                vals = tgt[:, :, idx]
+                m = mask[:, :, idx]
+                viol = torch.relu(vals[:, :, :-1] - vals[:, :, 1:])
+                pair_mask = torch.maximum(m[:, :, :-1], m[:, :, 1:])
+                loss = loss + self.monotone_lambda * (viol.pow(2) * pair_mask).sum()
+
+        if not torch.isfinite(loss) or loss.detach().abs().item() == 0.0:
+            if self.project_bounds and self.lb is not None:
+                projected = torch.minimum(torch.maximum(tgt.detach(), self.lb), self.ub)
+                updated = torch.where(mask.bool(), projected, tgt.detach())
+                out[:, :, self.target_indices] = updated
+            return out.detach()
+
+        grad = torch.autograd.grad(loss, tgt, allow_unused=False)[0]
+        corrected = tgt - self.guidance_scale * grad
+
+        if self.project_bounds and self.lb is not None:
+            corrected = torch.minimum(torch.maximum(corrected, self.lb), self.ub)
+
+        updated = torch.where(mask.bool(), corrected, tgt.detach())
+        updated = torch.clamp(updated, -self.clip_bound, self.clip_bound)
+        out[:, :, self.target_indices] = updated
+        return out.detach()
 
 
 # =============================================================================
@@ -202,6 +283,18 @@ def main() -> None:
     p.add_argument("-bound_lambda", type=float, default=0.3,
                    help="weight on HARPOON manifold-bound penalty in the guidance loss")
     p.add_argument("-bound_power", type=float, default=2.0)
+    p.add_argument("-project_bounds", type=si.str2bool, default=True,
+                   help="project imputed x0 target cells into the HARPOON "
+                        "z-space bounds after the gradient step")
+    p.add_argument("-prior_lambda", type=float, default=0.25,
+                   help="soft manifold weight toward a context-aware local prior")
+    p.add_argument("-prior_method", type=str, default="nearest",
+                   choices=["nearest", "linear"],
+                   help="local prior used by HARPOON guidance")
+    p.add_argument("-smooth_lambda", type=float, default=0.02,
+                   help="soft temporal smoothness weight inside the x0 guidance")
+    p.add_argument("-monotone_lambda", type=float, default=0.05,
+                   help="soft row-wise latency percentile monotonicity weight")
     p.add_argument("-pos_eps", type=float, default=1e-6,
                    help="lower bound floor (positivity epsilon, raw scale)")
     p.add_argument("-auto_ub_q", type=float, default=0.99,
@@ -286,6 +379,11 @@ def main() -> None:
     lb_raw = np.array([max(bounds[c][0], args.pos_eps) for c in target_cols], dtype=np.float32)
     ub_raw = np.array([max(bounds[c][1], lb_raw[i] + 1.0) for i, c in enumerate(target_cols)], dtype=np.float32)
     lb_t, ub_t = _normalize_bounds(lb_raw, ub_raw, scaler, model_clip_bound, dev)
+    edge_hi = int((ub_t >= model_clip_bound - 1e-6).sum().item())
+    edge_lo = int((lb_t <= -model_clip_bound + 1e-6).sum().item())
+    if edge_hi or edge_lo:
+        print(f"[HARPOON] z-bound edge columns: lower={edge_lo}, upper={edge_hi} "
+              f"(model clip={model_clip_bound:g})")
 
     # -------------------------------------------------------------------------
     # 3) Normalize inputs + build windows / masks (reuse helpers)
@@ -296,10 +394,26 @@ def main() -> None:
 
     hier_cols = np.array([model_cols.index(c) for c in cond_cols if c in model_cols], dtype=int)
     windows, window_starts = si.build_windows_from_array(d_vals, args.window_size, args.stride)
+    train_df = None
+    train_path = Path(args.prepared_dir) / "train.csv"
+    if train_path.exists():
+        train_df = pd.read_csv(train_path)
+    prior_df = build_prior(train_df, df_input, target_cols, method=args.prior_method)
+    prior_vals = prior_df[target_cols].to_numpy(dtype=np.float32)
+    if scaler is not None:
+        prior_vals = scaler.transform(prior_vals)
+    prior_windows = si.build_windows_from_mask(
+        np.zeros_like(prior_vals, dtype=bool), args.window_size, args.stride,
+        starts=window_starts,
+    ).float()
+    for i, s in enumerate(window_starts):
+        prior_windows[i] = torch.from_numpy(prior_vals[s:s + args.window_size])
     synth_masks = si.build_windows_from_mask(
         synth_mask_test.astype(bool), args.window_size, args.stride, starts=window_starts)
     obs_masks = si.build_windows_from_mask(
         input_obs_mask.astype(bool), args.window_size, args.stride, starts=window_starts)
+    mono_name_groups = default_monotone_groups(target_cols)
+    mono_idx_groups = [[target_cols.index(c) for c in group] for group in mono_name_groups]
 
     # ValueBounds (post-process clamp; honours preprocessing/p995 if present)
     vbounds = si.ValueBounds(target_cols)
@@ -318,6 +432,7 @@ def main() -> None:
     test_dl = DataLoader(MyDataset(windows.float(), window_size=args.window_size), batch_size=args.batch_size)
     smb_dl = DataLoader(MyDataset(synth_masks), batch_size=args.batch_size)
     omb_dl = DataLoader(MyDataset(obs_masks), batch_size=args.batch_size)
+    prior_dl = DataLoader(MyDataset(prior_windows), batch_size=args.batch_size)
 
     model = fetchModel(in_dim, out_dim, args).to(dev)
     diffusion_config = fetchDiffusionConfig(args)
@@ -358,6 +473,9 @@ def main() -> None:
         clip_bound=model_clip_bound,
         lb=lb_t, ub=ub_t,
         bound_lambda=args.bound_lambda, bound_power=args.bound_power,
+        project_bounds=args.project_bounds,
+        prior_lambda=args.prior_lambda, smooth_lambda=args.smooth_lambda,
+        monotone_lambda=args.monotone_lambda, monotone_groups=mono_idx_groups,
     )
 
     # -------------------------------------------------------------------------
@@ -367,9 +485,12 @@ def main() -> None:
     for trial in range(args.n_trials):
         t0 = timer()
         win_out = []
-        for tb, smb, omb in zip(test_dl, smb_dl, omb_dl):
+        for tb, smb, omb, pb in zip(test_dl, smb_dl, omb_dl, prior_dl):
             tb = si.ensure_bwc(tb, args.window_size).to(dev)
-            x = synth.synthesize_batch(tb, smb.to(dev).bool(), omb.to(dev).bool())
+            pb = si.ensure_bwc(pb, args.window_size).to(dev)
+            x = synth.synthesize_batch(
+                tb, smb.to(dev).bool(), omb.to(dev).bool(), prior_batch=pb,
+            )
             win_out.append(x.detach().cpu().numpy())
         elapsed = timer() - t0
         exec_times.append(elapsed)

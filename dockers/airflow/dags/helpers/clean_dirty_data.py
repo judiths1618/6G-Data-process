@@ -300,20 +300,38 @@ def _impute_darts(df: pd.DataFrame, target_cols: list, method: str) -> pd.DataFr
 
 
 def _impute_pypots(df: pd.DataFrame, target_cols: list, method: str,
-                   epochs: int = 30) -> pd.DataFrame:
-    """PyPOTS SAITS / BRITS, fit-then-impute on a single window."""
+                   epochs: int = 30, window: int = 100) -> pd.DataFrame:
+    """PyPOTS SAITS / BRITS with **windowed** fit-then-impute.
+
+    Attention is O(n_steps**2), so treating a whole long series as one
+    ``(1, n_steps, F)`` sample OOMs (a 100k-step series gets killed). Instead we
+    tile the series into fixed-length windows (``window``), batch them along the
+    sample axis, and stitch overlapping cells back by averaging. Observed cells
+    are preserved; only originally-missing cells take the model output.
+    """
     import torch
 
     cols = [c for c in target_cols if c in df.columns]
     X = df[cols].to_numpy(dtype=float)
-    # PyPOTS expects shape (n_samples, n_steps, n_features). Treat the whole
-    # series as one sample.
-    X3 = X.reshape(1, X.shape[0], X.shape[1])
-    n_steps = X3.shape[1]
-    n_features = X3.shape[2]
+    n_rows, n_features = X.shape
+    w = min(window, n_rows) if window and window > 0 else n_rows
+
+    if n_rows <= w:
+        starts = [0]
+    else:
+        starts = list(range(0, n_rows - w + 1, w))
+        if starts[-1] != n_rows - w:
+            starts.append(n_rows - w)
+
+    Xpad = X
+    if X.shape[0] < w:
+        Xpad = np.concatenate(
+            [X, np.full((w - X.shape[0], n_features), np.nan)], axis=0)
+    Xw = np.stack([Xpad[s:s + w] for s in starts]).astype(np.float32)
+
     kind = method.split("_", 1)[1]
-    common = dict(n_steps=n_steps, n_features=n_features,
-                  epochs=epochs, batch_size=1,
+    common = dict(n_steps=w, n_features=n_features,
+                  epochs=epochs, batch_size=32,
                   device="cuda" if torch.cuda.is_available() else "cpu")
     if kind == "saits":
         from pypots.imputation import SAITS
@@ -324,13 +342,26 @@ def _impute_pypots(df: pd.DataFrame, target_cols: list, method: str,
         model = BRITS(rnn_hidden_size=64, **common)
     else:
         raise ValueError(f"Unsupported pypots method: {method}")
-    model.fit({"X": X3})
-    recovered = model.impute({"X": X3})
+    model.fit({"X": Xw})
+    recovered = model.impute({"X": Xw})
     if isinstance(recovered, dict):
         recovered = recovered.get("imputation", recovered)
-    recovered = np.asarray(recovered).reshape(n_steps, n_features)
+    recovered = np.asarray(recovered)
+    if recovered.ndim == 2:
+        recovered = recovered[None, ...]
+
+    # Stitch windows back, averaging overlaps.
+    acc = np.zeros((n_rows, n_features), dtype=np.float64)
+    cnt = np.zeros((n_rows, 1), dtype=np.float64)
+    for i, s in enumerate(starts):
+        end = min(s + w, n_rows)
+        acc[s:end] += recovered[i, : end - s]
+        cnt[s:end] += 1.0
+    cnt[cnt == 0] = 1.0
+    filled = acc / cnt
+
     out = df.copy()
-    out[cols] = recovered
+    out[cols] = np.where(np.isnan(X), filled, X)  # preserve observed cells
     return out
 
 

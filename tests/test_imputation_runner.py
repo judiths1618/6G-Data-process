@@ -7,6 +7,7 @@ import pandas as pd
 
 from dataops.imputation_runner import (
     INTERP_METHODS,
+    build_final_dataset,
     builtin_methods,
     compare_clean_vs_imputed,
     impute_bundle,
@@ -99,3 +100,82 @@ def test_imputegap_statistics_run_dependency_free(tmp_path):
     df = pd.DataFrame({"a": [1.0, np.nan, 3.0]})
     assert impute_dataframe(df, ["a"], "mean", lib="imputegap")["a"].tolist() == [1.0, 2.0, 3.0]
     assert impute_dataframe(df, ["a"], "zero", lib="imputegap")["a"].tolist() == [1.0, 0.0, 3.0]
+
+
+def _make_disjoint_bundle(tmp_path):
+    """Prepared bundle with DISJOINT train/test time ranges (as real bundles are),
+    a train gap and a test holdout cell whose ground truth is a sentinel (999)."""
+    prepared = tmp_path / "prepared_d"
+    prepared.mkdir()
+    train = pd.DataFrame({"time": [0, 1, 2, 3],
+                          "a": [0.0, np.nan, 2.0, 3.0],
+                          "b": [10.0, 11.0, np.nan, 13.0]})
+    test_input = pd.DataFrame({"time": [4, 5, 6],
+                               "a": [4.0, np.nan, 6.0], "b": [14.0, 15.0, 16.0]})
+    test_gt = pd.DataFrame({"time": [4, 5, 6],
+                            "a": [4.0, 999.0, 6.0], "b": [14.0, 15.0, 16.0]})
+    for name, d in [("train.csv", train), ("test_input.csv", test_input),
+                    ("test_gt.csv", test_gt)]:
+        d.to_csv(prepared / name, index=False)
+    (prepared / "meta.json").write_text(json.dumps({
+        "time_col": "time", "target_cols": ["a", "b"],
+    }))
+    return prepared, train, test_input
+
+
+def test_build_final_dataset_stitches_imputed_train_and_test(tmp_path):
+    """The final = imputed train + imputed test (the imputer's own output for
+    BOTH splits), gap-free, and it never leaks test_gt ground truth."""
+    prepared, train, test_input = _make_disjoint_bundle(tmp_path)
+    out_dir = tmp_path / "gen_d"
+    result = impute_bundle(prepared, method="nearest", output_dir=str(out_dir),
+                           engine="pandas")
+
+    final = build_final_dataset(
+        prepared, method="nearest", output_path=str(tmp_path / "d_final.csv"),
+        lib="darts", bundle_result=result, imputed_dir=str(out_dir),
+    )
+    df = pd.read_csv(tmp_path / "d_final.csv")
+    imp_test = pd.read_csv(result["files"]["test"]["path"])
+
+    # imputed TRAIN is included: final row count == both imputed splits concatenated
+    assert final["rows"] == len(train) + len(test_input) == len(df)
+    assert set(final["sources"]) == {"train", "test"}
+    assert final["gaps_after"] == 0 and df[["a", "b"]].isna().sum().sum() == 0
+    # gaps_before counts the raw gappy inputs (train a@1, b@2, test_input a@5)
+    assert final["gaps_before"] == 3
+
+    # the test holdout cell (a@time=5) is the IMPUTED test value, not GT (999)
+    got = df.loc[df["time"] == 5, "a"].iloc[0]
+    assert got != 999.0
+    assert got == imp_test.loc[imp_test["time"] == 5, "a"].iloc[0]
+
+
+def test_build_final_dataset_stitches_prebuilt_model_splits(tmp_path):
+    """WaveStitch+-style heavy lib: the imputed train/test splits already exist on
+    disk and have no dependency-free built-in. build_final_dataset must stitch them
+    (imputed train included) without trying to re-impute."""
+    prepared = tmp_path / "prepared_wsp"
+    prepared.mkdir()
+    (prepared / "meta.json").write_text(json.dumps({
+        "time_col": "time", "target_cols": ["a", "b"],
+    }))
+    gen = tmp_path / "generated_wsp"
+    gen.mkdir()
+    train = pd.DataFrame({"time": [0, 1, 2, 3],
+                          "a": [0.0, 1.0, 2.0, 3.0], "b": [10.0, 11.0, 12.0, 13.0]})
+    test = pd.DataFrame({"time": [4, 5, 6],
+                         "a": [40.0, 50.0, 60.0], "b": [14.0, 15.0, 16.0]})
+    train.to_csv(gen / "wavestitchplus_v1_train_imputed.csv", index=False)
+    test.to_csv(gen / "wavestitchplus_v1_test_imputed.csv", index=False)
+
+    final = build_final_dataset(
+        prepared, method="v1", lib="wavestitchplus", imputed_dir=str(gen),
+        output_path=str(tmp_path / "wsp_final.csv"),
+    )
+    df = pd.read_csv(tmp_path / "wsp_final.csv")
+    assert final["rows"] == len(train) + len(test) == len(df)
+    assert df.loc[df["time"] == 1, "a"].iloc[0] == 1.0    # from the imputed TRAIN split
+    assert df.loc[df["time"] == 5, "a"].iloc[0] == 50.0   # from the imputed test split
+    assert df[["a", "b"]].isna().sum().sum() == 0
+    assert set(final["sources"]) == {"train", "test"}

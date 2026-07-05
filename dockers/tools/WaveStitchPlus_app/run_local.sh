@@ -123,4 +123,10 @@ for subset in $SUBSETS; do
     -bound_headroom 1.2 2>&1 | tail -20
 
   echo "  → $out_csv"
+
+  echo ">>> Final (imputed train + imputed test)"
+  python "$APP_DIR/wsp_final.py" \
+    --prepared-dir "$prepared" \
+    --output-dir "$generated" \
+    --variant v1 2>&1 | tail -3
 done

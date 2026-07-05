@@ -10,7 +10,7 @@ Usage:
         --prepared-dir experiments/EUR/prepared_amf \
         --baseline-dir experiments/amf-performance/generated_all_baselines \
         --v1-csv  .../imputed_em_ddim50_..._trial_0.csv \
-        [--tau 20 --hard-prior 8 --prior nearest]
+        [--tau 4 --hard-prior 1 --prior nearest]
 
 Prints a sorted MAE/RMSE table and writes ``wsp_v2_comparison.csv`` next to the
 v2 output. Reuses the v1 diffusion CSV (no re-synthesis), so it runs in seconds.
@@ -42,9 +42,12 @@ def main() -> int:
                    help="WaveStitch+ v1 diffusion test CSV to anchor for v2")
     p.add_argument("--out-csv", default=None,
                    help="where to write the comparison table (default: alongside v1)")
-    p.add_argument("--prior", default="nearest", choices=["linear", "nearest"])
-    p.add_argument("--tau", type=float, default=20.0)
-    p.add_argument("--hard-prior", type=int, default=8)
+    # Match run_imputation_v2.py defaults: 'auto' per-column prior (unsupervised),
+    # anchored hard/wide because the diffusion is weaker than interpolation even at
+    # depth on these holdouts.
+    p.add_argument("--prior", default="auto", choices=["linear", "nearest", "auto"])
+    p.add_argument("--tau", type=float, default=8.0)
+    p.add_argument("--hard-prior", type=int, default=32)
     args = p.parse_args()
 
     prepared = Path(args.prepared_dir)

@@ -412,6 +412,15 @@ class RePaintDDIMSynthesizer:
         """
         return torch.zeros((), device=x0c.device)
 
+    def _correct_x0(self, x0c, obs_mask_batch_f, synth_mask_batch_f, test_batch):
+        """Optional direct correction on the current clean-sample estimate.
+
+        Subclasses can implement manifold/objective guidance directly on the
+        dirty estimate before the DDIM/DDPM transition is formed. The default is
+        identity, preserving the original WaveStitch+ sampler.
+        """
+        return x0c
+
     def synthesize_batch(self, test_batch, synth_mask_batch, obs_mask_batch):
         """
         test_batch      : [B, W, C]
@@ -496,7 +505,9 @@ class RePaintDDIMSynthesizer:
                         grad = None
 
                 nf = nf.detach()
-                x0c = x0c.detach()
+                x0c = self._correct_x0(
+                    x0c.detach(), obs_mask_batch_f, synth_mask_batch_f, test_batch,
+                )
 
                 if t_n is not None:
                     unk = torch.sqrt(ab_n) * x0c + torch.sqrt(1 - ab_n) * nf
