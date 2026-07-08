@@ -12,6 +12,8 @@ reuse a persisted GE project when one is available.
 from __future__ import annotations
 
 import os
+import warnings
+from contextlib import contextmanager
 from functools import lru_cache
 
 
@@ -33,6 +35,19 @@ def get_gx_context(context_root_dir: str | None = None):
         return gx.get_context(mode="ephemeral")
     except TypeError:
         return gx.get_context()
+
+
+@contextmanager
+def suppress_validator_result_format_warning():
+    """Silence GX's checkpoint warning for immediate in-memory validations."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"`result_format` configured at the Validator-level.*",
+            category=UserWarning,
+            module=r"great_expectations\.expectations\.expectation",
+        )
+        yield
 
 
 def summarize_gx(gx_result, *, max_failed: int = 25) -> dict:

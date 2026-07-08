@@ -166,19 +166,42 @@ class DirectoryManager:
 
 
 # Convenience functions for backward compatibility
+def get_generated_root(prepared_dir: str) -> str:
+    """Sibling ``generated`` directory for a prepared bundle.
+
+    Unifies the two bundle-naming conventions onto a single output tree so that
+    model checkpoints, imputed CSVs, and evaluation artifacts all co-locate:
+
+        DataOps:      <name>_regularized  ->  <name>_generated
+        experiments:  prepared_<subset>   ->  generated_<subset>
+        fallback:     <name>              ->  generated_<name>
+
+    The result is a sibling of ``prepared_dir`` (derived from its actual
+    location, so it is CWD-independent). ``scripts/reproduce_all.sh`` writes its
+    ``--output-dir`` to the DataOps ``<name>_generated`` path, so resolving the
+    same directory here keeps checkpoints in that one tree instead of a stray
+    ``generated_<name>_regularized`` folder.
+    """
+    p = Path(prepared_dir)
+    name = p.name
+    if name.endswith("_regularized"):
+        gen = name[: -len("_regularized")] + "_generated"
+    elif name.startswith("prepared_"):
+        gen = "generated_" + name[len("prepared_"):]
+    else:
+        gen = f"generated_{name}"
+    return str(p.parent / gen)
+
+
 def get_save_dir(prepared_dir: str) -> str:
     """Model checkpoint directory, co-located UNDER the subset's generated folder.
 
-    Models are saved next to the imputed outputs at
-    ``<prepared_dir>/../generated_<subset>/saved_models`` (derived from the
-    prepared dir's actual location, so it is CWD-independent and stays inside the
-    consolidated ``experiments/<group>/`` tree). Train (save) and synthesis (load)
-    both call this, so they always agree. The container flow (run_pipeline.py)
-    manages its own ``prepared/saved_model`` path and is unaffected.
+    Returns ``<get_generated_root>/saved_models`` (see :func:`get_generated_root`
+    for the naming rules). Train (save) and synthesis (load) both call this, so
+    they always agree. The container flow (run_pipeline.py) manages its own
+    ``prepared/saved_model`` path and is unaffected.
     """
-    p = Path(prepared_dir)
-    name = p.name[len("prepared_"):] if p.name.startswith("prepared_") else p.name
-    return str(p.parent / f"generated_{name}" / "saved_models")
+    return str(Path(get_generated_root(prepared_dir)) / "saved_models")
 
 def get_generated_dir(prepared_dir: str) -> str:
     """Get generated directory path"""

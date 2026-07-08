@@ -2,7 +2,8 @@
 """Stitch a WaveStitch+ run's imputed splits into ONE gap-free final dataset.
 
 The final = the imputed **train** split + the imputed **test** split (the model's
-own output for both), keeping ``time`` + target columns. This mirrors
+own output for both), keeping ``time`` + a ``split`` label ("train"/"test") +
+target columns. The ``split`` column marks the train/test boundary. This mirrors
 ``dataops.imputation_runner.build_final_dataset`` but is **vendored** here,
 pandas-only, because the WaveStitch+ Docker image ships ``WaveStitchPlus_app/``
 without ``src/dataops`` — so the runners can build a final natively and
@@ -48,14 +49,16 @@ def build_wsp_final(
     for split in SPLITS:
         fp = out_dir / f"wavestitchplus_{variant}_{split}_imputed.csv"
         if fp.exists():
-            frames.append(pd.read_csv(fp))
+            fr = pd.read_csv(fp)
+            fr["split"] = split  # keep the train/test boundary explicit in the final
+            frames.append(fr)
     if not frames:
         print(f"[WaveStitch+ final] no imputed splits for variant={variant!r} "
               f"in {out_dir}; skip")
         return None
 
     full = pd.concat(frames, ignore_index=True)
-    keep = [c for c in [time_col, *target_cols, *cond_cols] if c in full.columns]
+    keep = [c for c in [time_col, "split", *target_cols, *cond_cols] if c in full.columns]
     full = (full[keep]
             .sort_values(time_col)
             .drop_duplicates(subset=[time_col], keep="last")

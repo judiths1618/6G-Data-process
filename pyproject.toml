@@ -12,8 +12,8 @@ dependencies = [
     "boto3>=1.26",
     "great_expectations>=0.18,<1.0",
     "numpy>=1.23",
-    "pandas>=2.1.1,<2.3",
-    "pandera>=0.19",
+    "pandas>=2.0.3,<2.3",
+    "pandera>=0.20,<0.21",
     "pyarrow>=12.0",
     "pyyaml>=6.0",
     "requests>=2.31",
@@ -44,4 +44,8 @@ exclude = ["dockers*", "experiments*", "generated*", "notebooks*", "dashboard*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
-addopts = "-q"
+addopts = "-q --import-mode=importlib"
+filterwarnings = [
+    "ignore:`Number` field should not be instantiated\\. Use `Integer`, `Float`, or `Decimal` instead\\.:marshmallow.warnings.ChangedInMarshmallow4Warning:great_expectations\\.data_context\\.types\\.base",
+    "ignore:Failing to pass a value to the 'type_params' parameter of 'typing\\.ForwardRef\\._evaluate'.*:DeprecationWarning:pydantic\\.v1\\.typing",
+]

@@ -14,7 +14,11 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .gx import get_gx_context, summarize_gx as _summarize_gx
+from .gx import (
+    get_gx_context,
+    summarize_gx as _summarize_gx,
+    suppress_validator_result_format_warning,
+)
 
 __all__ = ["detect_time_gaps", "inspect_timestamp_order", "run", "METADATA"]
 
@@ -170,31 +174,34 @@ def run(
         batch_request=batch_request, expectation_suite_name="ts_quality"
     )
 
-    validator.expect_column_values_to_not_be_null(ts_col)
-    validator.expect_column_values_to_be_unique(ts_col)
-    validator.expect_column_values_to_be_increasing(ts_col)
-    for col in gx_df.columns:
-        validator.expect_column_values_to_not_be_null(column=col, mostly=miss_threshold)
+    with suppress_validator_result_format_warning():
+        validator.expect_column_values_to_not_be_null(ts_col)
+        validator.expect_column_values_to_be_unique(ts_col)
+        validator.expect_column_values_to_be_increasing(ts_col)
+        for col in gx_df.columns:
+            validator.expect_column_values_to_not_be_null(
+                column=col, mostly=miss_threshold
+            )
 
-    # numeric range expectations (also drives the outlier list)
-    numeric_cols = [
-        c for c in gx_df.select_dtypes(include="number").columns if c != ts_col
-    ]
-    outlier_cols = []
-    for col in numeric_cols:
-        lower = gx_df[col].quantile(outlier_q)
-        upper = gx_df[col].quantile(1 - outlier_q)
-        # ``mostly`` gets margin over the ~2*outlier_q tail the quantile band
-        # inevitably leaves outside, so this stays a soft sentinel instead of
-        # tripping by construction on every continuous column.
-        validator.expect_column_values_to_be_between(
-            column=col, min_value=lower, max_value=upper,
-            mostly=min(outlier_mostly, 1 - 2 * outlier_q),
-        )
-        if (gx_df[col] < lower).any() or (gx_df[col] > upper).any():
-            outlier_cols.append(col)
+        # numeric range expectations (also drives the outlier list)
+        numeric_cols = [
+            c for c in gx_df.select_dtypes(include="number").columns if c != ts_col
+        ]
+        outlier_cols = []
+        for col in numeric_cols:
+            lower = gx_df[col].quantile(outlier_q)
+            upper = gx_df[col].quantile(1 - outlier_q)
+            # ``mostly`` gets margin over the ~2*outlier_q tail the quantile band
+            # inevitably leaves outside, so this stays a soft sentinel instead of
+            # tripping by construction on every continuous column.
+            validator.expect_column_values_to_be_between(
+                column=col, min_value=lower, max_value=upper,
+                mostly=min(outlier_mostly, 1 - 2 * outlier_q),
+            )
+            if (gx_df[col] < lower).any() or (gx_df[col] > upper).any():
+                outlier_cols.append(col)
 
-    gx_result = validator.validate()
+        gx_result = validator.validate()
     gx_passed = bool(gx_result["success"])
     gx_detail = _summarize_gx(gx_result)
 

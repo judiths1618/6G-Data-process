@@ -39,9 +39,12 @@ def test_build_wsp_final_stitches_imputed_train_and_test(tmp_path):
     assert len(df) == len(train) + len(test)
     assert df.loc[df["time"] == 1, "a"].iloc[0] == 1.0     # from imputed train
     assert df.loc[df["time"] == 5, "a"].iloc[0] == 50.0    # from imputed test
-    assert list(df.columns) == ["time", "a", "b"]          # time + targets only
+    assert list(df.columns) == ["time", "split", "a", "b"]  # time + split + targets
     assert df[["a", "b"]].isna().sum().sum() == 0          # gap-free
     assert df["time"].is_monotonic_increasing
+    # split column marks the train/test boundary per row
+    assert df.loc[df["time"] <= 3, "split"].eq("train").all()
+    assert df.loc[df["time"] >= 4, "split"].eq("test").all()
 
 
 def test_build_wsp_final_skips_when_no_splits(tmp_path):

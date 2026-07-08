@@ -7,10 +7,11 @@ h5py==3.16.0
 
 # Storage and pipeline utilities
 boto3==1.39.4
-s3fs
+s3fs==2025.5.1
 pyarrow==18.1.0
 tqdm==4.67.1
-great-expectations>=0.18,<2
+great-expectations==0.18.22
+pandera==0.20.4
 
 # WaveStitch+ runtime
 torch==2.5.1

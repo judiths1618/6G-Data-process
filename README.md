@@ -68,18 +68,30 @@ The system has four loosely coupled layers:
 
 ## Reproduce the results
 
-Complete, copy-paste instructions to reproduce both highlights from a fresh clone. Four
-sample datasets ship in [`data/raw/`](data/raw/), so every step runs **without a GPU, Docker,
-or external data**. **Track A** runs in the plain `.venv` from step 0. **Tracks B–D** call the
-real Darts / ImputeGAP / PyPOTS / PyTorch libraries, so they need the **`autofeat-6g`** conda
-env (`darts 0.33`, `imputegap 1.1.1`, `pypots 1.5`, `torch 2.5.1`). **Track D** populates every
-imputation method for the dashboard; **Track F** adds the full Docker service stack.
+Complete, copy-paste instructions to reproduce the local pipeline and imputation comparisons
+from a fresh clone. Four sample datasets ship in [`data/raw/`](data/raw/), so the local
+tracks run **without Docker or external data**. **Track A** runs in the plain `.venv` from
+step 0. **Tracks B–E** call the real Darts / ImputeGAP / PyPOTS / PyTorch libraries, so use
+the dedicated conda environment below. The **Airflow + SeaweedFS stack** (final section) adds
+the full Docker service stack.
+
+The reproduction is organized into five tracks — the same labels `scripts/reproduce_all.sh`
+prints — plus two optional sections:
+
+| Track | Section | What runs |
+|---|---|---|
+| **A** | [A. Raw CSVs → `data/processed/`](#a-raw-csvs--dataprocessed-results) | cleaning + built-in imputation |
+| **B** | [B. Baseline benchmark](#b-baseline-benchmark-on-a-shared-holdout-cpu) | shared-holdout MAE/RMSE table |
+| **C** | [C. WaveStitch+ v1 → v2](#c-wavestitch-v1--v2-and-the-top-2-result-cpu-or-gpu) | diffusion runners (first model track) |
+| **D** | [D. Darts](#d-darts-runners) | interpolation / kalman |
+| **E** | [E. Other libraries](#e-other-library-runners--imputegap--pypots) | ImputeGAP + PyPOTS |
+| — | [Dashboard](#explore-every-run-in-the-dashboard) · [Airflow stack](#full-airflow--seaweedfs-stack-docker-optional) | explore + orchestrate (optional) |
 
 ### 0. Clone and install
 
 ```bash
-git clone https://github.com/judiths1618/6G-Data-process.git
-cd 6G-Data-process
+git clone https://github.com/judiths1618/WaveStitchPlus.git
+cd WaveStitchPlus
 
 python -m venv .venv
 source .venv/bin/activate                     # Windows: .venv\Scripts\activate
@@ -89,46 +101,153 @@ python -m pip install -e ".[dev]"
 python -m pytest                              # sanity check: unit tests pass
 ```
 
-The plain `.venv` above covers **Track A** (dependency-free). For **Tracks B–D** (real
-Darts / ImputeGAP / PyPOTS / PyTorch), and especially a **GPU server**, use one conda env
-that installs the full pinned stack:
+The plain `.venv` above covers **Track A** (dependency-free). For **Tracks B–E** (real
+Darts / ImputeGAP / PyPOTS / PyTorch), and especially a **GPU server**, use a clean conda env
+that installs the pinned all-method stack. Avoid reusing a broad research env: `pip check`
+should be clean in the dedicated env, while mixed envs can silently carry incompatible
+transitive packages.
 
 ```bash
-git clone https://github.com/judiths1618/6G-Data-process.git && cd 6G-Data-process
+git clone https://github.com/judiths1618/WaveStitchPlus.git && cd WaveStitchPlus
 
-conda create -y -n autofeat-6g python=3.10 && conda activate autofeat-6g
-pip install -r requirements.txt        # pins torch 2.5.1 (CUDA build on Linux), darts 0.33,
-                                        # pypots 1.5, imputegap 1.1.1, great-expectations, streamlit
-pip install -e ".[dev]"                 # editable install of src/ packages + pytest
+conda env create -f environment.yml
+conda activate wavestitchplus-repro
+
+# equivalent manual setup:
+# conda create -y -n wavestitchplus-repro python=3.10 && conda activate wavestitchplus-repro
+# python -m pip install -r requirements.txt
+# python -m pip install -e ".[dev]"
 
 # confirm the GPU is visible (WaveStitch+ & PyPOTS auto-use it — no code change)
 python -c "import torch; print('CUDA', torch.cuda.is_available(), \
   torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
 
+python -m pip check
 python -m pytest tests dockers/tools    # full suite (CPU-only; ~seconds)
 ```
 
-Everything selects the device with `torch.device('cuda' if torch.cuda.is_available() else 'cpu')`,
-so on a CUDA host WaveStitch+ training/synthesis and PyPOTS run on the GPU automatically — training
-that takes minutes on a laptop CPU finishes in seconds. **On GPU, drop the `--fast` flag** and use
-full hyperparameters: `run_local.sh` **without** `FAST=1`, the container with
-`--use-em --em-iterations 5 --epochs-per-em 200`, and a higher PyPOTS `--epochs`. The Streamlit
-dashboard also runs there (`bash dashboard/run.sh`; port-forward `8502`). Tracks B–F below use this
-`autofeat-6g` env.
+The all-method stack is pinned in [`requirements.txt`](requirements.txt). `pandas==2.0.3` is
+intentional because `imputegap==1.1.1` declares that exact dependency; `pandera==0.20.4` is
+pinned because newer Pandera releases require newer pandas and break the schema API used by
+Track A validation. The package metadata in [`pyproject.toml`](pyproject.toml) allows these
+versions so `pip install -e ".[dev]"` does not upgrade pandas behind ImputeGAP's back.
 
-**One command for the whole thing** — pipeline → every method (full HP) → long-gap depth eval →
-a v2-vs-nearest summary:
+Everything selects the device with `torch.device('cuda' if torch.cuda.is_available() else 'cpu')`.
+On a CUDA host, WaveStitch+ training/synthesis and PyPOTS use the GPU automatically. On CPU,
+WaveStitch+ `--fast` is practical for the smaller AMF prepared bundle, but the large
+`rabbitmq-performance_regularized` bundle can still take several minutes; use GPU for full
+all-dataset reproduction.
+
+**One command smoke reproduction** — a CPU-friendly pass over the three smaller performance
+datasets (`golang-web-server-performance`, `python-web-server-performance`,
+`rabbitmq-performance`; AMF is reserved for the full run). Track A cleans all three, Track B
+scores the shared-holdout baseline on `rabbitmq-performance`, then the runner methods execute on
+each bundle — **WaveStitch+ first**, then Darts (`linear`), ImputeGAP (`knn`), and PyPOTS
+(`saits`/`brits`, 1 epoch):
 
 ```bash
-bash scripts/gpu_reproduce.sh
-# quick CPU smoke: EM_ITERS=2 EPOCHS=30 DDIM=20 PYPOTS_EPOCHS=15 bash scripts/gpu_reproduce.sh
+conda activate wavestitchplus-repro
+bash scripts/reproduce_all.sh smoke
+# writes data/processed/{golang,python,rabbitmq}-*_generated/,
+# each with wavestitchplus_{v1,v2,harpoon}_final.csv at 0 residual NaNs.
 ```
 
-### A. End-to-end cleaning pipeline → final gap-free dataset (~1 min, CPU)
+**Full GPU reproduction** — all four performance datasets, all method families, higher PyPOTS
+epochs, and full WaveStitch+ hyperparameters:
 
-Runs the five-stage lineage (`raw → soft-cleaned → remediated → regularized → final`) on the
-in-repo `rabbitmq-performance.csv`, then fills the regularized gaps to produce the final
-cleaned dataset.
+```bash
+conda activate wavestitchplus-repro
+bash scripts/reproduce_all.sh full
+
+# Legacy one-command GPU benchmark, including long-gap depth evaluation:
+bash scripts/gpu_reproduce.sh
+```
+
+### A. Raw CSVs → `data/processed/` results
+
+Track A is the local DataOps path that turns files in [`data/raw/`](data/raw/) into
+stage-named artifacts under [`data/processed/`](data/processed/). For every performance
+time-series CSV, the expected lineage is:
+
+```text
+data/raw/<name>.csv
+  → data/processed/<name>_soft_cleaned.csv
+  → data/processed/<name>_remediated.csv
+  → data/processed/<name>_regularized/
+  → data/processed/<name>_generated/
+  → data/processed/<name>_final.csv
+```
+
+Run all four bundled performance raw files into `data/processed/`:
+
+```bash
+conda activate wavestitchplus-repro
+
+for NAME in \
+  amf-performance \
+  golang-web-server-performance \
+  python-web-server-performance \
+  rabbitmq-performance
+do
+  python -m pipelines.minimal_dataops \
+    --input "data/raw/${NAME}.csv" \
+    --output "data/processed/${NAME}_remediated.csv" \
+    --report "reports/${NAME}_report.json" \
+    --log-file "logs/${NAME}-dataops.log"
+
+  python scripts/auto_impute.py \
+    --report "reports/${NAME}_report.json" \
+    --method all
+done
+```
+
+After this loop, `data/processed/` should contain, for each `<name>` above:
+
+```text
+<name>_soft_cleaned.csv
+<name>_remediated.csv
+<name>_regularized/
+<name>_generated/                 # all built-in imputed splits + method-specific finals
+<name>_final.csv
+```
+
+`--method all` runs every dependency-free built-in method:
+
+```text
+darts/{auto,cubic,linear,nearest,quadratic,slinear,zero}
+imputegap/{interpolation,mean,mean_by_series,min,zero}
+```
+
+The canonical `<name>_final.csv` is still built from `darts/nearest` for backward-compatible
+lineage and dashboard use. Method-specific finals are written under `<name>_generated/`, for
+example `darts_linear_final.csv`, `darts_nearest_final.csv`, and `imputegap_mean_final.csv`.
+PyPOTS and WaveStitch+ are heavier model runners; generate those with the model tracks
+(WaveStitch+ = **Track C**, PyPOTS = **Track E**).
+
+Check the final files:
+
+```bash
+python -c "from pathlib import Path; import pandas as pd
+for p in sorted(Path('data/processed').glob('*_final.csv')):
+    df = pd.read_csv(p)
+    print(f'{p}: shape={df.shape}, nan={int(df.isna().sum().sum())}')"
+```
+
+The small KUL antenna sample, `data/raw/user_0_sample_0_antenna_0.csv`, is a tabular sample
+rather than the EUR performance time-series format. It still goes through cleaning and
+validation, but it does not normally produce a `_regularized/`, `_generated/`, or `_final.csv`
+time-series imputation lineage:
+
+```bash
+NAME=user_0_sample_0_antenna_0
+python -m pipelines.minimal_dataops \
+  --input "data/raw/${NAME}.csv" \
+  --output "data/processed/${NAME}_remediated.csv" \
+  --report "reports/${NAME}_report.json" \
+  --log-file "logs/${NAME}-dataops.log"
+```
+
+Single-dataset example, using the default rabbitmq config:
 
 ```bash
 # 1) Validate + remediate + regularize + emit the imputation handoff
@@ -140,26 +259,23 @@ python -m pipelines.minimal_dataops --config config/dataops.yaml
 
 # 2) Run the handoff method and build the gap-free final dataset
 python scripts/auto_impute.py \
-    --report reports/rabbitmq-performance_report.json --method nearest
+    --report reports/rabbitmq-performance_report.json --method all
 #   → data/processed/rabbitmq-performance_generated/           (imputed train + test splits)
 #   → data/processed/rabbitmq-performance_final.csv            (0 NaN, imputed train + test)
 #   → reports/rabbitmq-performance_imputation_compare.json     (clean-vs-imputed MAE)
 ```
 
-Point the config at `data/raw/amf-performance.csv`, `golang-...`, or `python-...` (or pass
-`--input`/`--output`/`--report`) to reproduce the other subsets.
-
 ### B. Baseline benchmark on a shared holdout (CPU)
 
 Scores the **Darts** and **PyPOTS** baselines (`compare_baselines.py` supports `darts_*` and
-`pypots_*`; run ImputeGAP and WaveStitch+ via the app runners in **Track D**) on the *same* masked
+`pypots_*`; run ImputeGAP and WaveStitch+ via the app runners in **Tracks C and E**) on the *same* masked
 holdout WaveStitch+ is evaluated on, and writes a sorted MAE/RMSE table. It calls the real libraries,
-so run it in the `autofeat-6g` env (`darts 0.33`, `pypots 1.5`, `torch 2.5.1` — see
-[Run locally with the `autofeat-6g` conda env](#run-locally-with-the-autofeat-6g-conda-env)).
+so run it in the `wavestitchplus-repro` env (`darts 0.33`, `pypots 1.5`, `torch 2.5.1` — see
+[Reproduce → 0](#0-clone-and-install)).
 PyPOTS uses windowed inference internally, so it scales to the long series here.
 
 ```bash
-conda activate autofeat-6g
+conda activate wavestitchplus-repro
 python scripts/compare_baselines.py \
     --input-csv data/raw/amf-performance.csv \
     --methods   darts_linear,darts_nearest,pypots_saits
@@ -172,91 +288,137 @@ python scripts/compare_baselines.py \
 
 ### C. WaveStitch+ v1 → v2, and the top-2 result (CPU or GPU)
 
-Requires a conda env (`autofeat-6g`) with `darts`, `imputegap`, `pypots`, and `torch`
-(see [Run locally with the `autofeat-6g` conda env](#run-locally-with-the-autofeat-6g-conda-env)).
+Requires the all-method conda env with `darts`, `imputegap`, `pypots`, and `torch`
+(see [Reproduce → 0](#0-clone-and-install)). WaveStitch+ is the **first model track** and uses
+the same processed layout as every other runner: read `data/processed/<name>_regularized/` and
+write every WaveStitch+ artifact into `data/processed/<name>_generated/`.
 
 ```bash
-conda activate autofeat-6g
+conda activate wavestitchplus-repro
 
-# 1) Train WaveStitch+ v1 + synthesize on one subset.
-#    FAST=1 = CPU smoke run (~minutes); drop FAST for the full-accuracy run.
-#    RAW_ROOT must be ABSOLUTE — run_local.sh cd's into its app dir before reading it.
-RAW_ROOT="$PWD/data/raw" SUBSETS=python FAST=1 \
-    bash dockers/tools/WaveStitchPlus_app/run_local.sh
-#   → experiments/EUR/prepared_python/
-#   → experiments/EUR/generated_python/wavestitchplus_v1_{train,test}_imputed.csv
-#   → experiments/EUR/generated_python/wavestitchplus_v1_final.csv
-#       (gap-free final = imputed train + imputed test, stitched by wsp_final.py;
-#        the v2 / harpoon runners likewise emit wavestitchplus_<variant>_final.csv)
+# Pick any performance dataset that Track A has already regularized.
+NAME=amf-performance
+B=data/processed/${NAME}_regularized
+G=data/processed/${NAME}_generated
+mkdir -p "$G"
 
-# 2) Produce the baseline outputs for the SAME prepared holdout.
-#    The dataset name is the prepared-dir's PARENT folder (here "EUR"), so output lands under it.
-python scripts/compare_baselines.py \
-    --prepared-dir experiments/EUR/prepared_python \
-    --methods darts_linear,darts_nearest,pypots_saits
-#   → experiments/EUR/generated_<run_id>/   (note the exact path printed at the end)
+# Keep reproducibility logs readable. This hides known library warnings
+# (PyKeOps deprecated dtype, torch.load FutureWarning, etc.) but keeps errors.
+export PYTHONWARNINGS="ignore"
+quiet_wsp() {
+  "$@" 2> >(grep -v -E '^\[pyKeOps\] Warning|FutureWarning|UserWarning' >&2)
+}
 
-# 3) Score WaveStitch+ v1 vs v2 vs baselines on that holdout (reuses the v1 CSV; runs in seconds)
+# 1) Optional: add baselines to the SAME processed generated dir for comparison.
+#    Track A --method all already writes built-in Darts/ImputeGAP outputs here;
+#    run these only if you also want real Darts kalman or PyPOTS in the table.
+for m in linear nearest cubic auto kalman; do
+  python dockers/tools/Darts_app/run_imputation.py --prepared-dir "$B" --output-dir "$G" --method "$m"
+done
+python dockers/tools/PyPOTS_app/run_imputation.py --prepared-dir "$B" --output-dir "$G" \
+  --method saits --window 100 --epochs 15
+
+# 2) WaveStitch+ v1 — train + synthesize.
+#    CPU smoke: keep --fast --device cpu. GPU/full: remove --fast and use the full HP line below.
+quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation.py \
+  --prepared-dir "$B" --output-dir "$G" --fast --device cpu
+# GPU/full alternative:
+# quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation.py \
+#   --prepared-dir "$B" --output-dir "$G" \
+#   --em-iterations 5 --epochs-per-em 200 --ddim-steps 50 --repaint-rounds 5 --device auto
+test -f "$G/wavestitchplus_v1_test_imputed.csv" || {
+  echo "WaveStitch+ v1 did not produce $G/wavestitchplus_v1_test_imputed.csv" >&2
+  exit 1
+}
+
+# 3) WaveStitch+ v2 — per-column auto anchoring; reuses the v1 diffusion test CSV.
+quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation_v2.py \
+  --prepared-dir "$B" --output-dir "$G" \
+  --reuse-diffusion "$G/wavestitchplus_v1_test_imputed.csv"
+
+# 4) HARPOON — manifold-bound guidance using the v1 checkpoint copied under $G/saved_models/.
+quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation_harpoon.py \
+  --prepared-dir "$B" --output-dir "$G" \
+  --ddim-steps 5 --repaint-rounds 1 --device cpu
+# GPU/full alternative:
+# quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation_harpoon.py \
+#   --prepared-dir "$B" --output-dir "$G" --ddim-steps 50 --repaint-rounds 5 --device auto
+
+# 5) Score v1/v2/HARPOON against every *_test_imputed.csv in the same generated dir.
 python scripts/compare_wsp_v2.py \
-    --prepared-dir experiments/EUR/prepared_python \
-    --baseline-dir experiments/EUR/generated_<run_id> \
-    --v1-csv       experiments/EUR/generated_python/wavestitchplus_v1_test_imputed.csv
-#   → prints a sorted MAE/RMSE table. With the default anchor (prior=auto, hard_prior=32, tau=8)
-#     v2 improves on raw v1 ~1.5–3× AND beats `nearest` on amf/golang/rabbitmq (ties python) —
-#     the win comes from the per-column `auto` prior, not the diffusion (see the v2 section below).
+  --prepared-dir "$B" \
+  --baseline-dir "$G" \
+  --v1-csv "$G/wavestitchplus_v1_test_imputed.csv" \
+  --out-csv "$G/wsp_v2_comparison.csv"
+#   → data/processed/<name>_generated/wavestitchplus_{v1,v2,harpoon}_{train,test}_imputed.csv
+#   → data/processed/<name>_generated/wavestitchplus_{v1,v2,harpoon}_final.csv
+#   → data/processed/<name>_generated/wsp_v2_comparison.csv
 ```
 
 Optional long-gap regime (where diffusion overtakes interpolation):
 
 ```bash
 python scripts/eval_long_gap.py \
-    --prepared-dir experiments/EUR/prepared_python --reuse
+    --prepared-dir data/processed/python-web-server-performance_regularized --reuse
 ```
 
-### D. Run every imputation method on a pipeline run (for the dashboard comparison)
-
-Track A regularized each timeline into `data/processed/<name>_regularized/`. Point each app
-runner at that bundle and write into `data/processed/<name>_generated/`, so the dashboard's
-**Imputation** tab compares every method for that DataOps run:
+Tracks D and E fill in the heavier real-library methods beside WaveStitch+ so the dashboard can
+compare them all in one processed run. Both keep the shared convention: read the Track A bundle
+from `data/processed/<name>_regularized/` (`$B`) and write results to
+`data/processed/<name>_generated/` (`$G`). Track A with `--method all` already wrote the
+dependency-free Darts/ImputeGAP built-ins there; use these two tracks only for the real-library
+methods those built-ins do not cover.
 
 ```bash
-conda activate autofeat-6g
-NAME=rabbitmq-performance
+conda activate wavestitchplus-repro
+NAME=amf-performance
 B=data/processed/${NAME}_regularized
 G=data/processed/${NAME}_generated
-
-# Darts — interpolation family + kalman
-for m in linear nearest cubic auto kalman; do
-  python dockers/tools/Darts_app/run_imputation.py --prepared-dir $B --output-dir $G --method $m
-done
-# ImputeGAP — statistics
-for m in mean interpolation knn; do
-  python dockers/tools/ImputeGAP_app/run_imputation.py --prepared-dir $B --output-dir $G --method $m
-done
-# PyPOTS — WINDOWED (--window keeps attention O(window²); whole-series inference OOMs)
-for m in saits brits; do
-  python dockers/tools/PyPOTS_app/run_imputation.py --prepared-dir $B --output-dir $G \
-      --method $m --window 100 --epochs 15
-done
-# WaveStitch+ — v1 (train+synth) → v2 (anchored) → harpoon (manifold-bound guidance)
-python dockers/tools/WaveStitchPlus_app/run_imputation.py         --prepared-dir $B --output-dir $G --fast
-python dockers/tools/WaveStitchPlus_app/run_imputation_v2.py      --prepared-dir $B --output-dir $G \
-    --reuse-diffusion $G/wavestitchplus_v1_test_imputed.csv
-python dockers/tools/WaveStitchPlus_app/run_imputation_harpoon.py --prepared-dir $B --output-dir $G
-#   → $G/<lib>_<method>_{train,test}_imputed.csv  +  wavestitchplus_{v1,v2,harpoon}_final.csv
+mkdir -p "$G"
+export PYTHONWARNINGS="ignore"
 ```
 
-Every runner shares the same `--prepared-dir/--output-dir/--method` interface and writes
-`<lib>_<method>_{train,test}_imputed.csv`; the dashboard auto-discovers them for the run whose
-report points at this bundle. Notes: Darts `kalman` is slow on long series; PyPOTS **requires**
-`--window` (single-window inference is O(steps²) → OOM); WaveStitch+ `--fast` uses CPU-friendly
-hyperparameters and `v2`/`harpoon` reuse the `v1` diffusion output. Repeat with `NAME=amf-performance`,
-`golang-web-server-performance`, or `python-web-server-performance` for the other subsets.
+### D. Darts runners
 
-### E. Explore every run in the dashboard
+Real-library Darts methods beyond Track A's built-in interpolation path — chiefly `kalman`,
+which fits `darts.models.KalmanFilter` per column:
 
 ```bash
-conda activate autofeat-6g                    # streamlit + plotly live here
+python dockers/tools/Darts_app/run_imputation.py \
+  --prepared-dir "$B" --output-dir "$G" --method kalman
+```
+
+`kalman` is **slow on long series** (its cost grows super-linearly with row count, so a 40k+ row
+bundle takes minutes); the `reproduce_all.sh smoke` path therefore defaults Darts to `linear`.
+See the full method list in [Baseline Imputation Methods](#baseline-imputation-methods).
+
+### E. Other library runners — ImputeGAP + PyPOTS
+
+```bash
+# ImputeGAP method not covered by Track A's built-in statistics.
+python dockers/tools/ImputeGAP_app/run_imputation.py \
+  --prepared-dir "$B" --output-dir "$G" --method knn
+
+# PyPOTS — WINDOWED (--window keeps attention O(window²); whole-series inference OOMs)
+for m in saits brits; do
+  python dockers/tools/PyPOTS_app/run_imputation.py \
+    --prepared-dir "$B" --output-dir "$G" \
+    --method "$m" --window 100 --epochs 15
+done
+#   → $G/<lib>_<method>_{train,test}_imputed.csv
+#   → $G/<lib>_<method>_final.csv
+```
+
+Every runner shares the same `--prepared-dir/--output-dir/--method` interface and the dashboard
+auto-discovers files in `$G` for the run whose report points at `$B`. PyPOTS **requires**
+`--window` because single-window whole-series attention is O(steps²). Repeat any track by changing
+only `NAME` to `golang-web-server-performance`, `python-web-server-performance`, or
+`rabbitmq-performance`.
+
+### Explore every run in the dashboard
+
+```bash
+conda activate wavestitchplus-repro           # streamlit + plotly live here
 bash dashboard/run.sh                         # → http://localhost:8502
 ```
 
@@ -264,7 +426,7 @@ Pick a raw CSV, then a DataOps run, to walk the `raw → … → final` lineage 
 before/after metrics and the per-method imputation comparison. See
 [Comparison Dashboard](#comparison-dashboard) for the section-by-section tour.
 
-### F. Full Airflow + SeaweedFS stack (Docker, optional)
+### Full Airflow + SeaweedFS stack (Docker, optional)
 
 To reproduce the orchestrated pipeline and S3 data lake instead of the local runners, follow
 [Installation & Setup](#installation--setup) → `bash dockers/start.sh`, then open the Airflow UI
@@ -288,7 +450,7 @@ at **http://localhost:8088** (`admin / admin`) and trigger the
 The local pipeline lives in `src/data_process_modules/` (with `src/dataops/` kept as a
 compatibility API), backed by Pandera validation, Great Expectations checks, `pytest`, GitHub
 Actions CI (`.github/workflows/ci.yml`), and DVC (`dvc.yaml`). To run it, see
-[Reproduce the results → Track A](#a-end-to-end-cleaning-pipeline--final-gap-free-dataset-1-min-cpu).
+[Reproduce the results → Track A](#a-raw-csvs--dataprocessed-results).
 
 `config/dataops.yaml` controls input and output paths, validation mode, optional
 timestamp column, expected columns, numeric bounds, missingness threshold,
@@ -330,8 +492,9 @@ raw → soft-cleaned → remediated status across GX and Pandera.
 
 **Imputation handoff → final dataset.** The pipeline does not run imputation directly; it
 regularizes the dataset and emits the handoff. `scripts/auto_impute.py`
-([Track A](#a-end-to-end-cleaning-pipeline--final-gap-free-dataset-1-min-cpu)) runs the selected
-method and writes `<name>_final.csv` (gap-free) plus `reports/<name>_imputation_compare.json`.
+([Track A](#a-raw-csvs--dataprocessed-results)) runs the selected method, or `--method all` for
+all dependency-free built-ins, and writes `<name>_final.csv` (gap-free) plus
+`reports/<name>_imputation_compare.json`.
 `darts/<interp>` runs without external Darts dependencies through `dataops.imputation_runner`
 (bit-faithful to Darts' `MissingValuesFiller`); use `--engine darts` for the real Darts runner.
 
@@ -447,7 +610,7 @@ selects the device with `torch.device("cuda" if torch.cuda.is_available() else
 "cpu")`, so the same training and synthesis scripts can run natively on a CPU
 laptop. There are two options:
 
-**A. Native, in the `autofeat-6g` conda env** — the recommended dev path, driven by
+**A. Native, in the `wavestitchplus-repro` conda env** — the recommended dev path, driven by
 `run_local.sh` (see [Reproduce → Track C](#c-wavestitch-v1--v2-and-the-top-2-result-cpu-or-gpu)).
 Useful knobs: `SUBSETS`, `SKIP_PREPROCESS=1` (reuse existing `prepared_*/` folders and let the
 in-training fallback compute `iqr/1.349` on the fly), `FAST=1` (`em=2`, `epochs=30`, `ddim=20`),
@@ -595,22 +758,19 @@ python run_imputation.py \
     --method       <method-name>
 ```
 
-### Run locally with the `autofeat-6g` conda env
+### Run Locally With The Repro Env
 
-The `autofeat-6g` conda environment already contains compatible versions of all three
-libraries: `darts 0.33`, `imputegap 1.1.1`, `pypots 1.5`, and `torch 2.5.1`.
-
-> One-time fix: PyPOTS needs `ml_dtypes>=0.5` because `jax 0.6.2` is already
-> installed. Run `pip install -U "ml_dtypes>=0.5.0"` once inside the environment.
-> The upgrade is a leaf-dependency change; TensorFlow's resolver warning is safe
-> to ignore because this project does not import TensorFlow.
+The `wavestitchplus-repro` conda environment contains compatible versions of all three
+baseline libraries plus WaveStitch+: `darts 0.33`, `imputegap 1.1.1`, `pypots 1.5`,
+and `torch 2.5.1`. Create it with `conda env create -f environment.yml` from
+[Reproduce → 0](#0-clone-and-install).
 
 Each app includes a `run_local.sh` script that loops through the curated method
 list across the four EUR subsets (`amf`, `golang`, `python`, `rabbitmq`) and
 writes both train and test outputs:
 
 ```bash
-conda activate autofeat-6g
+conda activate wavestitchplus-repro
 
 bash dockers/tools/Darts_app/run_local.sh        # linear, cubic, nearest, kalman, auto
 bash dockers/tools/ImputeGAP_app/run_local.sh    # mean, interpolation, knn, iim
@@ -685,26 +845,44 @@ gaps follow the prior, while deep-gap cells fall back to the diffusion model's
 structural regime. No retraining is required; v2 reuses synthesis from an
 existing checkpoint.
 
-**Regenerate WaveStitch+ (v1 → v2 → harpoon) for one dataset** (e.g. `amf-performance`; each
-writes `wavestitchplus_<variant>_{train,test}_imputed.csv` + `_final.csv` into `<name>_generated/`):
+**Regenerate WaveStitch+ (v1 → v2 → harpoon) for one processed dataset** (e.g.
+`amf-performance`; each writes `wavestitchplus_<variant>_{train,test}_imputed.csv`
++ `_final.csv` into `data/processed/<name>_generated/`):
 
 ```bash
-conda activate autofeat-6g
+conda activate wavestitchplus-repro
+
 NAME=amf-performance
 B=data/processed/${NAME}_regularized
 G=data/processed/${NAME}_generated
+mkdir -p "$G"
+
+export PYTHONWARNINGS="ignore"
+quiet_wsp() {
+  "$@" 2> >(grep -v -E '^\[pyKeOps\] Warning|FutureWarning|UserWarning' >&2)
+}
 
 # 1) v1 — train + synthesize (GPU: full HP; laptop CPU: replace the flags with --fast)
-python dockers/tools/WaveStitchPlus_app/run_imputation.py --prepared-dir $B --output-dir $G \
-    --em-iterations 5 --epochs-per-em 200 --ddim-steps 50 --repaint-rounds 5
+quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation.py \
+  --prepared-dir "$B" --output-dir "$G" \
+  --em-iterations 5 --epochs-per-em 200 --ddim-steps 50 --repaint-rounds 5 --device auto
+# CPU smoke alternative:
+# quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation.py \
+#   --prepared-dir "$B" --output-dir "$G" --fast --device cpu
+test -f "$G/wavestitchplus_v1_test_imputed.csv" || {
+  echo "WaveStitch+ v1 did not produce $G/wavestitchplus_v1_test_imputed.csv" >&2
+  exit 1
+}
 
 # 2) v2 — per-column `auto` anchoring, reuses the v1 test diffusion (seconds, torch-free)
-python dockers/tools/WaveStitchPlus_app/run_imputation_v2.py --prepared-dir $B --output-dir $G \
-    --reuse-diffusion $G/wavestitchplus_v1_test_imputed.csv
+quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation_v2.py \
+  --prepared-dir "$B" --output-dir "$G" \
+  --reuse-diffusion "$G/wavestitchplus_v1_test_imputed.csv"
 
 # 3) harpoon — manifold-bound guidance on the pretrained checkpoint
-python dockers/tools/WaveStitchPlus_app/run_imputation_harpoon.py --prepared-dir $B --output-dir $G \
-    --ddim-steps 50 --repaint-rounds 5
+quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation_harpoon.py \
+  --prepared-dir "$B" --output-dir "$G" \
+  --ddim-steps 50 --repaint-rounds 5 --device auto
 ```
 
 Order matters: **v2/harpoon depend on v1** — step 1 trains the model and writes
@@ -712,7 +890,8 @@ Order matters: **v2/harpoon depend on v1** — step 1 trains the model and write
 checkpoint). `run_imputation.py` clears the checkpoint from the bundle afterward but syncs it to
 `$G/saved_models/` and publishes the v1 train output, so v2/harpoon still emit their train split
 (and a full train+test `_final.csv`). amf is 111k rows — **run v1 on a GPU** (`--fast` for a CPU
-smoke test).
+smoke test). The `quiet_wsp` wrapper only filters known noisy warnings; a non-zero process exit
+still fails normally.
 
 Three helper scripts under [scripts/](scripts) score methods on the **same
 holdout** (`test_input` is NaN and `test_gt` is known):
@@ -748,7 +927,7 @@ from `reports/*.json` and walks through its `raw → ... → final` lineage.
 Imputation method comparison is shown as the final-step detail.
 
 ```bash
-conda activate autofeat-6g
+conda activate wavestitchplus-repro
 bash dashboard/run.sh                    # opens http://localhost:8502
 # or:  streamlit run dashboard/app.py
 ```
@@ -785,7 +964,7 @@ step.
      - **Subprocess in another environment** — point imputation at a Python environment that already has the dependencies:
 
        ```bash
-       export DATAOPS_IMPUTE_CONDA_ENV=autofeat-6g    # conda environment with the imputation dependencies
+       export DATAOPS_IMPUTE_CONDA_ENV=wavestitchplus-repro    # conda environment with the imputation dependencies
        # or: export DATAOPS_IMPUTE_PYTHON=/path/to/python
        ```
 
@@ -806,7 +985,7 @@ step.
 
 ### Requirements
 
-`streamlit`, `plotly`, `pandas`, and `numpy` are already installed in `autofeat-6g`.
+`streamlit`, `plotly`, `pandas`, and `numpy` are already installed in `wavestitchplus-repro`.
 To install them elsewhere:
 
 ```bash
@@ -822,7 +1001,7 @@ They use `pytest` and run on plain DataFrames and temporary directories; no
 Airflow, GPU, or S3 service is required.
 
 ```bash
-conda activate autofeat-6g
+conda activate wavestitchplus-repro
 pip install pytest                 # not bundled in the app requirements
 
 pytest dockers/tools                                 # everything
@@ -877,7 +1056,7 @@ Failed runs upload partial logs to
 ## Project Structure
 
 ```
-6G-Data-process/
+WaveStitchPlus/
 ├── 6GDALI_Datasets/                     # Raw datasets (gitignored)
 │   ├── EUR/
 │   └── KUL/
@@ -965,6 +1144,6 @@ If you use WaveStitch+ in your research, please cite:
   title  = {From Raw to Clean: An End-to-End Pipeline for Time-Series Cleaning with Diffusion Models},
   author = {6G-DALI DataOps},
   year   = {2026},
-  url    = {https://github.com/judiths1618/6G-Data-process}
+  url    = {https://github.com/judiths1618/WaveStitchPlus}
 }
 ``` -->

@@ -7,9 +7,9 @@ tracked against v1 and the darts baselines on each iteration.
 
 Usage:
     python scripts/compare_wsp_v2.py \
-        --prepared-dir experiments/EUR/prepared_amf \
-        --baseline-dir experiments/amf-performance/generated_all_baselines \
-        --v1-csv  .../imputed_em_ddim50_..._trial_0.csv \
+        --prepared-dir data/processed/amf-performance_regularized \
+        --baseline-dir data/processed/amf-performance_generated \
+        --v1-csv data/processed/amf-performance_generated/wavestitchplus_v1_test_imputed.csv \
         [--tau 4 --hard-prior 1 --prior nearest]
 
 Prints a sorted MAE/RMSE table and writes ``wsp_v2_comparison.csv`` next to the
@@ -37,7 +37,7 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--prepared-dir", required=True)
     p.add_argument("--baseline-dir", required=True,
-                   help="dir with <method>_test_imputed.csv from compare_baselines.py")
+                   help="dir with *_test_imputed.csv files from processed generated outputs")
     p.add_argument("--v1-csv", required=True,
                    help="WaveStitch+ v1 diffusion test CSV to anchor for v2")
     p.add_argument("--out-csv", default=None,
@@ -51,6 +51,15 @@ def main() -> int:
     args = p.parse_args()
 
     prepared = Path(args.prepared_dir)
+    v1_path = Path(args.v1_csv)
+    if not v1_path.exists():
+        raise SystemExit(
+            f"missing WaveStitch+ v1 test output: {v1_path}\n"
+            "Run Track C step 2 first, for example:\n"
+            "  python dockers/tools/WaveStitchPlus_app/run_imputation.py "
+            "--prepared-dir data/processed/<name>_regularized "
+            "--output-dir data/processed/<name>_generated --fast --device cpu"
+        )
     meta = load_meta(prepared)
     tcols = meta["target_cols"]
     ti = pd.read_csv(prepared / "test_input.csv")
@@ -61,14 +70,35 @@ def main() -> int:
 
     # darts / pypots / imputegap baselines already on disk
     bdir = Path(args.baseline_dir)
+    stale: List[tuple] = []
     for f in sorted(bdir.glob("*_test_imputed.csv")):
         method = f.name[: -len("_test_imputed.csv")]
+        if method in {"wavestitchplus_v1", "wavestitchplus_v2"}:
+            continue
         df = pd.read_csv(f)
+        # Only compare methods scored on the SAME columns. A file that lacks a
+        # current target column (e.g. produced on an older bundle before a
+        # units rename: ram_usage vs ram_usage_mb) would be silently scored on
+        # just the surviving columns — a smaller n_cells and an artificially low
+        # MAE that is not comparable to the others. Skip it instead of mixing.
+        missing = [c for c in tcols if c not in df.columns]
+        if missing:
+            stale.append((method, missing))
+            continue
         s = score_holdout(ti, gt, df, tcols)
         rows.append({"method": method, **s})
 
+    if stale:
+        print(f"[compare_wsp_v2] skipped {len(stale)} method(s) with a stale schema "
+              f"(missing current target columns — re-run them on this bundle):",
+              file=sys.stderr)
+        for method, missing in stale:
+            preview = ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "")
+            print(f"  - {method}: missing {len(missing)}/{len(tcols)} cols ({preview})",
+                  file=sys.stderr)
+
     # WaveStitch+ v1 (raw diffusion)
-    v1 = pd.read_csv(args.v1_csv)
+    v1 = pd.read_csv(v1_path)
     rows.append({"method": "wavestitchplus_v1", **score_holdout(ti, gt, v1, tcols)})
 
     # WaveStitch+ v2 (locally anchored)

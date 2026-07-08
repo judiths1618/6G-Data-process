@@ -5,7 +5,9 @@ import subprocess
 import sys
 import types
 
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 
 import run_imputation_harpoon as runner
 

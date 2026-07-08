@@ -318,7 +318,8 @@ def build_final_dataset(
     *imputed* train and test splits — ``<lib>_<method>_train_imputed.csv`` and
     ``<lib>_<method>_test_imputed.csv`` as written by :func:`impute_bundle` — so
     the model/method's own imputation of **both** splits (including the imputed
-    training data) lands in the final. It keeps the real columns (``time`` +
+    training data) lands in the final. It keeps the real columns (``time`` + a
+    ``split`` label ("train"/"test") marking the train/test boundary +
     ``target_cols``; engineered conditioning features are dropped unless
     ``keep_cond_features``) and writes a single gap-free CSV.
 
@@ -361,12 +362,20 @@ def build_final_dataset(
         for kind in missing:
             imputed_paths[kind] = Path(gen["files"][kind]["path"])
 
-    # 2) Stitch the imputed splits into one timeline (time + targets [+ cond]).
-    frames = [pd.read_csv(imputed_paths[k]) for k in splits if k in imputed_paths]
+    # 2) Stitch the imputed splits into one timeline (time + split + targets
+    #    [+ cond]). Each row carries a ``split`` label ("train"/"test") so the
+    #    train/test boundary stays explicit in the gap-free final; on a duplicate
+    #    timestamp the test row wins (concat/sort keep it last).
+    frames = []
+    for k in splits:
+        if k in imputed_paths:
+            fr = pd.read_csv(imputed_paths[k])
+            fr["split"] = k
+            frames.append(fr)
     if not frames:
         raise FileNotFoundError(f"no imputed train/test splits found under {out_dir}")
     full = pd.concat(frames, ignore_index=True)
-    keep = [c for c in [time_col, *target_cols, *cond_cols] if c in full.columns]
+    keep = [c for c in [time_col, "split", *target_cols, *cond_cols] if c in full.columns]
     full = full[keep].sort_values(time_col).drop_duplicates(subset=[time_col], keep="last")
     full = full.reset_index(drop=True)
     gaps_after = int(full[target_cols].isna().sum().sum())

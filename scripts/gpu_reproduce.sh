@@ -25,6 +25,7 @@ KUL="user_0_sample_0_antenna_0"
 # Full hyperparameters (override via env for a quicker run).
 EM_ITERS="${EM_ITERS:-5}"; EPOCHS="${EPOCHS:-200}"; DDIM="${DDIM:-50}"; REPAINT="${REPAINT:-5}"
 PYPOTS_EPOCHS="${PYPOTS_EPOCHS:-100}"; WINDOW="${WINDOW:-100}"
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore}"
 
 echo "############################################################"
 $PY -c "import torch; print('device:', 'CUDA '+torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU (no GPU visible)')"
@@ -37,7 +38,7 @@ for name in $EUR $KUL; do
   $PY -m pipelines.minimal_dataops --input "data/raw/${name}.csv" \
       --output "data/processed/${name}_remediated.csv" \
       --report "reports/${name}_report.json" 2>&1 | tail -1
-  $PY scripts/auto_impute.py --report "reports/${name}_report.json" --method nearest 2>&1 | grep -E "FINAL|Nothing" || true
+  $PY scripts/auto_impute.py --report "reports/${name}_report.json" --method all 2>&1 | grep -E "FINAL|Nothing|canonical" || true
 done
 
 echo; echo "########## 2) all imputation methods → <name>_generated (full HP) ##########"

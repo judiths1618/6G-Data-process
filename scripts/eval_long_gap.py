@@ -41,6 +41,7 @@ from wsp_v2 import (  # noqa: E402
     _distance_to_observed, anchor_blend, build_prior, default_monotone_groups,
     load_meta, score_holdout,
 )
+from custom_pipeline.directory_manager import get_generated_root  # noqa: E402
 
 
 def build_longgap_input(
@@ -73,6 +74,10 @@ def run_diffusion(prepared: Path, test_csv: Path, out_csv: Path,
         "-ignore_col_masks",
         "-out_csv", str(Path(out_csv).resolve()),
         "-model_type", "em",
+        # The v1 runner trains/saves the checkpoint under the "v1" tag
+        # (model_v1_best.pth); match it so synthesis loads that file instead of
+        # looking for the legacy model_em.pth name.
+        "-model_tag", "v1",
         "-clamp_mode", "bounds",
         "-repaint_rounds", str(repaint),
         "-ddim_steps", str(ddim_steps),
@@ -139,8 +144,8 @@ def main() -> int:
     p.add_argument("--hard-prior", type=int, default=8)
     p.add_argument("--work-dir", default=None,
                    help="where to write masked inputs, diffusion outputs and the "
-                        "result CSVs (default: <prepared>/../generated_<name>/long_gap "
-                        "so the dashboard's Long-gap tab can discover them)")
+                        "result CSVs (default: <name>_generated/long_gap next to the "
+                        "prepared bundle, so the dashboard's Long-gap tab can discover them)")
     p.add_argument("--reuse", action="store_true",
                    help="reuse an existing diffusion_L<L>.csv in the work dir "
                         "instead of re-running synthesis (instant re-scoring)")
@@ -156,8 +161,7 @@ def main() -> int:
     if args.work_dir:
         work = Path(args.work_dir)
     else:
-        name = prepared.name.removeprefix("prepared_")
-        work = prepared.parent / f"generated_{name}" / "long_gap"
+        work = Path(get_generated_root(prepared)) / "long_gap"
     work.mkdir(parents=True, exist_ok=True)
     print(f"[long-gap] subset={prepared.name}  context={args.context}  "
           f"ddim={args.ddim_steps}  work={work}")

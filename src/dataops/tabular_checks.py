@@ -13,7 +13,11 @@ from typing import Optional
 
 import pandas as pd
 
-from .gx import get_gx_context, summarize_gx as _summarize_gx
+from .gx import (
+    get_gx_context,
+    summarize_gx as _summarize_gx,
+    suppress_validator_result_format_warning,
+)
 from .profiling import detect_primary_key
 
 __all__ = ["run", "METADATA"]
@@ -48,7 +52,7 @@ def run(
     try:
         ds = ctx.sources.add_pandas(name=ds_name)
     except Exception:
-        ds = ctx.sources.get(ds_name)
+        ds = ctx.get_datasource(ds_name)
     asset = ds.add_dataframe_asset(name=f"tabular_asset_{uuid4().hex}", dataframe=df)
     batch_request = asset.build_batch_request()
     ctx.add_or_update_expectation_suite("tabular_quality")
@@ -56,32 +60,33 @@ def run(
         batch_request=batch_request, expectation_suite_name="tabular_quality"
     )
 
-    # --- missingness (soft) --------------------------------------------------
-    missing_cols = []
-    for col in df.columns:
-        if col in pk_cols:
-            continue
-        mostly = miss_threshold_numeric if col in numeric_cols else miss_threshold_cat
-        validator.expect_column_values_to_not_be_null(column=col, mostly=mostly)
-        if df[col].isna().mean() > missing_report_threshold:
-            missing_cols.append(col)
+    with suppress_validator_result_format_warning():
+        # --- missingness (soft) ----------------------------------------------
+        missing_cols = []
+        for col in df.columns:
+            if col in pk_cols:
+                continue
+            mostly = miss_threshold_numeric if col in numeric_cols else miss_threshold_cat
+            validator.expect_column_values_to_not_be_null(column=col, mostly=mostly)
+            if df[col].isna().mean() > missing_report_threshold:
+                missing_cols.append(col)
 
-    # --- numeric sanity (skip constants / id-like) ---------------------------
-    outlier_cols = []
-    for col in numeric_cols:
-        if col in pk_cols or df[col].nunique() < min_unique_for_outlier:
-            continue
-        q_low = df[col].quantile(outlier_q)
-        q_high = df[col].quantile(1 - outlier_q)
-        if q_low == q_high:
-            continue
-        validator.expect_column_values_to_be_between(
-            column=col, min_value=q_low, max_value=q_high,
-            mostly=min(outlier_mostly, 1 - 2 * outlier_q),
-        )
-        outlier_cols.append(col)
+        # --- numeric sanity (skip constants / id-like) -----------------------
+        outlier_cols = []
+        for col in numeric_cols:
+            if col in pk_cols or df[col].nunique() < min_unique_for_outlier:
+                continue
+            q_low = df[col].quantile(outlier_q)
+            q_high = df[col].quantile(1 - outlier_q)
+            if q_low == q_high:
+                continue
+            validator.expect_column_values_to_be_between(
+                column=col, min_value=q_low, max_value=q_high,
+                mostly=min(outlier_mostly, 1 - 2 * outlier_q),
+            )
+            outlier_cols.append(col)
 
-    gx_result = validator.validate()
+        gx_result = validator.validate()
 
     failed_cols = {
         r["expectation_config"]["kwargs"].get("column")

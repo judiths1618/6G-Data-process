@@ -304,7 +304,12 @@ def _build_handoff(
             from data_process_modules.transform import preprocess_csv
 
             meta = preprocess_csv(
-                input_csv=output_csv, output_dir=prepared_dir, time_col=ts_col
+                input_csv=output_csv, output_dir=prepared_dir, time_col=ts_col,
+                # 6G-schema unit conversions (ram_limit→ram_limit_mb, ram_usage→
+                # ram_usage_mb, latency μs→ms, cpu_usage %→fraction). A no-op on
+                # non-6G inputs, and matches the Airflow/container + training paths
+                # so the local raw→processed bundle carries the same columns.
+                convert_units=True,
             )
             handoff["prepared_dir"] = prepared_dir
             handoff["bundle_written"] = True

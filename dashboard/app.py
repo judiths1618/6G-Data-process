@@ -460,8 +460,9 @@ def discover_final_files(generated_dir: Optional[Path],
 
 
 @st.cache_data(show_spinner=False)
-def load_raw_timeline(prepared_dir: Path, feature: str, time_col: str
-                      ) -> Tuple[Optional[pd.DataFrame], Optional[float]]:
+def _load_raw_timeline_cached(prepared_dir: Path, feature: str, time_col: str,
+                              sig: Tuple[float, ...]
+                              ) -> Tuple[Optional[pd.DataFrame], Optional[float]]:
     """Concat the RAW gappy inputs (train.csv + test_input.csv) on time+feature so
     a final can be diffed against the cells it filled. Returns (df, train→test
     boundary time)."""
@@ -484,19 +485,63 @@ def load_raw_timeline(prepared_dir: Path, feature: str, time_col: str
     return raw, boundary
 
 
+def load_raw_timeline(prepared_dir: Path, feature: str, time_col: str
+                      ) -> Tuple[Optional[pd.DataFrame], Optional[float]]:
+    sig = _file_sig(prepared_dir / INPUT_FILES["train"],
+                    prepared_dir / INPUT_FILES["test"])
+    return _load_raw_timeline_cached(prepared_dir, feature, time_col, sig)
+
+
+load_raw_timeline.clear = _load_raw_timeline_cached.clear
+
+
+def _file_sig(*paths: Path) -> Tuple[float, ...]:
+    """Modification-time signature for cache keying. Passing this into a
+    ``@st.cache_data`` function makes it reload when the file on disk changes
+    (e.g. a pipeline re-run rewrites meta.json / the imputed CSVs) instead of
+    serving a stale parse — the source of ``KeyError`` on renamed columns when
+    the dashboard outlived a regeneration. Must be a non-underscore arg so
+    Streamlit includes it in the cache key.
+    """
+    sig = []
+    for p in paths:
+        try:
+            sig.append(Path(p).stat().st_mtime)
+        except OSError:
+            sig.append(0.0)
+    return tuple(sig)
+
+
 @st.cache_data(show_spinner=False)
-def load_meta(prepared_dir: Path) -> dict:
+def _load_meta_cached(prepared_dir: Path, sig: Tuple[float, ...]) -> dict:
     with (prepared_dir / "meta.json").open() as f:
         return json.load(f)
 
 
+def load_meta(prepared_dir: Path) -> dict:
+    return _load_meta_cached(prepared_dir, _file_sig(prepared_dir / "meta.json"))
+
+
+# Forward the @st.cache_data ``.clear`` from the inner cached fn to the thin
+# wrapper, so existing ``load_*.clear()`` cache-busting call sites keep working.
+load_meta.clear = _load_meta_cached.clear
+
+
 @st.cache_data(show_spinner=False)
-def load_csv(path: Path) -> pd.DataFrame:
+def _load_csv_cached(path: Path, sig: Tuple[float, ...]) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def load_csv(path: Path) -> pd.DataFrame:
+    return _load_csv_cached(path, _file_sig(path))
+
+
+load_csv.clear = _load_csv_cached.clear
+
+
 @st.cache_data(show_spinner=False)
-def load_csv_subset(path: Path, columns: Tuple[str, ...]) -> pd.DataFrame:
+def _load_csv_subset_cached(path: Path, columns: Tuple[str, ...],
+                            sig: Tuple[float, ...]) -> pd.DataFrame:
     """Read only the columns we actually plot — much faster for wide CSVs."""
     try:
         return pd.read_csv(path, usecols=list(columns))
@@ -507,10 +552,26 @@ def load_csv_subset(path: Path, columns: Tuple[str, ...]) -> pd.DataFrame:
         return df[keep]
 
 
+def load_csv_subset(path: Path, columns: Tuple[str, ...]) -> pd.DataFrame:
+    return _load_csv_subset_cached(path, columns, _file_sig(path))
+
+
+load_csv_subset.clear = _load_csv_subset_cached.clear
+
+
 @st.cache_data(show_spinner=False)
-def load_holdout_mask(prepared_dir: Path) -> Optional[np.ndarray]:
+def _load_holdout_mask_cached(prepared_dir: Path,
+                              sig: Tuple[float, ...]) -> Optional[np.ndarray]:
     p = prepared_dir / "eval_holdout_mask.npy"
     return np.load(p) if p.exists() else None
+
+
+def load_holdout_mask(prepared_dir: Path) -> Optional[np.ndarray]:
+    return _load_holdout_mask_cached(
+        prepared_dir, _file_sig(prepared_dir / "eval_holdout_mask.npy"))
+
+
+load_holdout_mask.clear = _load_holdout_mask_cached.clear
 
 
 # ---------------------------------------------------------------------------
@@ -720,6 +781,17 @@ def plot_final_timeline(final_df: pd.DataFrame,
     x_arr = np.asarray(x)
     final_vals = fdf[feature].to_numpy(dtype=float)
 
+    split_boundary_idx: Optional[int] = None
+    split_boundary_next_idx: Optional[int] = None
+    if "split" in fdf.columns:
+        split_labels = fdf["split"].astype(str).str.lower()
+        train_idx = np.where(split_labels.eq("train").to_numpy())[0]
+        test_idx = np.where(split_labels.eq("test").to_numpy())[0]
+        if train_idx.size and test_idx.size:
+            split_boundary_idx = int(train_idx.max())
+            later_test = test_idx[test_idx > split_boundary_idx]
+            split_boundary_next_idx = int(later_test.min()) if later_test.size else int(test_idx.min())
+
     # "was gap" = NaN in the raw input at this time, present in the final.
     was_gap = np.zeros(len(fdf), dtype=bool)
     if raw_df is not None and feature in raw_df.columns and time_col in raw_df.columns:
@@ -747,17 +819,48 @@ def plot_final_timeline(final_df: pd.DataFrame,
                         line=dict(width=1, color="#d62728")),
             hovertemplate="<b>imputed</b><br>t=%{x}<br>y=%{y}<extra></extra>",
         ))
-    if boundary_x is not None:
-        bx, _ = _coerce_time_axis(pd.Series([boundary_x]))
-        bxv = np.asarray(bx)[0]
+    if boundary_x is not None or split_boundary_idx is not None:
+        if split_boundary_idx is not None:
+            bxv = x_arr[split_boundary_idx]
+            if split_boundary_next_idx is not None:
+                bxv = _axis_midpoint(x_arr[split_boundary_idx],
+                                      x_arr[split_boundary_next_idx])
+        else:
+            bx, _ = _coerce_time_axis(pd.Series([boundary_x]))
+            bxv = np.asarray(bx)[0]
+            if time_col in fdf.columns:
+                tnum = pd.to_numeric(fdf[time_col], errors="coerce").to_numpy()
+                left = np.where(tnum <= float(boundary_x))[0]
+                right = np.where(tnum > float(boundary_x))[0]
+                if left.size and right.size:
+                    bxv = _axis_midpoint(x_arr[int(left.max())],
+                                          x_arr[int(right.min())])
         # add_shape/add_annotation avoid add_vline's annotation-center math, which
         # does (x0+x1)/2 and blows up on a datetime axis (datetime + datetime).
+        # A prominent divider (not a faint hairline) so the train→test split reads
+        # at a glance; colour is distinct from observed (blue) and imputed (red).
         fig.add_shape(type="line", x0=bxv, x1=bxv, y0=0, y1=1,
-                      xref="x", yref="paper",
-                      line=dict(color="#888", width=1, dash="dash"))
+                      xref="x", yref="paper", layer="above",
+                      line=dict(color="#7a3fb0", width=2, dash="dash"))
+        finite_vals = final_vals[np.isfinite(final_vals)]
+        if finite_vals.size:
+            ymin, ymax = float(np.nanmin(finite_vals)), float(np.nanmax(finite_vals))
+            pad = max((ymax - ymin) * 0.02, 1e-9)
+            yline = [ymin - pad, ymax + pad]
+        else:
+            yline = [0.0, 1.0]
+        # Scattergl markers can visually dominate SVG/layout shapes in dense
+        # plots. Add the divider as the last WebGL trace too, so it stays in the
+        # same rendering layer as the data points.
+        fig.add_trace(go.Scattergl(
+            x=[bxv, bxv], y=yline, mode="lines", name="train/test split",
+            line=dict(color="#7a3fb0", width=2, dash="dash"),
+            hoverinfo="skip", showlegend=False,
+        ))
         fig.add_annotation(x=bxv, y=1.0, xref="x", yref="paper", showarrow=False,
-                           text="train → test", xanchor="left",
-                           font=dict(size=10, color="#888"))
+                           text="train ┆ test", xanchor="center", yanchor="bottom",
+                           font=dict(size=11, color="#7a3fb0"),
+                           bgcolor="rgba(255,255,255,0.65)")
 
     fig.update_layout(
         height=520, margin=dict(l=40, r=20, t=40, b=40),
@@ -767,6 +870,25 @@ def plot_final_timeline(final_df: pd.DataFrame,
         hovermode="closest", uirevision="final-plot",
     )
     return fig
+
+
+def _axis_midpoint(left, right):
+    """Midpoint for Plotly x-axis values; falls back to ``left`` for categories."""
+    try:
+        if pd.isna(left) or pd.isna(right):
+            return left
+    except (TypeError, ValueError):
+        pass
+    try:
+        if isinstance(left, (pd.Timestamp, np.datetime64)) or isinstance(right, (pd.Timestamp, np.datetime64)):
+            lts, rts = pd.Timestamp(left), pd.Timestamp(right)
+            return lts + (rts - lts) / 2
+    except (TypeError, ValueError, pd.errors.OutOfBoundsDatetime):
+        pass
+    try:
+        return (float(left) + float(right)) / 2.0
+    except (TypeError, ValueError):
+        return left
 
 
 def _add_missing_bands(fig: go.Figure, x, mask: np.ndarray, label: str = "",
@@ -987,8 +1109,23 @@ def render_long_gap_tab(subset: Subset) -> None:
 
     # Chart 2 — MAE vs depth-into-gap for a chosen gap length (the crossover).
     gap_opts = sorted(depth["gap_len"].unique())
-    default_idx = gap_opts.index(32) if 32 in gap_opts else len(gap_opts) - 1
-    sel_L = st.select_slider("Gap length for the depth view", options=gap_opts, value=gap_opts[default_idx])
+    if len(gap_opts) <= 1:
+        # st.select_slider renders as a 0..N-1 range and crashes when min == max,
+        # so it needs >= 2 options. With a single gap length there is nothing to
+        # slide: pin the value and show a hint instead of the widget.
+        sel_L = gap_opts[0] if gap_opts else None
+        if sel_L is not None:
+            st.caption(
+                f"Gap length for the depth view: **{sel_L}** — re-run "
+                "`eval_long_gap.py` with more `--gap-lengths` to compare across lengths."
+            )
+    else:
+        default_idx = gap_opts.index(32) if 32 in gap_opts else len(gap_opts) - 1
+        sel_L = st.select_slider("Gap length for the depth view", options=gap_opts,
+                                 value=gap_opts[default_idx])
+    if sel_L is None:
+        st.info("No depth-bucketed long-gap results to plot yet.")
+        return
     sub = depth[depth["gap_len"] == sel_L]
     fig2 = go.Figure()
     for m in methods:
@@ -2249,8 +2386,16 @@ timeline; its `test`-range fill is the *imputed* value, **not** the ground truth
             ffeat = fc[1].selectbox("Feature", options=feature_options, index=f_idx,
                                     key="final_feature")
             fpath = finals[fkey]
-            fdf = load_csv_subset(fpath, tuple(dict.fromkeys([time_col, ffeat])))
+            fdf = load_csv_subset(fpath, tuple(dict.fromkeys([time_col, "split", ffeat])))
+            # Match the train→test divider to THIS dataset dynamically: the boundary
+            # is the selected subset's own last-train timestamp (load_raw_timeline
+            # reads its prepared bundle), so it moves per dataset with no baked-in
+            # value. Fall back to the final's ``split`` column only if the raw
+            # bundle is unavailable (e.g. a standalone final without its bundle).
             raw_df, boundary = load_raw_timeline(subset.prepared_dir, ffeat, time_col)
+            if boundary is None and "split" in fdf.columns and fdf["split"].eq("train").any():
+                boundary = float(pd.to_numeric(
+                    fdf.loc[fdf["split"] == "train", time_col], errors="coerce").max())
             st.plotly_chart(
                 plot_final_timeline(fdf, raw_df, ffeat, time_col,
                                     boundary_x=boundary, max_bands=max_bands),
@@ -2279,15 +2424,32 @@ timeline; its `test`-range fill is the *imputed* value, **not** the ground truth
         else:
             # Read full target-cols only when this tab is active.
             input_df_full = load_csv_subset(input_path, needed_for_metrics)
-            input_arr = input_df_full[target_cols].to_numpy(dtype=float)
+            # Schema-drift guard: only score target columns actually present in
+            # this split's input (e.g. a bundle regenerated with renamed unit
+            # columns while an older imputed file still lags). Prevents a KeyError
+            # from crashing the whole tab.
+            tcols_present = [c for c in target_cols if c in input_df_full.columns]
+            if len(tcols_present) != len(target_cols):
+                _absent = [c for c in target_cols if c not in tcols_present]
+                st.warning(
+                    f"Scoring {len(tcols_present)}/{len(target_cols)} target columns "
+                    f"present in this split; absent: {', '.join(_absent[:8])}"
+                    + (" …" if len(_absent) > 8 else "")
+                )
+            input_arr = input_df_full[tcols_present].to_numpy(dtype=float)
             gt_arr: Optional[np.ndarray] = None
             if gt_path and gt_path.exists():
                 gt_df_full = load_csv_subset(gt_path, needed_for_metrics)
-                gt_arr = gt_df_full[target_cols].to_numpy(dtype=float)
+                if all(c in gt_df_full.columns for c in tcols_present):
+                    gt_arr = gt_df_full[tcols_present].to_numpy(dtype=float)
             rows = []
             imputed_full_by_key: Dict[str, np.ndarray] = {}
             for key in selected:
-                arr = load_csv_subset(available[key].path, needed_for_metrics)[target_cols].to_numpy(dtype=float)
+                idf = load_csv_subset(available[key].path, needed_for_metrics)
+                if not all(c in idf.columns for c in tcols_present):
+                    st.warning(f"Skipping '{key}': missing target column(s) in this split.")
+                    continue
+                arr = idf[tcols_present].to_numpy(dtype=float)
                 if arr.shape[0] != input_arr.shape[0]:
                     # Row count disagrees with the input split — skip rather than
                     # broadcast-error in compute_metrics.
@@ -2319,7 +2481,7 @@ timeline; its `test`-range fill is the *imputed* value, **not** the ground truth
                         for key in imputed_full_by_key:
                             imp_arr = imputed_full_by_key[key]
                             mae_per_col = []
-                            for j, col in enumerate(target_cols):
+                            for j, col in enumerate(tcols_present):
                                 m = eval_mask[:, j] & ~np.isnan(imp_arr[:, j])
                                 if m.sum() == 0:
                                     mae_per_col.append(np.nan)
@@ -2327,12 +2489,12 @@ timeline; its `test`-range fill is the *imputed* value, **not** the ground truth
                                     mae_per_col.append(float(np.mean(np.abs(imp_arr[m, j] - gt_arr[m, j]))))
                             per_feat[key] = mae_per_col
                         st.dataframe(
-                            pd.DataFrame(per_feat, index=target_cols).style.format("{:.4g}"),
+                            pd.DataFrame(per_feat, index=tcols_present).style.format("{:.4g}"),
                             width="stretch",
                         )
 
                 # ---- Constraint violations (data-integrity check) ---------
-                cvr = latency_violation_rates(input_arr, imputed_full_by_key, target_cols)
+                cvr = latency_violation_rates(input_arr, imputed_full_by_key, tcols_present)
                 if cvr is not None:
                     st.markdown(
                         "**Constraint violations** — ordered groups that must hold "
