@@ -11,7 +11,7 @@ MY DataOps plan.md
 
 # DataOps runtime artifacts; track with DVC when needed.
 data/raw/*
-data/processed/*
+!data/processed/*
 reports/*
 logs/*
 !data/raw/.gitkeep

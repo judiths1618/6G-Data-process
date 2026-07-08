@@ -1,0 +1,6 @@
+{
+  "mode": "robust",
+  "clip_mode": "soft",
+  "clip_bound": 3.0,
+  "soft_bound": 4.0
+}
