@@ -1,6 +1,5 @@
 # Exclude KUL dataset from version control
-6GDALI_Datasets/KUL/
-6GDALI_Datasets/EUR/
+6GDALI_Datasets/*
 
 .claude/
 .venv/
