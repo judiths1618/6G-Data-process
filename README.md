@@ -16,11 +16,7 @@ This repository provides an end-to-end implementation for (time-series) data cle
 **Time-series data cleaning & AI-assisted imputation** — `Python · PyTorch · Apache Airflow · SeaweedFS · Docker`
 
 - **WaveStitch+**, a **diffusion-based imputation model** for 5G/6G telemetry (RePaint + Hann-weighted
-  windowing + DDIM sampling + EM training), benchmarked against Darts, ImputeGAP, and PyPOTS. The
-  inference-time **v2** local-anchoring layer cuts holdout MAE **~1.5–3× vs raw v1** with no
-  retraining and — anchored to a per-column **`auto`** interpolation prior — **beats the strong
-  `nearest` baseline on 3 of 4 subsets** (amf 0.93×, golang 0.99×, rabbitmq 0.97×) and ties the
-  fourth, while reserving its diffusion contribution for genuinely long gaps.
+  windowing + DDIM sampling + EM training), benchmarked against Darts, ImputeGAP, and PyPOTS. The inference-time **v2** local-anchoring layer substantially reduces holdout MAE versus raw v1 with no retraining and — anchored to a per-column **`auto`** interpolation prior — **matches or beats the strong `nearest` baseline** across the benchmark subsets, while reserving its diffusion contribution for genuinely long gaps.
 - A **reproducible, end-to-end data-cleaning pipeline** (validation → remediation → imputation) with
   GitHub Actions CI, `pytest`, DVC versioning, and a Streamlit **monitoring dashboard** that makes every
   run stage-by-stage auditable.
