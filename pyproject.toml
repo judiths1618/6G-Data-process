@@ -5,14 +5,20 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sixg-dataops"
 version = "0.2.0"
-description = "Minimal DataOps toolkit for 6G-DALI data cleaning, validation, and orchestration."
+description = "wavestitchplus toolkit for 5G/6G data cleaning, validation, and orchestration."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "boto3>=1.26",
-    "great_expectations>=0.18,<1.0",
-    "numpy>=1.23",
-    "pandas>=2.0.3,<2.3",
+    "great_expectations>=0.18,<0.19",
+    # numpy < 2.0: pandas 2.0.x does not support the numpy 2.0 ABI, and a fresh
+    # `pip install -e .` would otherwise pull numpy 2.x.
+    "numpy>=1.23,<2.0",
+    # pandas pinned to the 2.0.x line: imputegap 1.1.1 declares pandas==2.0.3,
+    # and pandera 0.20.4 (below) breaks on the pandas >=2.1 schema API. Keeping
+    # this cap here means CI's `pip install -e ".[dev]"` resolves the same stack
+    # as requirements.txt instead of upgrading pandas behind ImputeGAP's back.
+    "pandas>=2.0.3,<2.1",
     "pandera>=0.20,<0.21",
     "pyarrow>=12.0",
     "pyyaml>=6.0",
