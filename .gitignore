@@ -4,6 +4,7 @@
 .claude/
 .venv/
 .pytest_cache/
+.DS_Store
 
 out/
 MY DataOps plan.md
