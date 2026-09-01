@@ -23,7 +23,7 @@ from data_process_modules.config import load_config
 from data_process_modules.imputation_catalog import get_catalog, validate_selection
 from data_process_modules.profiling import profile
 from data_process_modules.remediation import remediate
-from data_process_modules import tabular_checks, ts_checks
+from data_process_modules import tabular_checks, timeline, ts_checks
 from data_process_modules.validation import (
     validate_numeric_timeseries,
     validate_tabular_dataframe,
@@ -81,18 +81,80 @@ def _quality_action_plan(quality_report: dict) -> list[dict]:
     if mode == "time_series":
         issues = quality_report.get("issues", {})
         timestamp_order = issues.get("timestamp_order", {})
-        if timestamp_order and (
-            not timestamp_order.get("is_monotonic_increasing", True)
-            or timestamp_order.get("num_duplicate_timestamps", 0)
-            or timestamp_order.get("num_null_timestamps", 0)
+        # Separate the three things a backward step or a shared timestamp can
+        # mean. Reporting them as one "not monotonic" error hid the fact that
+        # the pipeline was deleting real rows to make the error go away.
+        if timestamp_order.get("num_runs", 1) > 1 and timestamp_order.get(
+            "sweep_aware", False
+        ):
+            actions.append({
+                "issue": "multiple_acquisition_runs",
+                "severity": "warning",
+                "status": "applied_by_remediation",
+                "detected": {
+                    "num_runs": timestamp_order.get("num_runs"),
+                    "run_sizes": timestamp_order.get("run_sizes"),
+                    "rows_out_of_order": timestamp_order.get("rows_out_of_order"),
+                    "has_overlapping_runs": timestamp_order.get("has_overlapping_runs"),
+                    "run_boundaries": timestamp_order.get("run_boundaries", []),
+                },
+                "solution": "A backward timestamp jump marks a new acquisition run, "
+                            "not a corrupt cell. Rows are ordered within each run and "
+                            "runs are kept in acquisition order, so independent runs "
+                            "are never interleaved. Set timeline.sweep_aware: true to "
+                            "carry the run id into the prepared bundle.",
+                "module": "data_process_modules.timeline:detect_runs",
+            })
+        if timestamp_order.get("num_duplicate_timestamps", 0):
+            key_cols = timestamp_order.get("key_columns", [])
+            actions.append({
+                "issue": "duplicate_primary_key",
+                "severity": "warning",
+                "status": "applied_by_remediation",
+                "detected": {
+                    "primary_key": ["<timestamp>"] + list(key_cols),
+                    "duplicate_rows": timestamp_order.get("num_duplicate_timestamps"),
+                    "duplicates_on_full_key": timestamp_order.get(
+                        "num_duplicate_rows_on_key"),
+                },
+                "solution": "The timestamp is the primary key, so rows sharing one are "
+                            "duplicates and are reduced by timeline.collision_policy. "
+                            "Set timeline.sweep_aware: true to co-identify rows by the "
+                            "swept factors instead of deduplicating them.",
+                "module": "data_process_modules.timeline:resolve_collisions",
+            })
+        if timestamp_order.get("num_null_timestamps", 0) or not timestamp_order.get(
+            "is_monotonic_increasing", True
         ):
             actions.append({
                 "issue": "timestamp_not_monotonic",
                 "severity": "error",
-                "status": "marked_quality_issue",
+                "status": "applied_by_remediation",
                 "detected": timestamp_order,
-                "solution": "Keep the pipeline moving, but sort by timestamp and resolve null or duplicate timestamps before strict validation/model training. The transform handoff regularizes timelines in timestamp order.",
-                "module": "data_process_modules.ts_checks:inspect_timestamp_order",
+                "solution": "Out-of-order rows are dropped by a forward scan "
+                            "(timeline.disorder_policy: drop), leaving a strictly "
+                            "increasing timeline. Use disorder_policy: sort to reorder "
+                            "them into the series instead of removing them.",
+                "module": "data_process_modules.timeline:enforce_monotonic",
+            })
+        cadence = issues.get("ts_gaps", {}).get("cadence", {})
+        if cadence.get("estimators_disagree"):
+            actions.append({
+                "issue": "ambiguous_cadence",
+                "severity": "warning",
+                "status": "applied_by_remediation",
+                "detected": {
+                    "median_dt_seconds": cadence.get("median_dt_seconds"),
+                    "modal_dt_seconds": cadence.get("modal_dt_seconds"),
+                    "modal_support": cadence.get("modal_support"),
+                    "disagreement_ratio": cadence.get("disagreement_ratio"),
+                    "estimator_used": cadence.get("estimator"),
+                },
+                "solution": "The modal and median sampling intervals disagree, usually "
+                            "because collision residue leaves short steps behind. The "
+                            "median is used, matching transform.preprocess:infer_base_dt, "
+                            "so the gap estimate and the regularization grid agree.",
+                "module": "data_process_modules.timeline:estimate_cadence",
             })
         gaps = issues.get("ts_gaps", {})
         if gaps.get("has_gaps"):
@@ -186,6 +248,8 @@ def _run_quality_checks(
     timestamp_col: str | None,
     validation_config: dict[str, Any],
     timestamp_order_override: dict | None = None,
+    key_columns: list[str] | None = None,
+    sweep_aware: bool = False,
 ) -> dict:
     try:
         if mode == "time_series" and timestamp_col:
@@ -198,6 +262,8 @@ def _run_quality_checks(
                 outlier_q=float(validation_config.get("outlier_q", 0.01)),
                 outlier_mostly=float(validation_config.get("outlier_mostly", 0.95)),
                 gx_context_root=validation_config.get("gx_context_root"),
+                key_columns=key_columns,
+                sweep_aware=sweep_aware,
             )
         elif mode == "tabular":
             report = tabular_checks.run(
@@ -266,8 +332,12 @@ def _build_handoff(
     output_csv: str,
     ts_col: str | None,
     imputation_cfg: dict[str, Any],
+    timeline_cfg: dict[str, Any] | None = None,
 ) -> dict:
     """Build the imputation handoff: regularize (bundle) + advertise the catalog.
+
+    ``timeline_cfg`` controls per-campaign regularization; the bundle contract
+    itself is unchanged, so every imputation runner reads it as before.
 
     The pipeline never runs imputation; it produces the prepared-dir bundle the
     apps consume and records the user's configured ``(app, method)`` selection
@@ -295,6 +365,7 @@ def _build_handoff(
     if not needs:
         return handoff
 
+    timeline_cfg = timeline_cfg or {}
     if imputation_cfg.get("build_bundle", True) and ts_col:
         _base = Path(output_csv).stem.removesuffix("_remediated")
         prepared_dir = imputation_cfg.get("prepared_dir") or str(
@@ -310,6 +381,17 @@ def _build_handoff(
                 # non-6G inputs, and matches the Airflow/container + training paths
                 # so the local raw→processed bundle carries the same columns.
                 convert_units=True,
+                # Per-campaign grids: a collection pause must not stretch one
+                # grid across it, and each campaign keeps its own cadence.
+                segment_regularization=bool(
+                    timeline_cfg.get("segment_regularization", True)),
+                segment_gap_seconds=float(
+                    timeline_cfg.get("segment_gap_seconds", 86400.0)),
+                min_segment_rows=int(timeline_cfg.get("min_segment_rows", 32)),
+                # Never ship a bundle with two sampling regimes: mixed
+                # regularization splits them across train/test.
+                require_all_segments=bool(
+                    timeline_cfg.get("require_all_segments", True)),
             )
             handoff["prepared_dir"] = prepared_dir
             handoff["bundle_written"] = True
@@ -340,10 +422,12 @@ def _validation_comparison(
     validation: dict,
     duplicate_timestamps: int = 0,
     non_monotonic_timestamps: int = 0,
+    timeline_diag: dict | None = None,
 ) -> dict:
     """Compact payload for dashboard charts comparing raw, soft-cleaned, remediated,
     GX and Pandera."""
     quality_summary = quality.get("issue_summary", {})
+    timeline_diag = timeline_diag or {}
     return {
         "dataset_shape": {
             "raw": {"rows": int(len(raw)), "cols": int(raw.shape[1])},
@@ -365,6 +449,26 @@ def _validation_comparison(
             "duplicate_rows_after": _duplicate_rows(soft_cleaned),
             "duplicate_timestamps_collapsed": int(duplicate_timestamps),
             "non_monotonic_timestamps_sorted": int(non_monotonic_timestamps),
+            # Collisions that a key separated are *preserved*, not collapsed —
+            # the number that used to be silently folded into the line above.
+            "timestamp_collisions_detected": int(
+                (timeline_diag.get("collision") or {}).get(
+                    "collisions_on_timestamp", 0)
+            ),
+            "timestamp_collisions_preserved": int(
+                (timeline_diag.get("collision") or {}).get(
+                    "distinct_conditions_preserved", 0)
+            ),
+            "acquisition_runs": int(
+                (timeline_diag.get("runs") or {}).get("num_runs", 1) or 1
+            ),
+            "rows_out_of_order": int(
+                (timeline_diag.get("runs") or {}).get("rows_out_of_order", 0)
+            ),
+            "out_of_order_rows_dropped": int(
+                (timeline_diag.get("disorder") or {}).get("rows_dropped", 0)
+            ),
+            "disorder_policy": (timeline_diag.get("disorder") or {}).get("policy"),
             "missing_cells_before": _missing_cells(raw),
             "missing_cells_after": _missing_cells(soft_cleaned),
         },
@@ -372,6 +476,7 @@ def _validation_comparison(
             "missing_cells_before": int(getattr(remediation_report, "missing_cells_before", 0)),
             "missing_cells_after": int(getattr(remediation_report, "missing_cells_after", 0)),
             "outlier_cells_clipped": int(getattr(remediation_report, "outlier_cells_clipped", 0)),
+            "outlier_cells_flagged": int(getattr(remediation_report, "outlier_cells_flagged", 0)),
             "actions": [a.get("issue") for a in getattr(remediation_report, "actions", [])],
         },
         "validation_status": {
@@ -415,6 +520,129 @@ def configure_logging(log_file: str | None = None) -> None:
     )
 
 
+def _log_raw_quality(input_csv: str,
+                     raw: pd.DataFrame,
+                     cleaning_report: Any,
+                     quality: dict,
+                     *,
+                     ts_col: str | None,
+                     timeline_diag: dict,
+                     duplicate_timestamps: int,
+                     non_monotonic_timestamps: int) -> None:
+    """Log every quality issue detected on the raw data, one issue per line.
+
+    The report JSON has always carried this; the log did not, so a run that
+    silently dropped thousands of rows looked identical in the log to a clean
+    one. Written at WARNING for anything that loses or rewrites data and INFO
+    for the rest, so ``grep WARNING`` over a log is a usable triage pass.
+    """
+    rep = quality.get("report", {})
+    issues = rep.get("issues", {}) or {}
+    mode = quality.get("mode") or rep.get("mode") or "unknown"
+
+    LOGGER.info("── raw data quality: %s ──", input_csv)
+    LOGGER.info("shape: %d rows × %d columns · mode=%s",
+                len(raw), len(raw.columns), mode)
+
+    # --- structural -------------------------------------------------------
+    dupe_rows = _duplicate_rows(raw)
+    if dupe_rows:
+        LOGGER.warning("duplicate rows: %d fully identical row(s)", dupe_rows)
+    dropped = int(getattr(cleaning_report, "input_rows", len(raw))
+                  - getattr(cleaning_report, "output_rows", len(raw)))
+    if dropped:
+        LOGGER.warning("cleaning dropped %d row(s) (empty/duplicate)", dropped)
+
+    # --- missing ----------------------------------------------------------
+    total_missing = _missing_cells(raw)
+    if total_missing:
+        per_col = raw.isna().sum()
+        worst = per_col[per_col > 0].sort_values(ascending=False)
+        LOGGER.warning("missing values: %d cell(s) across %d column(s)",
+                       total_missing, len(worst))
+        for col, n in worst.head(10).items():
+            LOGGER.warning("    %-22s %d missing (%.1f%%)", col, int(n), 100 * n / len(raw))
+        if len(worst) > 10:
+            LOGGER.warning("    … and %d more column(s)", len(worst) - 10)
+    else:
+        LOGGER.info("missing values: none in the raw file")
+
+    # --- timestamps -------------------------------------------------------
+    if ts_col:
+        if duplicate_timestamps:
+            collision = timeline_diag.get("collision") or {}
+            LOGGER.warning(
+                "timestamp collisions: %d row(s) share a '%s' value — policy '%s' "
+                "removed %d row(s)",
+                collision.get("collisions_on_timestamp", duplicate_timestamps), ts_col,
+                collision.get("policy", "?"), collision.get("rows_removed", 0))
+            advisory = timeline_diag.get("key_advisory") or {}
+            if advisory.get("candidate_key"):
+                LOGGER.warning(
+                    "    a composite key %s would resolve %d of them to distinct rows "
+                    "(residual %d) — set timeline.sweep_aware: true to keep them",
+                    advisory["candidate_key"],
+                    advisory.get("collisions_on_timestamp", 0)
+                    - advisory.get("residual_collisions", 0),
+                    advisory.get("residual_collisions", 0))
+        if non_monotonic_timestamps:
+            disorder = timeline_diag.get("disorder") or {}
+            LOGGER.warning(
+                "timestamp order: %d backward step(s) on '%s' — policy '%s' dropped "
+                "%d row(s)",
+                disorder.get("backward_steps", non_monotonic_timestamps), ts_col,
+                disorder.get("policy", "?"), disorder.get("rows_dropped", 0))
+        gaps = issues.get("ts_gaps") or {}
+        if gaps.get("has_gaps"):
+            LOGGER.warning(
+                "timeline gaps: %d gap(s), %.1f%% of the grid, ~%d missing row(s); "
+                "cadence %ss, largest gap %ss",
+                gaps.get("num_gaps", 0), 100 * float(gaps.get("gap_pct", 0)),
+                gaps.get("total_missing_rows", 0),
+                gaps.get("expected_dt_seconds"), gaps.get("largest_gap_seconds"))
+
+    # --- outliers (detected always; rewritten only when clip_outliers) -----
+    outlier_cols = (issues.get("outliers") if mode == "time_series"
+                    else rep.get("outlier_columns")) or []
+    if outlier_cols:
+        LOGGER.info("numeric outliers: %d column(s) outside the quantile band: %s",
+                    len(outlier_cols), ", ".join(map(str, outlier_cols)))
+
+    # --- validation -------------------------------------------------------
+    gx = rep.get("gx") or {}
+    if gx:
+        failed = gx.get("failed", 0)
+        (LOGGER.warning if failed else LOGGER.info)(
+            "expectations: %d/%d passed, %d failed",
+            gx.get("passed", 0), gx.get("evaluated", 0), failed)
+        for item in (gx.get("failed_expectations") or [])[:10]:
+            LOGGER.warning("    failed: %s", item)
+
+    recs = [k for k, v in (rep.get("recommendations") or {}).items() if v]
+    if recs:
+        LOGGER.info("recommendations: %s", ", ".join(recs))
+
+
+def _log_remediation(remediation_report: Any) -> None:
+    """Log what remediation actually changed, and what it only reported."""
+    LOGGER.info("── remediation ──")
+    for action in getattr(remediation_report, "actions", []):
+        status = action.get("status", "?")
+        line = f"{action.get('issue')}: {action.get('action')} [{status}]"
+        if action.get("clipped_cells"):
+            line += f" — {action['clipped_cells']} cell(s) winsorized"
+        elif action.get("flagged_cells"):
+            line += (f" — {action['flagged_cells']} cell(s) outside the band, "
+                     "left unchanged (validation.clip_outliers: false)")
+        elif action.get("columns"):
+            line += f" — {len(action['columns'])} column(s)"
+        (LOGGER.info if status in ("applied", "reported_not_applied")
+         else LOGGER.warning)("%s", line)
+    LOGGER.info("missing cells: %d → %d",
+                getattr(remediation_report, "missing_cells_before", 0),
+                getattr(remediation_report, "missing_cells_after", 0))
+
+
 def notify_failure(message: str) -> None:
     """Send a simple failure notification when DATAOPS_WEBHOOK_URL is configured."""
     webhook_url = os.environ.get("DATAOPS_WEBHOOK_URL")
@@ -434,6 +662,7 @@ def run_pipeline(
     timestamp_col: str | None = None,
     validation_config: dict[str, Any] | None = None,
     imputation_config: dict[str, Any] | None = None,
+    timeline_config: dict[str, Any] | None = None,
     soft_cleaned_csv: str | None = None,
     cleaned_csv: str | None = None,
 ) -> dict:
@@ -464,34 +693,127 @@ def run_pipeline(
     if configured_mode == "auto" and not ts_col:
         validation_mode = "tabular"
 
-    # Mark & collapse duplicate timestamps on the *resolved* ts column (covers the
-    # auto-detected case where cleaning didn't know the column). Keep-last matches
-    # transform.preprocess, so the timeline is unique for validation/regularization
-    # and the issue is recorded instead of crashing.
+    # Resolve row identity and timestamp ordering.
+    #
+    # Default model: **the timestamp is the primary key**. Rows sharing a
+    # timestamp are duplicates and are reduced by ``collision_policy``; rows that
+    # go backwards in time are dropped by a forward scan (``disorder_policy:
+    # drop``) rather than sorted into the middle of the series.
+    #
+    # ``timeline.sweep_aware: true`` opts into the alternative model for
+    # parameter-sweep datasets, where the swept factors co-identify a row and a
+    # backward jump starts a new acquisition run. The key inference still runs
+    # either way so the report can show what a composite key *would* resolve —
+    # that is advisory only and never changes the default behaviour.
     duplicate_timestamps = int(getattr(cleaning_report, "duplicate_timestamps", 0))
     timestamp_order_before: dict | None = None
     non_monotonic_timestamps = 0
+    timeline_cfg = timeline_config or {}
+    timeline_diag: dict[str, Any] = {}
+    key_columns: list[str] = []
     if validation_mode == "time_series" and ts_col and ts_col in soft_cleaned.columns:
-        extra_dups = int(soft_cleaned[ts_col].duplicated().sum())
-        if extra_dups:
-            soft_cleaned = soft_cleaned.drop_duplicates(subset=[ts_col], keep="last").reset_index(drop=True)
-            duplicate_timestamps += extra_dups
-            LOGGER.warning(
-                "collapsed %s duplicate timestamp(s) on %r (keep last)", extra_dups, ts_col
-            )
-        timestamp_order_before = ts_checks.inspect_timestamp_order(soft_cleaned, ts_col)
-        non_monotonic_timestamps = int(
-            timestamp_order_before.get("num_non_monotonic_steps", 0)
+        sweep_aware = bool(timeline_cfg.get("sweep_aware", False))
+        configured_key = [
+            snake_case(c) for c in (timeline_cfg.get("key_columns") or [])
+        ]
+        configured_key = [c for c in configured_key if c in soft_cleaned.columns]
+
+        # Always computed, for the report; only *used* as the key in sweep mode.
+        key_info = timeline.infer_key_columns(soft_cleaned, ts_col)
+        if configured_key:
+            key_columns, key_source = configured_key, "configured"
+        elif sweep_aware or timeline_cfg.get("auto_key_columns", False):
+            key_columns, key_source = key_info["key_columns"], "inferred"
+        else:
+            key_columns, key_source = [], "timestamp_primary_key"
+
+        min_overlap = int(timeline_cfg.get("min_run_overlap_rows", 8))
+        run_detection = bool(timeline_cfg.get("run_detection", False)) or sweep_aware
+        runs = (
+            timeline.detect_runs(soft_cleaned, ts_col, min_overlap_rows=min_overlap)
+            if run_detection else None
         )
-        if non_monotonic_timestamps:
-            soft_cleaned = soft_cleaned.sort_values(
-                by=ts_col, kind="mergesort", na_position="last"
-            ).reset_index(drop=True)
+        run_id = runs["run_id"] if runs else None
+
+        # Snapshot the timestamp contract as *detected*, before anything is
+        # removed — this is what the action plan reports, so the duplicates and
+        # out-of-order rows the pipeline removes stay on the record.
+        timestamp_order_before = ts_checks.inspect_timestamp_order(
+            soft_cleaned, ts_col, key_columns=key_columns, sweep_aware=sweep_aware
+        )
+
+        # --- 1. Duplicates, on the primary key ---------------------------
+        policy = timeline_cfg.get("collision_policy", "keep_last")
+        soft_cleaned, collision = timeline.resolve_collisions(
+            soft_cleaned, ts_col,
+            key_columns=key_columns, policy=policy, run_id=run_id,
+        )
+        soft_cleaned = soft_cleaned.reset_index(drop=True)
+        duplicate_timestamps += int(collision["rows_removed"])
+        if collision["collisions_on_timestamp"]:
+            LOGGER.warning(
+                "%s duplicate timestamp(s) on primary key %r: %s row(s) removed "
+                "by policy %r%s",
+                collision["collisions_on_timestamp"], ts_col,
+                collision["rows_removed"], policy,
+                f" (key {key_columns})" if key_columns else "",
+            )
+
+        # --- 2. Time disorder --------------------------------------------
+        non_monotonic_timestamps = int(
+            ts_checks.inspect_timestamp_order(soft_cleaned, ts_col)
+            .get("num_non_monotonic_steps", 0)
+        )
+        disorder_policy = timeline_cfg.get("disorder_policy", "drop")
+        if runs and runs["num_runs"] > 1 and sweep_aware:
+            # Sweep mode keeps runs separate instead of dropping the later one.
+            disorder_policy = "sort"
+        runs_after = (
+            timeline.detect_runs(soft_cleaned, ts_col, min_overlap_rows=min_overlap)
+            if run_detection else None
+        )
+        soft_cleaned, disorder = timeline.enforce_monotonic(
+            soft_cleaned, ts_col, policy=disorder_policy,
+            run_id=runs_after["run_id"] if runs_after else None,
+        )
+        if disorder["rows_dropped"]:
+            LOGGER.warning(
+                "dropped %s out-of-order row(s) on %r (%s backward step(s); "
+                "forward scan keeps a strictly increasing timeline)",
+                disorder["rows_dropped"], ts_col, disorder["backward_steps"],
+            )
+        elif not disorder["was_monotonic"] and disorder_policy == "sort":
             LOGGER.warning(
                 "sorted %s non-monotonic timestamp step(s) on %r",
-                non_monotonic_timestamps,
-                ts_col,
+                disorder["backward_steps"], ts_col,
             )
+
+        if runs_after and sweep_aware:
+            # Sweep-aware mode: expose the run as data so downstream splits,
+            # regularization, and the dashboard can segment on it.
+            soft_cleaned = soft_cleaned.assign(
+                run=timeline.detect_runs(
+                    soft_cleaned, ts_col, min_overlap_rows=min_overlap)["run_id"]
+            )
+
+        timeline_diag = {
+            "primary_key": [ts_col] + list(key_columns),
+            "key_columns": key_columns,
+            "key_source": key_source,
+            # Advisory: what a composite sweep key would resolve, even when the
+            # timestamp alone is the key. Lets the dashboard show how many of the
+            # removed rows were distinct experimental conditions.
+            "key_advisory": {
+                "candidate_key": key_info.get("key_columns", []),
+                "collisions_on_timestamp": key_info.get("collisions_on_timestamp", 0),
+                "residual_collisions": key_info.get("residual_collisions", 0),
+                "candidates": key_info.get("candidates", [])[:8],
+            },
+            "collision": collision,
+            "disorder": disorder,
+            "runs": {k: v for k, v in (runs_after or {}).items() if k != "run_id"},
+            "sweep_aware": sweep_aware,
+        }
 
     validation = {
         "configured_mode": configured_mode,
@@ -564,19 +886,38 @@ def run_pipeline(
         mode=validation_mode,
         timestamp_col=ts_col,
         validation_config=validation_cfg,
+        # Report the timestamp contract as *detected*, not as left behind by the
+        # fixes above — otherwise the action plan silently omits the duplicates
+        # and out-of-order rows the pipeline just removed. ``quality_after``
+        # carries the post-fix state, which is the other half of the before/after.
         timestamp_order_override=timestamp_order_before
-        if non_monotonic_timestamps
+        if (non_monotonic_timestamps or duplicate_timestamps)
         else None,
+        key_columns=key_columns,
+        sweep_aware=bool(timeline_cfg.get("sweep_aware", False)),
     )
 
-    # Remediation: act on each detected issue (winsorize outliers, type-aware
-    # fill for tabular missing). Time-series gaps are left for the imputation
-    # handoff below.
+    _log_raw_quality(
+        input_csv, raw, cleaning_report, quality,
+        ts_col=ts_col, timeline_diag=timeline_diag,
+        duplicate_timestamps=duplicate_timestamps,
+        non_monotonic_timestamps=non_monotonic_timestamps,
+    )
+
+    # Remediation: act on each detected issue (report — or, when enabled,
+    # winsorize — outliers; type-aware fill for tabular missing). Time-series
+    # gaps are left for the imputation handoff below.
     remediated, remediation_report = remediate(
         soft_cleaned,
         quality["report"],
         outlier_q=float(validation_cfg.get("outlier_q", 0.01)),
+        # Off by default: outliers are always detected and reported, but
+        # winsorizing rewrites real measurements — on benchmark data a genuine
+        # latency spike is signal. Opt in with validation.clip_outliers: true.
+        clip_outliers=bool(validation_cfg.get("clip_outliers", False)),
     )
+
+    _log_remediation(remediation_report)
 
     # Re-run the same checks on the remediated frame so the report carries a
     # genuine before/after for the dashboard. Time-series gaps remain (deferred
@@ -588,6 +929,8 @@ def run_pipeline(
             mode=validation_mode,
             timestamp_col=ts_col,
             validation_config=validation_cfg,
+            key_columns=key_columns,
+            sweep_aware=bool(timeline_cfg.get("sweep_aware", False)),
         )
 
     comparison = _validation_comparison(
@@ -600,6 +943,7 @@ def run_pipeline(
         validation=validation,
         duplicate_timestamps=duplicate_timestamps,
         non_monotonic_timestamps=non_monotonic_timestamps,
+        timeline_diag=timeline_diag,
     )
 
     # Persist both stages as artifacts: the soft-cleaned frame (before
@@ -615,6 +959,7 @@ def run_pipeline(
         output_csv=output_csv,
         ts_col=ts_col,
         imputation_cfg=imputation_cfg,
+        timeline_cfg=timeline_cfg,
     )
 
     report = {
@@ -632,6 +977,7 @@ def run_pipeline(
         },
         "remediation": asdict(remediation_report),
         "profile": detected_profile,
+        "timeline": timeline_diag,
         "quality": quality,
         "quality_after": quality_after,
         "validation": validation,
@@ -670,6 +1016,7 @@ def run_from_config(config_path: str | None = None, **overrides: str | None) -> 
         timestamp_col=cfg.get("timestamp_col"),
         validation_config=cfg.get("validation", {}),
         imputation_config=cfg.get("imputation", {}),
+        timeline_config=cfg.get("timeline", {}),
         soft_cleaned_csv=soft_cleaned_output,
     )
 
@@ -703,9 +1050,15 @@ def main(argv: list[str] | None = None) -> None:
         LOGGER.exception("minimal DataOps pipeline failed")
         notify_failure(f"minimal DataOps pipeline failed: {exc}")
         raise
+    # cleaning.output_rows predates the timeline collision/disorder stages, so it
+    # overstates what was written (golang: 58763 vs 51591 rows actually on disk).
+    # Report the shape the pipeline actually produced.
+    shape = ((report.get("validation_comparison") or {}).get("dataset_shape") or {})
+    written = (shape.get("remediated") or {}).get("rows")
     LOGGER.info(
-        "pipeline complete: rows=%s output=%s report=%s",
-        report["cleaning"]["output_rows"],
+        "pipeline complete: rows=%s (raw %s) output=%s report=%s",
+        written if written is not None else report["cleaning"]["output_rows"],
+        report["cleaning"]["input_rows"],
         report["output"],
         report.get("report_path", args.report),
     )

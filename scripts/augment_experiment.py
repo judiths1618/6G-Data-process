@@ -50,7 +50,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(REPO_ROOT / "dockers" / "airflow" / "dags"))
 
-from augmentation import Strategy, chunked_predict, parse_strategy  # noqa: E402
+from augmentation import chunked_predict, parse_strategy  # noqa: E402
 
 
 SUPPORTED_METHODS = ("pypots_saits", "pypots_brits")
@@ -167,7 +167,6 @@ def main() -> int:
         raise SystemExit(f"{prep} is not a prepared_<run_id>/ dir.")
     prep_meta = json.loads((prep / "meta.json").read_text())
     target_cols = prep_meta["target_cols"]
-    ts_col = prep_meta.get("time_col", "time")
     cat_encoded = prep_meta.get("categorical_encoded_cols") or []
 
     train_df = pd.read_csv(prep / "train.csv")

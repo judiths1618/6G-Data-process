@@ -37,7 +37,21 @@ from ._preprocess_impl import (  # noqa: F401
     regularize as regularize_timeline,
 )
 
-__all__ = ["preprocess", "preprocess_csv", "METADATA"]
+__all__ = [
+    "preprocess",
+    "preprocess_csv",
+    "METADATA",
+    # The composable helpers the module docstring advertises. They must be named
+    # here or they do not survive `from dataops.transform import *`, which is
+    # exactly how data_process_modules.transform re-exports this module — so the
+    # documented surface was missing through the compat shim.
+    "add_gap_structure_features",
+    "add_time_features",
+    "analyze_outliers",
+    "coerce_time_column",
+    "compute_scaler_stats",
+    "regularize_timeline",
+]
 
 
 def _existing_columns(columns: Iterable[str], df: pd.DataFrame) -> list[str]:
@@ -151,15 +165,20 @@ def preprocess(
     observed_col_mask = {c: transformed[c].notna().to_numpy() for c in numeric_targets}
     actual_base_dt = base_dt
     was_regularized = False
+    regularization: dict = {"regularized": False, "skip_reason": "not requested"}
     if regularize and len(transformed) >= 2:
-        transformed, observed_row_mask, observed_col_mask, actual_base_dt = _impl.regularize(
+        (transformed, observed_row_mask, observed_col_mask,
+         actual_base_dt, regularization) = _impl.regularize(
             transformed,
             time_col=ts_col,
             base_dt=base_dt,
             skip_if_sparse=True,
             sparse_skip_pct=sparse_skip_pct,
         )
-        was_regularized = len(transformed) != len(work) or actual_base_dt is not None
+        # Ask the regularizer whether it actually built the grid rather than
+        # inferring it from a row count — the sparsity guard can return the
+        # original irregular frame unchanged.
+        was_regularized = bool(regularization["regularized"])
 
     cond_cols: list[str] = []
     if add_cond_features and len(transformed) > 0:
@@ -187,6 +206,7 @@ def preprocess(
         "original_rows": int(len(raw)),
         "regularized_rows": int(len(transformed)),
         "regularized": was_regularized,
+        "regularization": regularization,
         "scaler": scaler_stats,
         "notes": [prof["classification_reason"]],
     }
@@ -209,6 +229,10 @@ def preprocess_csv(
     extract_all_segments_flag: bool = False,
     min_segment_length: int = 50,
     skip_regularize_if_sparse: bool = True,
+    segment_regularization: bool = True,
+    segment_gap_seconds: float = 86400.0,
+    min_segment_rows: int = 32,
+    require_all_segments: bool = True,
     gap_threshold: float = 1000.0,
     sparse_skip_pct: float = 80.0,
     time_unit_seconds: Optional[float] = 1.0,
@@ -235,6 +259,10 @@ def preprocess_csv(
         extract_all_segments_flag=extract_all_segments_flag,
         min_segment_length=min_segment_length,
         skip_regularize_if_sparse=skip_regularize_if_sparse,
+        segment_regularization=segment_regularization,
+        segment_gap_seconds=segment_gap_seconds,
+        min_segment_rows=min_segment_rows,
+        require_all_segments=require_all_segments,
         gap_threshold=gap_threshold,
         sparse_skip_pct=sparse_skip_pct,
         time_unit_seconds=time_unit_seconds,

@@ -20,7 +20,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -30,6 +30,26 @@ sys.path.insert(0, str(APP_DIR))
 from wsp_v2 import (  # noqa: E402
     anchor_blend, build_prior, default_monotone_groups, load_meta, score_holdout,
 )
+
+
+def stale_reason(df: pd.DataFrame, target_cols: List[str], n_rows: int) -> Optional[str]:
+    """Why ``df`` cannot be scored on the current holdout, or None if it can.
+
+    A file produced on an older bundle either lacks a current target column
+    (e.g. after a units rename: ram_usage vs ram_usage_mb) or carries a
+    different number of rows. The first would be silently scored on just the
+    surviving columns — a smaller n_cells and an artificially low MAE that is
+    not comparable to the others. The second cannot be scored at all: the
+    holdout mask and the predictions no longer line up, and numpy raises a
+    broadcast error that takes the whole comparison down with it.
+    """
+    missing = [c for c in target_cols if c not in df.columns]
+    if missing:
+        preview = ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "")
+        return f"missing {len(missing)}/{len(target_cols)} target cols ({preview})"
+    if len(df) != n_rows:
+        return f"{len(df)} rows, but this holdout has {n_rows}"
+    return None
 
 
 def main() -> int:
@@ -76,29 +96,33 @@ def main() -> int:
         if method in {"wavestitchplus_v1", "wavestitchplus_v2"}:
             continue
         df = pd.read_csv(f)
-        # Only compare methods scored on the SAME columns. A file that lacks a
-        # current target column (e.g. produced on an older bundle before a
-        # units rename: ram_usage vs ram_usage_mb) would be silently scored on
-        # just the surviving columns — a smaller n_cells and an artificially low
-        # MAE that is not comparable to the others. Skip it instead of mixing.
-        missing = [c for c in tcols if c not in df.columns]
-        if missing:
-            stale.append((method, missing))
+        # Only compare methods scored on the SAME holdout — same target columns
+        # and same rows. See stale_reason() for why mixing the others is worse
+        # than skipping them.
+        reason = stale_reason(df, tcols, len(ti))
+        if reason:
+            stale.append((method, reason))
             continue
         s = score_holdout(ti, gt, df, tcols)
         rows.append({"method": method, **s})
 
     if stale:
-        print(f"[compare_wsp_v2] skipped {len(stale)} method(s) with a stale schema "
-              f"(missing current target columns — re-run them on this bundle):",
-              file=sys.stderr)
-        for method, missing in stale:
-            preview = ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "")
-            print(f"  - {method}: missing {len(missing)}/{len(tcols)} cols ({preview})",
-                  file=sys.stderr)
+        print(f"[compare_wsp_v2] skipped {len(stale)} method(s) produced on a different "
+              f"bundle (re-run them on this one):", file=sys.stderr)
+        for method, reason in stale:
+            print(f"  - {method}: {reason}", file=sys.stderr)
 
-    # WaveStitch+ v1 (raw diffusion)
+    # WaveStitch+ v1 (raw diffusion). This one is not skippable — v2 is built
+    # from it — so a bundle mismatch here is a hard error with a fix to run.
     v1 = pd.read_csv(v1_path)
+    reason = stale_reason(v1, tcols, len(ti))
+    if reason:
+        raise SystemExit(
+            f"{v1_path} does not match {prepared}: {reason}.\n"
+            "The v1 output was produced on an older bundle. Re-run Track C step 2:\n"
+            "  python dockers/tools/WaveStitchPlus_app/run_imputation.py "
+            f"--prepared-dir {prepared} --output-dir {v1_path.parent} --fast --device cpu"
+        )
     rows.append({"method": "wavestitchplus_v1", **score_holdout(ti, gt, v1, tcols)})
 
     # WaveStitch+ v2 (locally anchored)

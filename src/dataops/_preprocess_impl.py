@@ -271,8 +271,11 @@ def regularize(df: pd.DataFrame, time_col="time", base_dt=None,
     """
     Regularize timeline to uniform intervals.
 
-    Returns (df_regularized, observed_col_mask, base_dt) where
-    observed_col_mask is a dict of {col_name: np.ndarray[bool]}.
+    Returns (df_regularized, observed_row_mask, observed_col_mask, base_dt,
+    diagnostics) where observed_col_mask is a dict of {col_name: np.ndarray[bool]}
+    and ``diagnostics`` records whether the uniform grid was actually built —
+    when the sparsity guard fires the frame comes back on its original irregular
+    timestamps, which callers must not mistake for a regularized bundle.
 
     ``sparse_skip_pct`` is the maximum tolerated gap percentage; above this,
     regularization is skipped (when ``skip_if_sparse=True``).
@@ -280,7 +283,21 @@ def regularize(df: pd.DataFrame, time_col="time", base_dt=None,
     df = df.copy()
     df[time_col] = pd.to_numeric(df[time_col], errors="coerce")
     df = df.dropna(subset=[time_col]).sort_values(time_col)
-    df = df.drop_duplicates(subset=[time_col], keep="last")
+
+    # A uniform grid structurally admits one row per timestamp, so collided rows
+    # must be combined here. Average them rather than keeping the last: in a
+    # parameter sweep the collided rows are different conditions, and silently
+    # discarding all but one of them was dropping 12% of the golang subset.
+    n_before = len(df)
+    collisions = int(df[time_col].duplicated().sum())
+    if collisions:
+        numeric = [c for c in df.columns
+                   if c != time_col and pd.api.types.is_numeric_dtype(df[c])]
+        agg = {c: ("mean" if c in numeric else "last")
+               for c in df.columns if c != time_col}
+        df = df.groupby(time_col, as_index=False, sort=True).agg(agg)
+        print(f"[INFO] Averaged {collisions} timestamp collision(s) onto "
+              f"{len(df)} unique timestamps (grid requires one row per instant)")
 
     t = df[time_col].to_numpy()
 
@@ -294,9 +311,66 @@ def regularize(df: pd.DataFrame, time_col="time", base_dt=None,
     n_grid = int((t_max - t_min) / base_dt) + 1
     expected_gap_pct = 100 * (1 - len(t) / n_grid)
 
+    diag = {
+        "regularized": True,
+        "base_dt": float(base_dt),
+        "grid_rows": int(n_grid),
+        "source_rows": int(len(t)),
+        "rows_in": int(n_before),
+        "timestamp_collisions_averaged": int(collisions),
+        "expected_gap_pct": float(expected_gap_pct),
+        "sparse_skip_pct": float(sparse_skip_pct),
+        "skip_if_sparse": bool(skip_if_sparse),
+        "skip_reason": None,
+        "decision": {
+            "outcome": "single_grid",
+            "code": "fits_guard",
+            "rationale": (
+                f"One uniform {base_dt:g}s grid over {n_grid:,} points holds the "
+                f"{len(t):,} observations at {expected_gap_pct:.1f}% emptiness, within "
+                f"the {sparse_skip_pct:.0f}% budget, so the timeline was regularized."
+            ),
+            "measured": {"base_dt": float(base_dt), "grid_rows": int(n_grid),
+                         "observed_rows": int(len(t)),
+                         "expected_gap_pct": float(expected_gap_pct)},
+            "threshold": {"sparse_skip_pct": float(sparse_skip_pct)},
+            "alternatives": [],
+        },
+    }
+
     if skip_if_sparse and expected_gap_pct > sparse_skip_pct:
         print(f"[WARNING] Regularization would create {expected_gap_pct:.1f}% gaps "
               f"(> {sparse_skip_pct:.1f}% threshold) — skipping")
+        diag["regularized"] = False
+        diag["decision"] = {
+            "outcome": "not_regularized",
+            "code": "too_sparse",
+            "rationale": (
+                f"A uniform {base_dt:g}s grid would need {n_grid:,} points to hold "
+                f"{len(t):,} observations — {expected_gap_pct:.1f}% of the grid would be "
+                f"synthetic, over the {sparse_skip_pct:.0f}% budget. Imputing that much "
+                f"invented structure would dominate the real signal, so the original "
+                f"irregular timestamps were kept."
+            ),
+            "measured": {"base_dt": float(base_dt), "grid_rows": int(n_grid),
+                         "observed_rows": int(len(t)),
+                         "expected_gap_pct": float(expected_gap_pct)},
+            "threshold": {"sparse_skip_pct": float(sparse_skip_pct)},
+            "alternatives": [
+                "timeline.segment_regularization: true — split at collection pauses so "
+                "each campaign gets its own grid (often the whole cause of the sparsity)",
+                f"a coarser base_dt (> {base_dt:g}s) — fewer grid points, but short-interval "
+                f"structure is averaged away",
+                f"raise validation.sparse_skip_pct above {expected_gap_pct:.0f} — accepts a "
+                f"mostly-synthetic grid; only sensible if the model is meant to fill it",
+            ],
+        }
+        diag["skip_reason"] = (
+            f"regularizing onto a {base_dt:g}s grid would leave "
+            f"{expected_gap_pct:.1f}% of {n_grid} grid points empty, above the "
+            f"{sparse_skip_pct:.1f}% threshold; the bundle keeps the original "
+            f"irregular timeline and is NOT on a uniform grid"
+        )
         # Build per-column observed masks from the raw data
         data_cols = [c for c in df.columns if c != time_col]
         observed_col_mask = {}
@@ -304,7 +378,7 @@ def regularize(df: pd.DataFrame, time_col="time", base_dt=None,
             observed_col_mask[c] = df[c].notna().to_numpy()
         # Row-level mask (all-True since we're keeping originals)
         observed_row_mask = np.ones(len(df), dtype=bool)
-        return df, observed_row_mask, observed_col_mask, base_dt
+        return df, observed_row_mask, observed_col_mask, base_dt, diag
 
     full = np.linspace(t_min, t_min + (n_grid - 1) * base_dt, n_grid)
     tolerance = base_dt / 2.0
@@ -358,7 +432,221 @@ def regularize(df: pd.DataFrame, time_col="time", base_dt=None,
     if gap_pct > 70:
         print(f"[WARNING] High gap percentage ({gap_pct:.1f}%)")
 
-    return df_reg, observed_row_mask, observed_col_mask, base_dt
+    return df_reg, observed_row_mask, observed_col_mask, base_dt, diag
+
+
+def regularize_segments(df: pd.DataFrame, time_col="time", base_dt=None,
+                        segment_gap_seconds: float = 86400.0,
+                        min_segment_rows: int = 32,
+                        require_all_segments: bool = True,
+                        skip_if_sparse=True, sparse_skip_pct: float = 80.0):
+    """Regularize each acquisition campaign onto its **own** uniform grid.
+
+    A single global grid is the wrong shape whenever collection stopped and
+    restarted. The EUR golang subset is the clear case: one 107.9-day pause
+    between two campaigns inflates the 20s grid to 621k points for 51.6k
+    observations (91.7% empty), which trips the sparsity guard and leaves the
+    bundle on its original irregular timestamps. Split at that pause and every
+    campaign lands between 52% and 78% empty — inside the guard — and each gets
+    the cadence it was actually sampled at (golang ranges from 3s to 69s across
+    campaigns, so one ``base_dt`` cannot serve them all).
+
+    Segments are concatenated in time order. The result is uniform *within* each
+    campaign with a single honest jump between campaigns, instead of the 527
+    distinct step sizes the unsegmented bundle carries today.
+
+    ``require_all_segments`` keeps the bundle **homogeneous**. If some campaigns
+    make it onto a grid and others stay irregular, the frame carries two
+    different sampling regimes, and the chronological train/test split lands them
+    on opposite sides: on the EUR python subset that produced a train split that
+    was 66% gridded-with-gaps (36.2% NaN) against a test split that was entirely
+    irregular and dense. Training on one regime and evaluating on the other makes
+    the benchmark meaningless, so unless every campaign can be regularized the
+    whole dataset keeps its original timestamps.
+
+    Returns the same 5-tuple as :func:`regularize`; ``diag`` gains a
+    ``segments`` list with per-campaign grid statistics.
+    """
+    work = df.copy()
+    work[time_col] = pd.to_numeric(work[time_col], errors="coerce")
+    work = work.dropna(subset=[time_col]).sort_values(time_col).reset_index(drop=True)
+
+    t = work[time_col].to_numpy()
+    if len(t) < 2:
+        return regularize(df, time_col, base_dt, skip_if_sparse, sparse_skip_pct)
+
+    bounds = np.where(np.diff(t) > segment_gap_seconds)[0]
+    starts = [0] + (bounds + 1).tolist()
+    ends = (bounds + 1).tolist() + [len(work)]
+    spans = [(s, e) for s, e in zip(starts, ends)]
+
+    print(f"\n[SEGMENT] {len(spans)} campaign(s) at a "
+          f"{segment_gap_seconds:g}s split threshold")
+
+    kept, dropped_rows = [], 0
+    for s, e in spans:
+        if e - s < min_segment_rows:
+            dropped_rows += e - s
+            continue
+        kept.append((s, e))
+    if not kept:
+        print("[SEGMENT] every campaign is below the minimum size — "
+              "falling back to a single grid")
+        return regularize(df, time_col, base_dt, skip_if_sparse, sparse_skip_pct)
+
+    frames, row_masks, col_masks, seg_diags, seg_base_dts = [], [], [], [], []
+    for i, (s, e) in enumerate(kept, 1):
+        seg = work.iloc[s:e].reset_index(drop=True)
+        print(f"[SEGMENT] campaign {i}/{len(kept)}: {len(seg)} rows")
+        f, rm, cm, bdt, d = regularize(
+            seg, time_col=time_col, base_dt=base_dt,
+            skip_if_sparse=skip_if_sparse, sparse_skip_pct=sparse_skip_pct,
+        )
+        d["campaign"] = i
+        d["rows_in_segment"] = int(len(seg))
+        frames.append(f)
+        row_masks.append(np.asarray(rm, dtype=bool))
+        col_masks.append(cm)
+        seg_diags.append(d)
+        seg_base_dts.append(float(bdt))
+
+    df_reg = pd.concat(frames, ignore_index=True)
+    observed_row_mask = np.concatenate(row_masks)
+    data_cols = [c for c in df_reg.columns if c != time_col]
+    observed_col_mask = {}
+    for c in data_cols:
+        parts = [
+            m.get(c, np.zeros(len(f), dtype=bool))
+            for m, f in zip(col_masks, frames)
+        ]
+        observed_col_mask[c] = np.concatenate(parts)
+
+    n_ok = sum(1 for d in seg_diags if d["regularized"])
+    if require_all_segments and n_ok != len(seg_diags):
+        # Mixed regimes are worse than no grid at all — see the docstring.
+        print(f"[SEGMENT] only {n_ok}/{len(seg_diags)} campaign(s) fit a grid; "
+              f"keeping the original irregular timeline so train and test stay "
+              f"on the same sampling regime")
+        _, row_mask, col_mask, bdt, diag = regularize(
+            df, time_col=time_col, base_dt=base_dt,
+            skip_if_sparse=True, sparse_skip_pct=-1.0,   # force the skip path
+        )
+        failed = [d["campaign"] for d in seg_diags if not d["regularized"]]
+        diag.update({
+            "decision": {
+                "outcome": "not_regularized",
+                "code": "mixed_regimes_rejected",
+                "rationale": (
+                    f"Splitting at collection pauses produced {len(seg_diags)} campaigns, "
+                    f"but only {n_ok} fit a grid (campaign(s) {failed} stayed too sparse). "
+                    f"Gridding only some of them would leave one bundle carrying two "
+                    f"sampling regimes, and the chronological train/test split would put "
+                    f"them on opposite sides — training on gridded data and scoring on "
+                    f"irregular data. A consistent timeline is worth more than a partial "
+                    f"grid, so none were regularized."
+                ),
+                "measured": {
+                    "num_segments": len(seg_diags),
+                    "segments_regularized": n_ok,
+                    "failed_campaigns": failed,
+                    "per_campaign_gap_pct": [
+                        round(float(d.get("expected_gap_pct", 0)), 1) for d in seg_diags
+                    ],
+                },
+                "threshold": {"sparse_skip_pct": float(sparse_skip_pct),
+                              "segment_gap_seconds": float(segment_gap_seconds),
+                              "require_all_segments": True},
+                "alternatives": [
+                    "timeline.require_all_segments: false — grid the campaigns that fit "
+                    "and accept a mixed-regime bundle (only safe with a split that keeps "
+                    "both regimes on both sides)",
+                    "a smaller timeline.segment_gap_seconds — splits further; helps only "
+                    "when the sparsity comes from pauses rather than within-campaign bursts",
+                    "a coarser base_dt for this dataset — trades burst resolution for a "
+                    "denser grid",
+                ],
+            },
+            "strategy": "per_segment_rejected",
+            "num_segments": len(seg_diags),
+            "segments_regularized": n_ok,
+            "segments": seg_diags,
+            "segment_gap_seconds": float(segment_gap_seconds),
+            "skip_reason": (
+                f"only {n_ok} of {len(seg_diags)} campaign(s) fit a uniform grid; "
+                f"regularizing just those would leave the bundle with two sampling "
+                f"regimes split across train/test, so none were regularized"
+            ),
+        })
+        return df, row_mask, col_mask, bdt, diag
+
+    representative = float(np.median(seg_base_dts))
+    grid_rows = int(sum(d.get("grid_rows", 0) for d in seg_diags))
+    source_rows = int(sum(d.get("source_rows", 0) for d in seg_diags))
+    diag = {
+        # Only a bundle whose every campaign made it onto a grid is uniform.
+        "regularized": n_ok == len(seg_diags),
+        "strategy": "per_segment",
+        "base_dt": representative,
+        "segment_base_dts": seg_base_dts,
+        "segments": seg_diags,
+        "num_segments": len(seg_diags),
+        "segments_regularized": n_ok,
+        "segment_gap_seconds": float(segment_gap_seconds),
+        "min_segment_rows": int(min_segment_rows),
+        "rows_dropped_short_segments": int(dropped_rows),
+        "grid_rows": grid_rows,
+        "source_rows": source_rows,
+        "rows_in": int(len(df)),
+        "timestamp_collisions_averaged": int(
+            sum(d.get("timestamp_collisions_averaged", 0) for d in seg_diags)
+        ),
+        "expected_gap_pct": float(
+            100 * (1 - source_rows / grid_rows) if grid_rows else 0.0
+        ),
+        "sparse_skip_pct": float(sparse_skip_pct),
+        "skip_if_sparse": bool(skip_if_sparse),
+        "skip_reason": None if n_ok == len(seg_diags) else (
+            f"{len(seg_diags) - n_ok} of {len(seg_diags)} campaign(s) were still "
+            f"too sparse for a uniform grid; those keep their original irregular "
+            f"timestamps"
+        ),
+    }
+    # Counterfactual: what a single unsegmented grid would have cost. It must use
+    # the cadence ``regularize()`` would actually infer for the whole series —
+    # the median of *all* steps — not the median of the per-campaign cadences,
+    # or the comparison silently flatters segmentation.
+    whole_span = float(t.max() - t.min())
+    whole_dt = infer_base_dt(np.unique(t)) if len(t) > 1 else representative
+    whole_grid = int(whole_span / whole_dt) + 1 if whole_dt > 0 else 0
+    whole_pct = 100 * (1 - source_rows / whole_grid) if whole_grid else 0.0
+    diag["decision"] = {
+        "outcome": "per_segment",
+        "code": "all_campaigns_fit",
+        "rationale": (
+            f"Collection paused {len(seg_diags) - 1} time(s) for longer than "
+            f"{segment_gap_seconds:g}s. One {whole_dt:g}s grid across the whole span "
+            f"would be {whole_pct:.1f}% empty; split into {len(seg_diags)} campaigns, every one "
+            f"fits its own grid at the cadence it was actually sampled at "
+            f"({seg_base_dts}), for {diag['expected_gap_pct']:.1f}% emptiness overall. "
+            f"A single base_dt cannot serve campaigns whose cadences differ this much."
+        ),
+        "measured": {
+            "num_segments": len(seg_diags),
+            "segment_base_dts": seg_base_dts,
+            "per_campaign_gap_pct": [
+                round(float(d.get("expected_gap_pct", 0)), 1) for d in seg_diags
+            ],
+            "segmented_gap_pct": round(float(diag["expected_gap_pct"]), 1),
+            "unsegmented_gap_pct": round(float(whole_pct), 1),
+            "unsegmented_base_dt": float(whole_dt),
+        },
+        "threshold": {"sparse_skip_pct": float(sparse_skip_pct),
+                      "segment_gap_seconds": float(segment_gap_seconds)},
+        "alternatives": [],
+    }
+    print(f"[SEGMENT] {n_ok}/{len(seg_diags)} campaign(s) regularized · "
+          f"{len(df_reg)} rows · base_dt per campaign {seg_base_dts}")
+    return df_reg, observed_row_mask, observed_col_mask, representative, diag
 
 
 # =============================================================================
@@ -791,6 +1079,10 @@ def preprocess_csv(
     extract_all_segments_flag=False,
     min_segment_length=50,
     skip_regularize_if_sparse=True,
+    segment_regularization=True,
+    segment_gap_seconds=86400.0,
+    min_segment_rows=32,
+    require_all_segments=True,
     gap_threshold=1000.0,
     sparse_skip_pct=80.0,
     time_unit_seconds: float | None = 1.0,
@@ -807,6 +1099,12 @@ def preprocess_csv(
             jump counts as a "large gap" for diagnostics and segmentation.
         sparse_skip_pct: If regularization on a uniform grid would create
             more than this percentage of empty cells, skip it.
+        segment_regularization: Regularize each acquisition campaign onto its
+            own grid instead of stretching one grid across collection pauses.
+        segment_gap_seconds: Pause length that starts a new campaign.
+        min_segment_rows: Campaigns shorter than this are dropped.
+        require_all_segments: Regularize only when *every* campaign fits a grid,
+            so train and test never straddle two sampling regimes.
         time_unit_seconds: How many seconds one unit of the time column
             represents. Used only to scale day/hour cyclic features. Pass
             ``None`` to skip those features for unitless time columns.
@@ -928,11 +1226,25 @@ def preprocess_csv(
     print(f"REGULARIZATION")
     print(f"{'='*70}")
 
-    df_reg, observed_row_mask, observed_col_mask, base_dt = regularize(
-        raw, time_col=time_col, base_dt=base_dt,
-        skip_if_sparse=skip_regularize_if_sparse,
-        sparse_skip_pct=sparse_skip_pct,
-    )
+    if segment_regularization:
+        # Per-campaign grids: a collection pause must not stretch one grid
+        # across it, and each campaign keeps the cadence it was sampled at.
+        (df_reg, observed_row_mask, observed_col_mask,
+         base_dt, regularization) = regularize_segments(
+            raw, time_col=time_col, base_dt=base_dt,
+            segment_gap_seconds=segment_gap_seconds,
+            min_segment_rows=min_segment_rows,
+            require_all_segments=require_all_segments,
+            skip_if_sparse=skip_regularize_if_sparse,
+            sparse_skip_pct=sparse_skip_pct,
+        )
+    else:
+        (df_reg, observed_row_mask, observed_col_mask,
+         base_dt, regularization) = regularize(
+            raw, time_col=time_col, base_dt=base_dt,
+            skip_if_sparse=skip_regularize_if_sparse,
+            sparse_skip_pct=sparse_skip_pct,
+        )
 
     # ── Identify target / cond columns BEFORE adding features ────────
     # Categorical-encoded columns are cond features, not targets.
@@ -1072,6 +1384,11 @@ def preprocess_csv(
         "units_converted": convert_units,
         "gap_threshold": float(gap_threshold),
         "sparse_skip_pct": float(sparse_skip_pct),
+        # Whether the timeline actually landed on a uniform grid. When the
+        # sparsity guard fires the bundle keeps the original irregular
+        # timestamps, which every windowed model downstream assumes it does not.
+        "regularized": bool(regularization["regularized"]),
+        "regularization": regularization,
         "split_ratio": split_ratio,
         "holdout_frac": holdout_frac,
         "original_rows": int(diag["n_points"]),

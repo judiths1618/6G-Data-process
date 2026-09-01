@@ -11,21 +11,11 @@
 
 This repository provides an end-to-end implementation for (time-series) data cleaning, validation, remediation, and imputation handoff using Apache Airflow, SeaweedFS, and ML models.
 
-## Highlights
-
-**Time-series data cleaning & AI-assisted imputation** — `Python · PyTorch · Apache Airflow · SeaweedFS · Docker`
-
-- **WaveStitch+**, a **diffusion-based imputation model** for 5G/6G telemetry (RePaint + Hann-weighted
-  windowing + DDIM sampling + EM training), benchmarked against Darts, ImputeGAP, and PyPOTS. The inference-time **v2** local-anchoring layer substantially reduces holdout MAE versus raw v1 with no retraining and — anchored to a per-column **`auto`** interpolation prior — **matches or beats the strong `nearest` baseline** across the benchmark subsets, while reserving its diffusion contribution for genuinely long gaps.
-- A **reproducible, end-to-end data-cleaning pipeline** (validation → remediation → imputation) with
-  GitHub Actions CI, `pytest`, DVC versioning, and a Streamlit **monitoring dashboard** that makes every
-  run stage-by-stage auditable.
-
-Jump to **[Reproduce the results](#reproduce-the-results)** for a clean-room, copy-paste run.
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [The pipeline logic](#the-pipeline-logic)
 - [Reproduce the results](#reproduce-the-results)
 - [Configuration & data lineage](#configuration--data-lineage)
 - [Installation & Setup](#installation--setup)
@@ -41,26 +31,100 @@ Jump to **[Reproduce the results](#reproduce-the-results)** for a clean-room, co
 
 ## Overview
 
-Diffusion model-based time-series imputation: **WaveStitch+** extends WaveStitch[add reference] by combining **RePaint**, **Hann-weighted windowing**, and **DDIM sampling** with an **Expectation-Maximization (EM)** training loop. It repairs conditional gaps in test-time series, even when the training data also contains missing values. A lightweight **v2** variant adds inference-time **local anchoring** of the diffusion output, recovering interpolation-grade accuracy on short gaps while preserving the diffusion model's advantage deep inside long gaps. This repository packages WaveStitch+ as a reusable and reproducible component in an **end-to-end data-cleaning pipeline**, adopted for 5G/6G time-series data.
+Diffusion model-based time-series imputation: **WaveStitch+** extends WaveStitch by combining **RePaint**, **Hann-weighted windowing**, and **DDIM sampling** with an **Expectation-Maximization (EM)** training loop. It repairs conditional gaps in test-time series, even when the training data also contains missing values. A lightweight **v2** variant adds inference-time **local anchoring** of the diffusion output, recovering interpolation-grade accuracy on short gaps while preserving the diffusion model's advantage deep inside long gaps. This repository packages WaveStitch+ as a reusable and reproducible component in an **end-to-end data-cleaning pipeline**, adopted for 5G/6G time-series data.
 
-Architecture overview with WaveStitch+:
-
-![Architecture overview](design/Arch.png)
-
-> Full-resolution diagram: [design/Arch.pdf](design/Arch.pdf)
+This project code contains a **reproducible, end-to-end data-cleaning pipeline** (validation → remediation → imputation) with GitHub Actions CI, `pytest`, DVC versioning, and a Streamlit **monitoring dashboard** that makes every run stage-by-stage auditable (Jump to **[Reproduce the results](#reproduce-the-results)** for a clean-room, copy-paste run). Also, this project shows how the AI-assisted imputation methods can be integrated into the **Time-series data cleaning pipeline** with a full Apache Airflow and SeaweedFS stack. 
 
 
+## The pipeline logic
 
-The system has four loosely coupled layers:
+we introduce a minimal dataops pipeline presenting **Raw CSV in → gap-free dataset out.** It consists of five steps, each writing a named artifact you can inspect. Numbers are the bundled `amf-performance` run.
 
-| Layer | What it does | Tech |
+### Top-view
+```text
+  data/raw/<name>.csv                    27,413 rows · irregular clock · 10,055 gaps
+        │
+        │  1  SOFT CLEAN            drop empty/duplicate rows, parse the timestamp,
+        ▼                      resolve key collisions, enforce forward time
+  <name>_soft_cleaned.csv                27,413 rows — structure only, no gap filled
+        │
+        │  2  REMEDIATE        clip or flag outliers, fill ordinary tabular NaN
+        ▼                      (timeline gaps are deliberately left alone)
+  <name>_remediated.csv                  last step that edits a cell in place
+        │
+        │  3  REGULARIZE       resample onto a uniform base_dt grid based on a regularization strategy,
+        ▼                      split train/test, carve the evaluation holdout
+  <name>_regularized/                    99,942 rows · 1,051,526 NaN · is_gap flag
+        │                                train.csv · test_input.csv · test_gt.csv
+        │
+        │  4  IMPUTE           every method fills the NaN — darts, imputegap,
+        ▼                      PyPOTS, WaveStitch+ v1 / v2 / harpoon
+  <name>_generated/                      <lib>_<method>_<split>_imputed.csv
+        │
+        │  5  SCORE + FINALIZE rank on the shared holdout, stitch train + test
+        ▼
+  <name>_final.csv                       99,942 rows · 0 NaN  ← delivered
+  reports/<name>_imputation_compare.json manifest of every run
+```
+Artifacts are named per stage from the dataset `<name>` (e.g. `rabbitmq-performance`):
+
+- **soft-cleaned** (`<name>_soft_cleaned.csv`, key `report.soft_cleaned_output`;
+  legacy alias `report.cleaned_output`) — conservative cleaning: snake_case columns, empty or
+  duplicate row removal, timestamp ordering fixes, and epoch-aware datetime coercion.
+- **remediated** (`<name>_remediated.csv`, the configured `output`) — issue-specific fixes from
+  `data_process_modules.remediation`, including numeric outlier winsorization and type-aware
+  tabular filling. Time-series gaps are *deferred* to imputation.
+- **regularized** (`<name>_regularized/`) — when a time-series gap is detected, the timeline is
+  regularized onto a uniform grid. Gaps become explicit NaN rows, written as a prepared bundle.
+- **final** (`<name>_final.csv`) — the gap-free, analysis-ready dataset (built by the imputation
+  step, see below), stitched from the imputed train + imputed test splits under `<name>_generated/`.
+
+**Imputation handoff → final dataset.** Steps 1–3 are `pipelines/minimal_dataops.py`, which stops at the handoff and never fills a cell. `pipelines/dataops_imputation_completes.py` runs all five — see [Reproduce the results](#reproduce-the-results) for the commands, and the [dashboard](#comparison-dashboard) to walk a finished run stage by stage.
+
+
+### Configuration & data lineage
+
+The local pipeline lives in `src/data_process_modules/` (with `src/dataops/` kept as a compatibility API), backed by Pandera validation, Great Expectations checks, `pytest`, GitHub Actions CI (`.github/workflows/ci.yml`), and DVC (`dvc.yaml`). To run it, see [Reproduce the results → Track A](#a-raw-csvs--dataprocessed-results).
+
+`config/dataops.yaml` controls input and output paths, validation mode, optional timestamp column, expected columns, numeric bounds, missingness threshold, timestamp uniqueness, and timestamp ordering. With `validation.mode: auto`, the pipeline classifies each dataset as `time_series` or `tabular`, records the classification reason in the report, validates as time-series when a real timestamp column is configured or detected, and otherwise validates as arbitrary
+tabular data. Monotonic numeric IDs are treated as tabular by default; set `allow_step_index_timestamp: true` only when a step index really is your time axis. CLI flags such as `--input`, `--output`, `--report`, and `--timestamp-col` can still override the config for one-off runs.
+
+`config/dataops.yaml` also carries a `timeline` block controlling **row identity and timestamp ordering**. For the open time-series data, **the timestamp is set as the primary key**:
+
+- `collision_policy` (`keep_last` · `aggregate` · `keep_first` · `none`) — how rows sharing a primary-key value are reduced.
+- `disorder_policy` (`drop` · `sort` · `none`) — `drop` runs a forward scan that keeps a row only when its timestamp exceeds the highest one kept so far, so rows re-covering an earlier span are removed rather than interleaved into the series.
+- `sweep_aware` (default `false`) — opts into the alternative model for parameter-sweep datasets: the swept factors co-identify a row (so colliding timestamps are distinct conditions, not duplicates) and a backward jump starts a new acquisition run. `key_columns` pins the key explicitly; `auto_key_columns` infers it.  
+
+The same block controls **per-campaign regularization**. Collection for these datasets stops and restarts, and one grid stretched across the pause is mostly empty — golang's 107.9-day pause made a 20s grid 91.7% empty, tripping the sparsity guard and leaving the bundle on its original irregular timestamps. `segment_regularization: true` (default) splits at pauses longer than `segment_gap_seconds` and gives each campaign its own grid and cadence:
+
+| subset | before | after |
 |---|---|---|
-| **Orchestration** | Profiles the input, branches on time-series vs. tabular data, runs duplicate, missing-value, outlier, and time-series gap checks, validates with Great Expectations, and persists curated outputs. | Apache Airflow (DAG `data_quality_and_cleaning_pipeline`) |
-| **Cleaning engine** | Launches the WaveStitch+ imputation container when time-series repair is recommended. It runs `train`, `inference`, or `full` (train + inference) and stores artifacts back in the data lake. | PyTorch / CUDA, packaged as `wavestitchplus-gpu:latest` |
-| **Reusable modules** | Provides library-first profiling, quality-check, transform, and split components for local Python, Airflow, or external orchestrators. | `src/data_process_modules/` (`src/dataops/` is kept as a compatibility API) |
-| **Storage** | Provides an S3-compatible object store used as a versioned data lake (`raw/`, `prepared/`, `inference_results_*/`, `latest_inference/`). | SeaweedFS (master / filer / volume / S3) + Postgres for Airflow metadata |
+| golang | skipped, 527 step sizes | **6/6 campaigns**, 17–79% empty, 11 step sizes |
+| rabbitmq | one 67s grid, 61.7% empty | **4/4 campaigns**, 11–20% empty |
+| amf | one 13s grid, 75.4% empty | **2/2 campaigns**, 63–73% empty |
+| python | skipped | still skipped — only 2/4 campaigns fit, see `require_all_segments` |
 
----
+The full rationale — why regularize at all, why no single rule fits every dataset, where each threshold comes from and how sensitive the outcome is to it — is written up in [design/regularization_strategy.md](design/regularization_strategy.md). Every bundle also records its own decision: `meta.json` → `regularization.decision` carries an outcome code, a rationale written for that dataset with its own numbers, and the alternatives that would change it. The dashboard shows this under **Overview → Why this outcome**.
+
+`require_all_segments: true` (default) regularizes **only when every campaign fits a grid**.
+Gridding just some of them leaves the bundle with two sampling regimes, and the chronological
+train/test split puts them on opposite sides: on python that produced a train split 66%
+gridded-with-gaps (36.2% NaN) against a test split that was entirely irregular and dense —
+training on one regime and scoring on the other. python is bursty *within* campaigns (median
+step 8s against a ~61s mean), so no split threshold rescues it; it keeps its original timeline
+and stays internally consistent.
+
+The prepared-bundle contract (`meta.json`, `train.csv`, `test_input.csv`, `test_gt.csv`,
+`eval_holdout_mask.npy`, `col_masks/`, `scaler/`) is unchanged, so **no imputation runner needs
+modification**. `meta.json` gains `regularization.segments` with per-campaign grid stats.
+
+Whichever model is active, the report records a `timeline.key_advisory` block naming the
+composite key that *would* explain the collisions, and the dashboard's **Timestamp integrity**
+panel shows it — so rows removed as duplicates are always auditable. The gap estimator uses the
+**median** step, matching `transform.preprocess:infer_base_dt`, and reports the modal step and
+its support beside it.
+
+
 
 ## Reproduce the results
 
@@ -215,9 +279,9 @@ imputegap/{interpolation,mean,mean_by_series,min,zero}
 ```
 
 The canonical `<name>_final.csv` is still built from `darts/nearest` for backward-compatible
-lineage and dashboard use. Method-specific finals are written under `<name>_generated/`, for
+lineage and dashboard use. Imputation-Method-specific finals are written under `<name>_generated/`, for
 example `darts_linear_final.csv`, `darts_nearest_final.csv`, and `imputegap_mean_final.csv`.
-PyPOTS and WaveStitch+ are heavier model runners; generate those with the model tracks
+PyPOTS and WaveStitch+ are heavier model runners using deep learning methods; generate those with the model tracks
 (WaveStitch+ = **Track C**, PyPOTS = **Track E**).
 
 Check the final files:
@@ -422,7 +486,24 @@ Pick a raw CSV, then a DataOps run, to walk the `raw → … → final` lineage 
 before/after metrics and the per-method imputation comparison. See
 [Comparison Dashboard](#comparison-dashboard) for the section-by-section tour.
 
-### Full Airflow + SeaweedFS stack (Docker, optional)
+### Integrate the imputation methods into a Full Airflow + SeaweedFS stack (Docker, optional)
+
+Architecture overview with WaveStitch+:
+
+![Architecture overview](design/Arch.png)
+
+> Full-resolution diagram: [design/Arch.pdf](design/Arch.pdf)
+
+The system has four loosely coupled layers:
+
+| Layer | What it does | Tech |
+|---|---|---|
+| **Orchestration** | Profiles the input, branches on time-series vs. tabular data, runs duplicate, missing-value, outlier, and time-series gap checks, validates with Great Expectations, and persists curated outputs. | Apache Airflow (DAG `data_quality_and_cleaning_pipeline`) |
+| **Cleaning engine** | Launches the WaveStitch+ imputation container when time-series repair is recommended. It runs `train`, `inference`, or `full` (train + inference) and stores artifacts back in the data lake. | PyTorch / CUDA, packaged as `wavestitchplus-gpu:latest` |
+| **Reusable modules** | Provides library-first profiling, quality-check, transform, and split components for local Python, Airflow, or external orchestrators. | `src/data_process_modules/` (`src/dataops/` is kept as a compatibility API) |
+| **Storage** | Provides an S3-compatible object store used as a versioned data lake (`raw/`, `prepared/`, `inference_results_*/`, `latest_inference/`). | SeaweedFS (master / filer / volume / S3) + Postgres for Airflow metadata |
+
+---
 
 To reproduce the orchestrated pipeline and S3 data lake instead of the local runners, follow
 [Installation & Setup](#installation--setup) → `bash dockers/start.sh`, then open the Airflow UI
@@ -441,72 +522,7 @@ at **http://localhost:8088** (`admin / admin`) and trigger the
 
 ---
 
-## Configuration & data lineage
 
-The local pipeline lives in `src/data_process_modules/` (with `src/dataops/` kept as a
-compatibility API), backed by Pandera validation, Great Expectations checks, `pytest`, GitHub
-Actions CI (`.github/workflows/ci.yml`), and DVC (`dvc.yaml`). To run it, see
-[Reproduce the results → Track A](#a-raw-csvs--dataprocessed-results).
-
-`config/dataops.yaml` controls input and output paths, validation mode, optional
-timestamp column, expected columns, numeric bounds, missingness threshold,
-timestamp uniqueness, and timestamp ordering. With `validation.mode: auto`, the
-pipeline classifies each dataset as `time_series` or `tabular`, records the
-classification reason in the report, validates as time-series when a real
-timestamp column is configured or detected, and otherwise validates as arbitrary
-tabular data. Monotonic numeric IDs are treated as tabular by default; set
-`allow_step_index_timestamp: true` only when a step index really is your time
-axis. CLI flags such as `--input`, `--output`, `--report`, and
-`--timestamp-col` can still override the config for one-off runs.
-
-The pipeline records a five-stage lineage and writes an artifact for each stage:
-
-```
-raw → soft-cleaned → remediated → regularized (gaps explicit) → final (imputed, gap-free)
-```
-
-Artifacts are named per stage from the dataset `<name>` (e.g. `rabbitmq-performance`):
-
-- **soft-cleaned** (`<name>_soft_cleaned.csv`, key `report.soft_cleaned_output`;
-  legacy alias `report.cleaned_output`) — conservative cleaning: snake_case columns, empty or
-  duplicate row removal, timestamp ordering fixes, and epoch-aware datetime coercion.
-- **remediated** (`<name>_remediated.csv`, the configured `output`) — issue-specific fixes from
-  `data_process_modules.remediation`, including numeric outlier winsorization and type-aware
-  tabular filling. Time-series gaps are *deferred* to imputation.
-- **regularized** (`<name>_regularized/`) — when a time-series gap is detected, the timeline is
-  regularized onto a uniform grid. Gaps become explicit NaN rows, written as a prepared bundle.
-- **final** (`<name>_final.csv`) — the gap-free, analysis-ready dataset (built by the imputation
-  step, see below), stitched from the imputed train + imputed test splits under `<name>_generated/`.
-
-The report's `quality` section is produced by Great Expectations-backed checks and includes an
-`action_plan` tagging each issue with its `status` (`applied_by_remediation`,
-`deferred_to_imputation`, or `manual`) plus the concrete failed GX expectations.
-`quality_after` re-runs the checks on the remediated frame, so the report contains a genuine GX
-**before/after** comparison. `handoff` advertises the imputation method catalog and the
-configured `(app, method)`. `validation_comparison` provides chart-ready dashboard data for
-raw → soft-cleaned → remediated status across GX and Pandera.
-
-**Imputation handoff → final dataset.** The pipeline does not run imputation directly; it
-regularizes the dataset and emits the handoff. `scripts/auto_impute.py`
-([Track A](#a-raw-csvs--dataprocessed-results)) runs the selected method, or `--method all` for
-all dependency-free built-ins, and writes `<name>_final.csv` (gap-free) plus
-`reports/<name>_imputation_compare.json`.
-`darts/<interp>` runs without external Darts dependencies through `dataops.imputation_runner`
-(bit-faithful to Darts' `MissingValuesFiller`); use `--engine darts` for the real Darts runner.
-
-Run the DVC stage after placing data at `data/raw/input.csv`:
-
-```bash
-python -m pip install -e ".[dvc]"
-dvc repro
-```
-
-Failure notifications are opt-in:
-
-```bash
-export DATAOPS_WEBHOOK_URL="https://hooks.slack.com/services/..."
-python -m pipelines.minimal_dataops --config config/dataops.yaml
-```
 
 ## Installation & Setup
 
@@ -556,6 +572,11 @@ source venv/bin/activate                    # Linux/macOS
 pip install -r dockers/tools/requirements.txt
 ```
 
+| Script | Purpose |
+|---|---|
+| [compare_baselines.py](scripts/compare_baselines.py) | Preprocess + run the Darts / ImputeGAP / PyPOTS baselines and write a sorted MAE/RMSE table. |
+| [compare_wsp_v2.py](scripts/compare_wsp_v2.py) | Score WaveStitch+ **v1 vs v2** against the baselines (reuses a v1 diffusion CSV; runs in seconds). |
+| [eval_long_gap.py](scripts/eval_long_gap.py) | **Long-gap regime**: carves contiguous gaps out of fully observed runs and scores by *depth*, where the diffusion model overtakes interpolation. Feasible only where the test split has long observed runs, such as EUR/python. |
 ---
 
 ## Usage
@@ -573,6 +594,39 @@ pip install -r dockers/tools/requirements.txt
 
 A second debug DAG, `seaweedfs_datalake_test_v2`, verifies the SeaweedFS
 connection by writing a `hello_world.txt` test object.
+
+#### Pipeline Artifacts on S3
+
+After a successful run, the data lake layout is:
+
+```
+s3://<bucket>/wavestitchplus/<dataset>/
+├── <version>/
+│   ├── input.csv
+│   ├── training.log
+│   ├── training_info.json
+│   ├── prepared/
+│   │   ├── saved_model/                 # *.pth checkpoints
+│   │   ├── scaler/{mean.npy, std.npy}
+│   │   ├── meta.json
+│   │   ├── train_imputed.npy
+│   │   ├── train_imputed_denorm.npy
+│   │   ├── test_input.csv
+│   │   └── test_gt.csv
+│   └── inference_results_<version>/
+│       ├── imputed.csv
+│       ├── trials/                      # extra n_trials outputs (if any)
+│       ├── inference.log
+│       └── inference_info.json
+└── latest_inference/
+    ├── imputed.csv
+    └── inference_info.json
+```
+
+Failed runs upload partial logs to
+`wavestitchplus/<dataset>/<version>/error_logs/`.
+
+---
 
 ### B. Run the WaveStitch+ Container Directly
 
@@ -659,144 +713,6 @@ end to end, then scale up only the configurations you want to benchmark.
 | `--guidance-scale`, `--n-trials`, `--bound-headroom` | 0.1 / 1 / 1.2 | Inference controls |
 | `--keep-workdir` | off | Preserve `/tmp/wavestitchplus/...` for debugging |
 
-### C. Evaluate Repair Quality in Notebooks
-
-```bash
-cd notebooks
-jupyter lab
-```
-
-| Notebook | Purpose |
-|---|---|
-| `analysis of the ts imputation.ipynb` | Diagnostic plots over imputed series |
-| `comparisons.ipynb` | Side-by-side method / version comparisons |
-| `visual.ipynb` | Grid plots across all features |
-
-`download_folders.py` helps pull artifact directories out of the lake for
-offline analysis.
-
----
-
-## Pipeline Modules
-
-The Airflow DAG remains the reference orchestration path, but the non-imputation
-pipeline logic is also exposed as reusable modules under
-[src/data_process_modules](src/data_process_modules). Use these
-modules when another system needs profiling, tabular or time-series quality
-checks, preprocessing, or train/test splitting without importing Airflow tasks.
-
-```python
-from data_process_modules import profiling, split, ts_checks
-
-profile = profiling.profile(df, timestamp_col="time")
-ts_report = ts_checks.run(df, ts_col=profile["timestamp_column"])
-parts = split.train_test(df, profile, seed=0)
-```
-
-`profiling`, `ts_checks`, `tabular_checks`, `transform.preprocess(...)`, and
-`split` operate on DataFrames. `transform.preprocess_csv(...)` is still
-available when you need the existing `prepared_<subset>/` artifact bundle
-consumed by the imputation apps and dashboard. The same CLI is available with
-`python -m data_process_modules ...` or the installed `data-process-modules`
-script.
-
-The cleaning and imputation loop adds three more modules:
-
-- `remediation.remediate(df, quality_report)` — applies a concrete fix for each detected
-  issue, such as outlier winsorization or type-aware tabular filling, and defers time-series
-  gaps to imputation.
-- `imputation_catalog` — lists the imputation apps and methods advertised in the handoff.
-  `validate_selection(app, method)` never raises; it reports `ok`, `invalid`, or `known_failing`.
-- `imputation_runner` — provides `impute_bundle(...)` through a Darts-faithful pandas engine
-  or a real-Darts subprocess, plus `compare_clean_vs_imputed(...)` and
-  `build_final_dataset(...)` for the gap-free final cleaned CSV.
-
-Every module exposes a `METADATA` descriptor aggregated into
-`data_process_modules.registry.MANIFEST` for host-system discovery.
-
----
-
-## Baseline Imputation Methods
-
-Three baseline runners live next to `WaveStitchPlus_app/` so their outputs can
-be compared directly with WaveStitch+. Each runner is packaged in the same
-style, with its own `Dockerfile.<lib>`, `requirements.txt`, and
-`run_imputation.py`, but the runners are intentionally independent: no shared
-module and no leakage of WaveStitch+ internals.
-
-| Folder | Library | Built-in methods (`--method`) |
-|---|---|---|
-| [dockers/tools/Darts_app](dockers/tools/Darts_app) | [Darts](https://unit8co.github.io/darts/) | `auto`, `linear`, `quadratic`, `cubic`, `nearest`, `slinear`, `zero`, `kalman` |
-| [dockers/tools/ImputeGAP_app](dockers/tools/ImputeGAP_app) | [ImputeGAP](https://github.com/eXascaleInfolab/ImputeGAP) | `mean`, `mean_by_series`, `min`, `zero`, `interpolation`, `knn`, `cdrec`, `iterative_svd`, `soft_impute`, `svt`, `iim`, `mice`, `miss_forest`, `brits`, `mrnn`, `gain`, ... (run with `--list` to see what your installation exposes) |
-| [dockers/tools/PyPOTS_app](dockers/tools/PyPOTS_app) | [PyPOTS](https://github.com/WenjieDu/PyPOTS) | `saits`, `brits`, `transformer`, `gpvae`, `mrnn`, `csdi`, `usgan`, `timesnet` |
-
-### Common interface
-
-All three runners read a `prepared_<subset>/` folder produced by the
-WaveStitch+ pipeline (`meta.json`, `train.csv`, `test_input.csv`, ...) and
-write **one CSV per input**:
-
-```
-<output-dir>/<lib>_<method>_train_imputed.csv
-<output-dir>/<lib>_<method>_test_imputed.csv
-```
-
-The split filenames match the WaveStitch+ wrapper convention, so
-[comparisons.ipynb](notebooks/comparisons.ipynb) and the dashboard can discover
-train and test outputs consistently. Pass `--inputs train test` to choose which
-splits to impute. The default is both.
-
-```bash
-# Generic invocation; works for any of the three runners
-python run_imputation.py \
-    --prepared-dir notebooks/work/EUR/prepared_amf \
-    --output-dir   notebooks/work/EUR/generated_amf \
-    --method       <method-name>
-```
-
-### Run Locally With The Repro Env
-
-The `wavestitchplus-repro` conda environment contains compatible versions of all three
-baseline libraries plus WaveStitch+: `darts 0.33`, `imputegap 1.1.1`, `pypots 1.5`,
-and `torch 2.5.1`. Create it with `conda env create -f environment.yml` from
-[Reproduce → 0](#0-clone-and-install).
-
-Each app includes a `run_local.sh` script that loops through the curated method
-list across the four EUR subsets (`amf`, `golang`, `python`, `rabbitmq`) and
-writes both train and test outputs:
-
-```bash
-conda activate wavestitchplus-repro
-
-bash dockers/tools/Darts_app/run_local.sh        # linear, cubic, nearest, kalman, auto
-bash dockers/tools/ImputeGAP_app/run_local.sh    # mean, interpolation, knn, iim
-EPOCHS=50 bash dockers/tools/PyPOTS_app/run_local.sh   # saits, brits
-```
-
-Each runner writes `<lib>_<method>_{train,test}_imputed.csv` next to the WaveStitch+ result in
-`generated_<subset>/`, so [comparisons.ipynb](notebooks/comparisons.ipynb) and the dashboard
-discover every method side by side.
-
-### Run in Docker
-
-```bash
-cd dockers/tools
-
-bash Darts_app/build_image.sh        # → darts-baseline:latest
-bash ImputeGAP_app/build_image.sh    # → imputegap-baseline:latest
-bash PyPOTS_app/build_image.sh       # → pypots-baseline:latest    (needs --gpus all)
-bash build_image_cpu.sh              # → wavestitchplus-cpu:latest (no GPU; dashboard default)
-# bash build_image.sh                # → wavestitchplus-gpu:latest (needs nvidia-docker)
-
-# Example: SAITS on the amf subset, mounting the local work tree.
-sudo docker run --rm --gpus all \
-    -v "$(pwd)/../../notebooks/work:/work" \
-    pypots-baseline:latest \
-    --prepared-dir /work/EUR/prepared_amf \
-    --output-dir   /work/EUR/generated_amf \
-    --method       saits --epochs 200
-```
-
 ### Notes on each library
 
 - **Darts** — interpolation methods (`linear` ... `auto`) run through
@@ -829,76 +745,12 @@ sudo docker run --rm --gpus all \
   length and feature count keeps its own checkpoint; a missing checkpoint falls
   back to training.
 
----
-
-## WaveStitch+ v2 & Method Comparison
-
-On the default holdout, where scattered single points are usually one step from
-a real neighbor, raw diffusion is easily beaten by interpolation. **v2** keeps
-the WaveStitch+ diffusion but **anchors it to a context-aware interpolation
-prior**, blending the two per cell by distance to the nearest observation. Short
-gaps follow the prior, while deep-gap cells fall back to the diffusion model's
-structural regime. No retraining is required; v2 reuses synthesis from an
-existing checkpoint.
-
-**Regenerate WaveStitch+ (v1 → v2 → harpoon) for one processed dataset** (e.g.
-`amf-performance`; each writes `wavestitchplus_<variant>_{train,test}_imputed.csv`
-+ `_final.csv` into `data/processed/<name>_generated/`):
-
-```bash
-conda activate wavestitchplus-repro
-
-NAME=amf-performance
-B=data/processed/${NAME}_regularized
-G=data/processed/${NAME}_generated
-mkdir -p "$G"
-
-export PYTHONWARNINGS="ignore"
-quiet_wsp() {
-  "$@" 2> >(grep -v -E '^\[pyKeOps\] Warning|FutureWarning|UserWarning' >&2)
-}
-
-# 1) v1 — train + synthesize (GPU: full HP; laptop CPU: replace the flags with --fast)
-quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation.py \
-  --prepared-dir "$B" --output-dir "$G" \
-  --em-iterations 5 --epochs-per-em 200 --ddim-steps 50 --repaint-rounds 5 --device auto
-# CPU smoke alternative:
-# quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation.py \
-#   --prepared-dir "$B" --output-dir "$G" --fast --device cpu
-test -f "$G/wavestitchplus_v1_test_imputed.csv" || {
-  echo "WaveStitch+ v1 did not produce $G/wavestitchplus_v1_test_imputed.csv" >&2
-  exit 1
-}
-
-# 2) v2 — per-column `auto` anchoring, reuses the v1 test diffusion (seconds, torch-free)
-quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation_v2.py \
-  --prepared-dir "$B" --output-dir "$G" \
-  --reuse-diffusion "$G/wavestitchplus_v1_test_imputed.csv"
-
-# 3) harpoon — manifold-bound guidance on the pretrained checkpoint
-quiet_wsp python dockers/tools/WaveStitchPlus_app/run_imputation_harpoon.py \
-  --prepared-dir "$B" --output-dir "$G" \
-  --ddim-steps 50 --repaint-rounds 5 --device auto
-```
-
-Order matters: **v2/harpoon depend on v1** — step 1 trains the model and writes
-`wavestitchplus_v1_test_imputed.csv` (v2 reuses it via `--reuse-diffusion`; harpoon uses the v1
-checkpoint). `run_imputation.py` clears the checkpoint from the bundle afterward but syncs it to
-`$G/saved_models/` and publishes the v1 train output, so v2/harpoon still emit their train split
-(and a full train+test `_final.csv`). amf is 111k rows — **run v1 on a GPU** (`--fast` for a CPU
-smoke test). The `quiet_wsp` wrapper only filters known noisy warnings; a non-zero process exit
+- **WaveStitch+** - On the default holdout, where scattered single points are usually one step from a real neighbor, raw diffusion is easily beaten by interpolation. **v2** keeps the WaveStitch+ diffusion but **anchors it to a context-aware interpolation prior**, blending the two per cell by distance to the nearest observation. Short gaps follow the prior, while deep-gap cells fall back to the diffusion model's structural regime. No retraining is required; v2 reuses synthesis from an
+existing checkpoint. Order matters: **v2/harpoon depend on v1** — step 1 trains the model and writes `wavestitchplus_v1_test_imputed.csv` (v2 reuses it via `--reuse-diffusion`; harpoon uses the v1 checkpoint). `run_imputation.py` clears the checkpoint from the bundle afterward but syncs it to `$G/saved_models/` and publishes the v1 train output, so v2/harpoon still emit their train split (and a full train+test `_final.csv`). amf is 111k rows — **run v1 on a GPU** (`--fast` for a CPU smoke test). The `quiet_wsp` wrapper only filters known noisy warnings; a non-zero process exit
 still fails normally.
 
-Three helper scripts under [scripts/](scripts) score methods on the **same
-holdout** (`test_input` is NaN and `test_gt` is known):
 
-| Script | Purpose |
-|---|---|
-| [compare_baselines.py](scripts/compare_baselines.py) | Preprocess + run the Darts / ImputeGAP / PyPOTS baselines and write a sorted MAE/RMSE table. |
-| [compare_wsp_v2.py](scripts/compare_wsp_v2.py) | Score WaveStitch+ **v1 vs v2** against the baselines (reuses a v1 diffusion CSV; runs in seconds). |
-| [eval_long_gap.py](scripts/eval_long_gap.py) | **Long-gap regime**: carves contiguous gaps out of fully observed runs and scores by *depth*, where the diffusion model overtakes interpolation. Feasible only where the test split has long observed runs, such as EUR/python. |
-
-**Honest reading of the numbers.** Across the four EUR subsets v2 cuts WaveStitch+'s holdout MAE
+<!-- **Honest reading of the numbers.** Across the four EUR subsets v2 cuts WaveStitch+'s holdout MAE
 **~1.5–3× relative to raw v1** — a large, robust win over the diffusion baseline. On the scattered
 point-holdout the **diffusion adds no positive signal** (it has ~zero correlation with the truth even
 at depth: a sweep drives the MAE-optimum to a pure interpolation prior); so v2's job is really to
@@ -912,7 +764,7 @@ Result: v2 **beats `nearest`** on amf (0.93×), golang (0.99×) and rabbitmq (0.
 (1.00×), matching the dashboard's per-run Metrics tab exactly. The diffusion is reserved for the
 long-gap regime — where flat-hold interpolation finally breaks and the diffusion's structure helps —
 which [eval_long_gap.py](scripts/eval_long_gap.py) isolates; it is underrepresented in the natural
-scattered holdout, which is why the aggregate point-holdout still favours `nearest`.
+scattered holdout, which is why the aggregate point-holdout still favours `nearest`. --> -->
 
 ---
 
@@ -964,20 +816,6 @@ step.
        # or: export DATAOPS_IMPUTE_PYTHON=/path/to/python
        ```
 
-### Screen at a glance
-
-```
-┌─ Sidebar ────────────┐  ┌─ Sections ─────────────────────────────────────┐
-│ DataOps run:         │  │ [Overview] [Quality & remediation]             │
-│  amf-performance_…   │  │ [Imputation] [Run]                             │
-│ Bundle root          │  │ ┌─ Overview ───────────────────────────────┐   │
-│  data/processed      │  │ │ raw → soft-cleaned → remediated →       │   │
-│                      │  │ │     regularized → final                 │   │
-│                      │  │ │     (stage cards + GX before/after +    │   │
-│                      │  │ │      handoff + final callout)           │   │
-│                      │  │ └──────────────────────────────────────────┘   │
-└──────────────────────┘  └─────────────────────────────────────────────────┘
-```
 
 ### Requirements
 
@@ -1016,38 +854,7 @@ Each `tests/` folder includes a `conftest.py` that adds its package to
 
 ---
 
-## Pipeline Artifacts on S3
 
-After a successful run, the data lake layout is:
-
-```
-s3://<bucket>/wavestitchplus/<dataset>/
-├── <version>/
-│   ├── input.csv
-│   ├── training.log
-│   ├── training_info.json
-│   ├── prepared/
-│   │   ├── saved_model/                 # *.pth checkpoints
-│   │   ├── scaler/{mean.npy, std.npy}
-│   │   ├── meta.json
-│   │   ├── train_imputed.npy
-│   │   ├── train_imputed_denorm.npy
-│   │   ├── test_input.csv
-│   │   └── test_gt.csv
-│   └── inference_results_<version>/
-│       ├── imputed.csv
-│       ├── trials/                      # extra n_trials outputs (if any)
-│       ├── inference.log
-│       └── inference_info.json
-└── latest_inference/
-    ├── imputed.csv
-    └── inference_info.json
-```
-
-Failed runs upload partial logs to
-`wavestitchplus/<dataset>/<version>/error_logs/`.
-
----
 
 ## Project Structure
 

@@ -41,7 +41,6 @@ Example::
 from __future__ import annotations
 
 import argparse
-import datetime
 import json
 import sys
 import time
@@ -81,6 +80,24 @@ def _fill_linear(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     return out
 
 
+#: Reasons already reported by :func:`_report_fallback`, so a failure that hits
+#: every column and window prints once rather than thousands of times.
+_REPORTED_FALLBACKS: set[str] = set()
+#: How many columns fell back, printed in the run summary.
+_FALLBACK_COUNT = {"n": 0}
+
+
+def _report_fallback(method: str, exc: Exception) -> None:
+    _FALLBACK_COUNT["n"] += 1
+    key = f"{method}:{type(exc).__name__}:{exc}"
+    if key in _REPORTED_FALLBACKS:
+        return
+    _REPORTED_FALLBACKS.add(key)
+    print(f"[WARN] forecaster {method!r} failed — falling back to "
+          f"last-value-carried-forward: {type(exc).__name__}: {exc}",
+          file=sys.stderr)
+
+
 def _forecast_one_column(
     train_values: np.ndarray,
     horizon: int,
@@ -113,8 +130,11 @@ def _forecast_one_column(
         else:
             raise ValueError(f"unknown forecaster method: {method!r}")
         return np.asarray(pred.values().squeeze(), dtype=float).reshape(horizon)
-    except Exception as e:
-        # Fallback: last-value-carried-forward
+    except Exception as exc:
+        # Fallback: last-value-carried-forward. Report it — a forecaster that
+        # fails on every column silently produces flat lines that read as real
+        # results, so the reason has to reach the operator at least once.
+        _report_fallback(method, exc)
         last = float(train_values[-1]) if len(train_values) else 0.0
         return np.full(horizon, last)
 
@@ -156,7 +176,6 @@ def main() -> int:
     args = p.parse_args()
 
     raw_df, wsp_df, meta = _load_prepared(args.dataset, args.wsp_root)
-    ts_col = meta.get("time_col", "time")
     target_cols = meta["target_cols"]
 
     if len(raw_df) <= args.horizon + args.lags * 2:
@@ -195,6 +214,7 @@ def main() -> int:
     print(f"[INFO] target_cols ({len(target_cols)}): {target_cols}")
     print(f"[INFO] tail ground-truth cells: {int(tail_mask.sum())} / {tail_mask.size}")
     print(f"[INFO] forecaster: {args.forecaster}")
+    _FALLBACK_COUNT["n"] = 0  # count fallbacks for this run only
     print(f"[INFO] output: {out_dir}\n")
 
     rows = []
@@ -287,6 +307,10 @@ def main() -> int:
                                "display.max_rows", None, "display.width", 130):
             print(pivot.to_string())
 
+    if _FALLBACK_COUNT["n"]:
+        print(f"[WARN] {_FALLBACK_COUNT['n']:,} column-forecast(s) fell back to "
+              "last-value-carried-forward — those rows are not real forecasts",
+              file=sys.stderr)
     print(f"\n→ {out_dir / 'results.csv'}")
     print(f"→ {out_dir / 'results_overall.csv'}")
     return 0

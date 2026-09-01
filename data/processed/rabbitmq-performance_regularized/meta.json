@@ -2,7 +2,7 @@
   "time_col": "time",
   "time_kind": "numeric",
   "time_unit_seconds": 1.0,
-  "base_dt": 67.0,
+  "base_dt": 69.5,
   "target_cols": [
     "cpu_limit",
     "cpu_usage",
@@ -46,12 +46,183 @@
   "units_converted": true,
   "gap_threshold": 1000.0,
   "sparse_skip_pct": 80.0,
+  "regularized": true,
+  "regularization": {
+    "regularized": true,
+    "strategy": "per_segment",
+    "base_dt": 69.5,
+    "segment_base_dts": [
+      56.0,
+      70.0,
+      70.0,
+      69.0
+    ],
+    "segments": [
+      {
+        "regularized": true,
+        "base_dt": 56.0,
+        "grid_rows": 1943,
+        "source_rows": 2034,
+        "rows_in": 2034,
+        "timestamp_collisions_averaged": 0,
+        "expected_gap_pct": -4.6834791559444255,
+        "sparse_skip_pct": 80.0,
+        "skip_if_sparse": true,
+        "skip_reason": null,
+        "decision": {
+          "outcome": "single_grid",
+          "code": "fits_guard",
+          "rationale": "One uniform 56s grid over 1,943 points holds the 2,034 observations at -4.7% emptiness, within the 80% budget, so the timeline was regularized.",
+          "measured": {
+            "base_dt": 56.0,
+            "grid_rows": 1943,
+            "observed_rows": 2034,
+            "expected_gap_pct": -4.6834791559444255
+          },
+          "threshold": {
+            "sparse_skip_pct": 80.0
+          },
+          "alternatives": []
+        },
+        "campaign": 1,
+        "rows_in_segment": 2034
+      },
+      {
+        "regularized": true,
+        "base_dt": 70.0,
+        "grid_rows": 77,
+        "source_rows": 62,
+        "rows_in": 62,
+        "timestamp_collisions_averaged": 0,
+        "expected_gap_pct": 19.480519480519476,
+        "sparse_skip_pct": 80.0,
+        "skip_if_sparse": true,
+        "skip_reason": null,
+        "decision": {
+          "outcome": "single_grid",
+          "code": "fits_guard",
+          "rationale": "One uniform 70s grid over 77 points holds the 62 observations at 19.5% emptiness, within the 80% budget, so the timeline was regularized.",
+          "measured": {
+            "base_dt": 70.0,
+            "grid_rows": 77,
+            "observed_rows": 62,
+            "expected_gap_pct": 19.480519480519476
+          },
+          "threshold": {
+            "sparse_skip_pct": 80.0
+          },
+          "alternatives": []
+        },
+        "campaign": 2,
+        "rows_in_segment": 62
+      },
+      {
+        "regularized": true,
+        "base_dt": 70.0,
+        "grid_rows": 9960,
+        "source_rows": 8866,
+        "rows_in": 8866,
+        "timestamp_collisions_averaged": 0,
+        "expected_gap_pct": 10.983935742971884,
+        "sparse_skip_pct": 80.0,
+        "skip_if_sparse": true,
+        "skip_reason": null,
+        "decision": {
+          "outcome": "single_grid",
+          "code": "fits_guard",
+          "rationale": "One uniform 70s grid over 9,960 points holds the 8,866 observations at 11.0% emptiness, within the 80% budget, so the timeline was regularized.",
+          "measured": {
+            "base_dt": 70.0,
+            "grid_rows": 9960,
+            "observed_rows": 8866,
+            "expected_gap_pct": 10.983935742971884
+          },
+          "threshold": {
+            "sparse_skip_pct": 80.0
+          },
+          "alternatives": []
+        },
+        "campaign": 3,
+        "rows_in_segment": 8866
+      },
+      {
+        "regularized": true,
+        "base_dt": 69.0,
+        "grid_rows": 13058,
+        "source_rows": 11221,
+        "rows_in": 11221,
+        "timestamp_collisions_averaged": 0,
+        "expected_gap_pct": 14.068004288558733,
+        "sparse_skip_pct": 80.0,
+        "skip_if_sparse": true,
+        "skip_reason": null,
+        "decision": {
+          "outcome": "single_grid",
+          "code": "fits_guard",
+          "rationale": "One uniform 69s grid over 13,058 points holds the 11,221 observations at 14.1% emptiness, within the 80% budget, so the timeline was regularized.",
+          "measured": {
+            "base_dt": 69.0,
+            "grid_rows": 13058,
+            "observed_rows": 11221,
+            "expected_gap_pct": 14.068004288558733
+          },
+          "threshold": {
+            "sparse_skip_pct": 80.0
+          },
+          "alternatives": []
+        },
+        "campaign": 4,
+        "rows_in_segment": 11221
+      }
+    ],
+    "num_segments": 4,
+    "segments_regularized": 4,
+    "segment_gap_seconds": 86400.0,
+    "min_segment_rows": 32,
+    "rows_dropped_short_segments": 0,
+    "grid_rows": 25038,
+    "source_rows": 22183,
+    "rows_in": 22183,
+    "timestamp_collisions_averaged": 0,
+    "expected_gap_pct": 11.402667944724021,
+    "sparse_skip_pct": 80.0,
+    "skip_if_sparse": true,
+    "skip_reason": null,
+    "decision": {
+      "outcome": "per_segment",
+      "code": "all_campaigns_fit",
+      "rationale": "Collection paused 3 time(s) for longer than 86400s. One 68s grid across the whole span would be 61.5% empty; split into 4 campaigns, every one fits its own grid at the cadence it was actually sampled at ([56.0, 70.0, 70.0, 69.0]), for 11.4% emptiness overall. A single base_dt cannot serve campaigns whose cadences differ this much.",
+      "measured": {
+        "num_segments": 4,
+        "segment_base_dts": [
+          56.0,
+          70.0,
+          70.0,
+          69.0
+        ],
+        "per_campaign_gap_pct": [
+          -4.7,
+          19.5,
+          11.0,
+          14.1
+        ],
+        "segmented_gap_pct": 11.4,
+        "unsegmented_gap_pct": 61.5,
+        "unsegmented_base_dt": 68.0
+      },
+      "threshold": {
+        "sparse_skip_pct": 80.0,
+        "segment_gap_seconds": 86400.0
+      },
+      "alternatives": []
+    }
+  },
   "split_ratio": 0.8,
   "holdout_frac": 0.15,
-  "original_rows": 22398,
-  "regularized_rows": 58536,
-  "train_rows": 46828,
-  "test_rows": 11708,
+  "original_rows": 22183,
+  "regularized_rows": 25038,
+  "train_rows": 20030,
+  "test_rows": 5008,
   "clip_recommendation": "soft_clip",
   "preprocessing_version": 4,
   "notes": "v4: arbitrary-dataset support (datetime time cols, categorical cond features, opt-in 6G unit conversion, configurable gap/sparse thresholds, time-unit-aware cyclic features)"

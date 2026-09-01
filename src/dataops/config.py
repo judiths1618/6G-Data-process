@@ -30,6 +30,54 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # quantile band doesn't trip by construction on continuous columns).
         "outlier_q": 0.01,
         "outlier_mostly": 0.95,
+        # Detection is unconditional; this only controls whether remediation
+        # rewrites the flagged cells. Off by default — winsorizing replaces real
+        # measurements, and a genuine benchmark spike is signal, not noise.
+        "clip_outliers": False,
+    },
+    # Row identity and acquisition-run handling. Datasets like the EUR container
+    # benchmarks are parameter sweeps: several rows legitimately share a
+    # timestamp because they are different swept conditions, and a backward jump
+    # marks a new sweep run rather than a corrupt cell. Treating the timestamp as
+    # the sole key deletes real observations and interleaves independent runs.
+    "timeline": {
+        # The timestamp is the primary key: rows sharing a timestamp are
+        # duplicates and are deduplicated, and rows that break monotonicity are
+        # dropped. ``sweep_aware`` opts into the alternative model in which the
+        # swept factors co-identify a row and a backward jump starts a new run.
+        #
+        # Extra columns that, with the timestamp, identify a row (sweep mode).
+        "key_columns": [],
+        # Infer sweep-factor keys when timestamps collide. Off by default:
+        # the timestamp alone is the key. Implied by ``sweep_aware``.
+        "auto_key_columns": False,
+        # aggregate | keep_last | keep_first | none — how tied rows are reduced.
+        "collision_policy": "keep_last",
+        # drop | sort | none — what happens to rows that go backwards in time.
+        # ``drop`` keeps a forward scan (the conventional treatment); ``sort``
+        # reorders them into the series instead.
+        "disorder_policy": "drop",
+        # Treat a backward jump as a new acquisition run (sweep mode only).
+        # Implied by ``sweep_aware``.
+        "run_detection": False,
+        # A backward jump only starts a new run when at least this many rows
+        # re-cover the previous run's span.
+        "min_run_overlap_rows": 8,
+        # Per-campaign regularization: split the timeline where collection
+        # paused and give each campaign its own uniform grid + cadence, instead
+        # of stretching one grid across the pause. The bundle contract is
+        # unchanged, so the imputation runners need no modification.
+        "segment_regularization": True,
+        "segment_gap_seconds": 86400.0,   # a pause this long starts a campaign
+        "min_segment_rows": 32,           # shorter campaigns are dropped
+        # Regularize only when EVERY campaign fits a grid. Mixing gridded and
+        # irregular campaigns puts two sampling regimes on opposite sides of the
+        # chronological train/test split.
+        "require_all_segments": True,
+        # Sweep-aware mode: co-identify rows by the swept factors, segment
+        # acquisition runs, and emit a ``run`` column instead of presenting one
+        # flattened time axis. Turns on auto_key_columns + run_detection.
+        "sweep_aware": False,
     },
     "imputation": {
         # The pipeline never runs imputation itself; it regularizes the timeline

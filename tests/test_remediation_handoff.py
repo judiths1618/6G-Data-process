@@ -9,23 +9,46 @@ from dataops.remediation import remediate
 from pipelines.minimal_dataops import run_pipeline
 
 
-def test_remediate_clips_tabular_outliers_and_fills_missing():
+def _outlier_frame() -> tuple[pd.DataFrame, dict]:
     df = pd.DataFrame(
         {
             "x": list(range(100)) + [10_000],          # one extreme outlier
             "label": ["a"] * 90 + ["b"] * 10 + [None],  # one missing categorical
         }
     )
-    quality_report = {
+    return df, {
         "mode": "tabular",
         "outlier_columns": ["x"],
         "missing_columns": ["label"],
     }
+
+
+def test_remediate_reports_outliers_without_clipping_by_default():
+    """Clipping is opt-in: the outlier is reported, the value is left alone."""
+    df, quality_report = _outlier_frame()
     out, report = remediate(df, quality_report, outlier_q=0.01)
+
+    assert out["x"].max() == 10_000                  # extreme value NOT rewritten
+    assert report.outlier_cells_clipped == 0
+    assert report.outlier_cells_flagged >= 1         # but it is counted
+    assert out["label"].isna().sum() == 0            # categorical still filled (mode)
+    assert report.missing_cells_after < report.missing_cells_before
+
+    action = next(a for a in report.actions if a["issue"] == "numeric_outliers")
+    assert action["action"] == "report_only"
+    assert action["status"] == "reported_not_applied"
+    assert action["would_clip_cells"] == report.outlier_cells_flagged
+    assert "x" in action["columns"]
+
+
+def test_remediate_clips_tabular_outliers_when_enabled():
+    df, quality_report = _outlier_frame()
+    out, report = remediate(df, quality_report, outlier_q=0.01, clip_outliers=True)
 
     assert out["x"].max() < 10_000                   # extreme value winsorized
     assert out["label"].isna().sum() == 0            # categorical filled (mode)
     assert report.outlier_cells_clipped >= 1
+    assert report.outlier_cells_flagged == report.outlier_cells_clipped
     assert report.missing_cells_after < report.missing_cells_before
     issues = {a["issue"] for a in report.actions}
     assert {"numeric_outliers", "missing_values"} <= issues
@@ -53,7 +76,28 @@ def test_validate_selection_statuses():
     assert validate_selection("Nope", "x")["status"] == "invalid"
     assert validate_selection("PyPOTS", "not_a_method")["status"] == "invalid"
     assert validate_selection("PyPOTS", "csdi")["status"] == "ok"
-    assert validate_selection("PyPOTS", "saits")["status"] == "known_failing"
+    assert validate_selection("PyPOTS", "saits")["status"] == "ok"
+
+
+def test_validate_selection_flags_known_failing(monkeypatch):
+    """The known_failing status resolves — without pinning which method carries it.
+
+    ``known_failing`` records what failed in one *environment*, so its contents
+    are expected to change as installs are re-verified (PyPOTS/saits was listed
+    from the autofeat-6g env and runs clean in wavestitchplus-repro). Asserting
+    against the shipped entry made correcting that data a test failure, so the
+    flag is injected here and only the mechanism is under test.
+    """
+    from dataops import imputation_catalog
+
+    patched = {app: dict(spec) for app, spec in imputation_catalog.CATALOG.items()}
+    patched["PyPOTS"]["known_failing"] = ["csdi"]
+    monkeypatch.setattr(imputation_catalog, "CATALOG", patched)
+
+    result = imputation_catalog.validate_selection("PyPOTS", "csdi")
+    assert result["status"] == "known_failing"
+    assert "csdi" in result["message"]
+    assert imputation_catalog.validate_selection("PyPOTS", "saits")["status"] == "ok"
 
 
 def test_pipeline_emits_handoff_with_catalog_and_selection(tmp_path):

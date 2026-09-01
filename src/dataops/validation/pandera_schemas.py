@@ -70,39 +70,6 @@ def build_tabular_schema(
     *,
     expected_columns: list[str] | None = None,
     numeric_bounds: dict[str, dict[str, float]] | None = None,
-    nullable: bool = True,
-):
-    """Build a permissive schema for arbitrary tabular data.
-
-    Non-numeric columns are preserved without type coercion. Numeric columns can
-    optionally receive min/max bounds.
-    """
-    pa = _pandera()
-    missing_expected = _expected_columns_issues(df, expected_columns)
-    if missing_expected:
-        raise ValueError("; ".join(missing_expected))
-
-    columns = {}
-    for col in df.columns:
-        checks = []
-        if pd.api.types.is_numeric_dtype(df[col]):
-            bounds = (numeric_bounds or {}).get(col, {})
-            if "min" in bounds:
-                checks.append(pa.Check.ge(bounds["min"]))
-            if "max" in bounds:
-                checks.append(pa.Check.le(bounds["max"]))
-            columns[col] = pa.Column(float, checks=checks, nullable=nullable, coerce=True)
-        else:
-            columns[col] = pa.Column(nullable=nullable)
-
-    return pa.DataFrameSchema(columns=columns, strict=False, coerce=True)
-
-
-def build_tabular_schema(
-    df: pd.DataFrame,
-    *,
-    expected_columns: list[str] | None = None,
-    numeric_bounds: dict[str, dict[str, float]] | None = None,
     nullable_numeric: bool = True,
 ):
     """Build a schema for arbitrary tabular data, validating known numeric columns."""
@@ -204,32 +171,18 @@ def validate_tabular_dataframe(
     expected_columns: list[str] | None = None,
     numeric_bounds: dict[str, dict[str, float]] | None = None,
     missing_threshold: float = 0.0,
-    nullable: bool = True,
-) -> pd.DataFrame:
-    """Validate and return an arbitrary tabular dataframe."""
-    issues = _expected_columns_issues(df, expected_columns)
-    issues.extend(validate_missingness(df, threshold=missing_threshold))
-    if issues:
-        raise ValueError("; ".join(issues))
-    schema = build_tabular_schema(
-        df,
-        expected_columns=expected_columns,
-        numeric_bounds=numeric_bounds,
-        nullable=nullable,
-    )
-    return schema.validate(df)
-
-
-def validate_tabular_dataframe(
-    df: pd.DataFrame,
-    *,
-    expected_columns: list[str] | None = None,
-    numeric_bounds: dict[str, dict[str, float]] | None = None,
-    missing_threshold: float = 0.0,
     nullable_numeric: bool = True,
 ) -> pd.DataFrame:
-    """Validate arbitrary tabular data without requiring a timestamp column."""
-    issues = validate_missingness(df, threshold=missing_threshold)
+    """Validate arbitrary tabular data without requiring a timestamp column.
+
+    Missing expected columns and missingness are collected together so a caller
+    sees every problem at once. (An earlier duplicate definition of this function
+    shadowed by this one did the same; the surviving copy had dropped the
+    expected-columns check from the issue list and left it to raise separately
+    inside the schema builder, hiding it whenever missingness also failed.)
+    """
+    issues = _expected_columns_issues(df, expected_columns)
+    issues.extend(validate_missingness(df, threshold=missing_threshold))
     if issues:
         raise ValueError("; ".join(issues))
     schema = build_tabular_schema(

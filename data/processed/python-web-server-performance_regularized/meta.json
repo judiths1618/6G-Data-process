@@ -56,6 +56,178 @@
   "units_converted": true,
   "gap_threshold": 1000.0,
   "sparse_skip_pct": 80.0,
+  "regularized": false,
+  "regularization": {
+    "regularized": false,
+    "base_dt": 20.0,
+    "grid_rows": 571544,
+    "source_rows": 14014,
+    "rows_in": 14014,
+    "timestamp_collisions_averaged": 0,
+    "expected_gap_pct": 97.54804529485044,
+    "sparse_skip_pct": -1.0,
+    "skip_if_sparse": true,
+    "skip_reason": "only 2 of 4 campaign(s) fit a uniform grid; regularizing just those would leave the bundle with two sampling regimes split across train/test, so none were regularized",
+    "decision": {
+      "outcome": "not_regularized",
+      "code": "mixed_regimes_rejected",
+      "rationale": "Splitting at collection pauses produced 4 campaigns, but only 2 fit a grid (campaign(s) [3, 4] stayed too sparse). Gridding only some of them would leave one bundle carrying two sampling regimes, and the chronological train/test split would put them on opposite sides \u2014 training on gridded data and scoring on irregular data. A consistent timeline is worth more than a partial grid, so none were regularized.",
+      "measured": {
+        "num_segments": 4,
+        "segments_regularized": 2,
+        "failed_campaigns": [
+          3,
+          4
+        ],
+        "per_campaign_gap_pct": [
+          62.5,
+          30.0,
+          92.6,
+          86.9
+        ]
+      },
+      "threshold": {
+        "sparse_skip_pct": 80.0,
+        "segment_gap_seconds": 86400.0,
+        "require_all_segments": true
+      },
+      "alternatives": [
+        "timeline.require_all_segments: false \u2014 grid the campaigns that fit and accept a mixed-regime bundle (only safe with a split that keeps both regimes on both sides)",
+        "a smaller timeline.segment_gap_seconds \u2014 splits further; helps only when the sparsity comes from pauses rather than within-campaign bursts",
+        "a coarser base_dt for this dataset \u2014 trades burst resolution for a denser grid"
+      ]
+    },
+    "strategy": "per_segment_rejected",
+    "num_segments": 4,
+    "segments_regularized": 2,
+    "segments": [
+      {
+        "regularized": true,
+        "base_dt": 36.0,
+        "grid_rows": 2928,
+        "source_rows": 1099,
+        "rows_in": 1099,
+        "timestamp_collisions_averaged": 0,
+        "expected_gap_pct": 62.465846994535525,
+        "sparse_skip_pct": 80.0,
+        "skip_if_sparse": true,
+        "skip_reason": null,
+        "decision": {
+          "outcome": "single_grid",
+          "code": "fits_guard",
+          "rationale": "One uniform 36s grid over 2,928 points holds the 1,099 observations at 62.5% emptiness, within the 80% budget, so the timeline was regularized.",
+          "measured": {
+            "base_dt": 36.0,
+            "grid_rows": 2928,
+            "observed_rows": 1099,
+            "expected_gap_pct": 62.465846994535525
+          },
+          "threshold": {
+            "sparse_skip_pct": 80.0
+          },
+          "alternatives": []
+        },
+        "campaign": 1,
+        "rows_in_segment": 1099
+      },
+      {
+        "regularized": true,
+        "base_dt": 41.0,
+        "grid_rows": 6507,
+        "source_rows": 4557,
+        "rows_in": 4557,
+        "timestamp_collisions_averaged": 0,
+        "expected_gap_pct": 29.96772706316275,
+        "sparse_skip_pct": 80.0,
+        "skip_if_sparse": true,
+        "skip_reason": null,
+        "decision": {
+          "outcome": "single_grid",
+          "code": "fits_guard",
+          "rationale": "One uniform 41s grid over 6,507 points holds the 4,557 observations at 30.0% emptiness, within the 80% budget, so the timeline was regularized.",
+          "measured": {
+            "base_dt": 41.0,
+            "grid_rows": 6507,
+            "observed_rows": 4557,
+            "expected_gap_pct": 29.96772706316275
+          },
+          "threshold": {
+            "sparse_skip_pct": 80.0
+          },
+          "alternatives": []
+        },
+        "campaign": 2,
+        "rows_in_segment": 4557
+      },
+      {
+        "regularized": false,
+        "base_dt": 40.5,
+        "grid_rows": 8383,
+        "source_rows": 623,
+        "rows_in": 623,
+        "timestamp_collisions_averaged": 0,
+        "expected_gap_pct": 92.5682929738757,
+        "sparse_skip_pct": 80.0,
+        "skip_if_sparse": true,
+        "skip_reason": "regularizing onto a 40.5s grid would leave 92.6% of 8383 grid points empty, above the 80.0% threshold; the bundle keeps the original irregular timeline and is NOT on a uniform grid",
+        "decision": {
+          "outcome": "not_regularized",
+          "code": "too_sparse",
+          "rationale": "A uniform 40.5s grid would need 8,383 points to hold 623 observations \u2014 92.6% of the grid would be synthetic, over the 80% budget. Imputing that much invented structure would dominate the real signal, so the original irregular timestamps were kept.",
+          "measured": {
+            "base_dt": 40.5,
+            "grid_rows": 8383,
+            "observed_rows": 623,
+            "expected_gap_pct": 92.5682929738757
+          },
+          "threshold": {
+            "sparse_skip_pct": 80.0
+          },
+          "alternatives": [
+            "timeline.segment_regularization: true \u2014 split at collection pauses so each campaign gets its own grid (often the whole cause of the sparsity)",
+            "a coarser base_dt (> 40.5s) \u2014 fewer grid points, but short-interval structure is averaged away",
+            "raise validation.sparse_skip_pct above 93 \u2014 accepts a mostly-synthetic grid; only sensible if the model is meant to fill it"
+          ]
+        },
+        "campaign": 3,
+        "rows_in_segment": 623
+      },
+      {
+        "regularized": false,
+        "base_dt": 8.0,
+        "grid_rows": 59084,
+        "source_rows": 7735,
+        "rows_in": 7735,
+        "timestamp_collisions_averaged": 0,
+        "expected_gap_pct": 86.90846929794868,
+        "sparse_skip_pct": 80.0,
+        "skip_if_sparse": true,
+        "skip_reason": "regularizing onto a 8s grid would leave 86.9% of 59084 grid points empty, above the 80.0% threshold; the bundle keeps the original irregular timeline and is NOT on a uniform grid",
+        "decision": {
+          "outcome": "not_regularized",
+          "code": "too_sparse",
+          "rationale": "A uniform 8s grid would need 59,084 points to hold 7,735 observations \u2014 86.9% of the grid would be synthetic, over the 80% budget. Imputing that much invented structure would dominate the real signal, so the original irregular timestamps were kept.",
+          "measured": {
+            "base_dt": 8.0,
+            "grid_rows": 59084,
+            "observed_rows": 7735,
+            "expected_gap_pct": 86.90846929794868
+          },
+          "threshold": {
+            "sparse_skip_pct": 80.0
+          },
+          "alternatives": [
+            "timeline.segment_regularization: true \u2014 split at collection pauses so each campaign gets its own grid (often the whole cause of the sparsity)",
+            "a coarser base_dt (> 8s) \u2014 fewer grid points, but short-interval structure is averaged away",
+            "raise validation.sparse_skip_pct above 87 \u2014 accepts a mostly-synthetic grid; only sensible if the model is meant to fill it"
+          ]
+        },
+        "campaign": 4,
+        "rows_in_segment": 7735
+      }
+    ],
+    "segment_gap_seconds": 86400.0
+  },
   "split_ratio": 0.8,
   "holdout_frac": 0.15,
   "original_rows": 14014,

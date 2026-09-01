@@ -30,12 +30,44 @@ validation:
   allow_step_index_timestamp: false
   outlier_q: 0.01        # flag values outside the [q, 1-q] quantile band
   outlier_mostly: 0.95   # GX pass threshold for that band (margin over the ~2q tail)
+  # Outliers are ALWAYS detected and reported (counts, columns, and the band the
+  # values fall outside of). This switch only controls whether remediation also
+  # rewrites them. Off by default: winsorizing replaces real measurements, and on
+  # these container benchmarks a genuine latency spike is signal, not noise.
+  # Set true to winsorize flagged cells to the [q, 1-q] band.
+  clip_outliers: false
+
+# Row identity and timestamp ordering.
+#
+# The timestamp is the primary key: rows sharing a timestamp are duplicates and
+# are deduplicated, and rows that go backwards in time are dropped by a forward
+# scan. The report still records what a composite sweep key *would* resolve
+# (advisory only) — the EUR benchmarks are parameter sweeps, so many collisions
+# are distinct (ram_limit, cpu_limit, n, c) conditions. Set `sweep_aware: true`
+# to switch to that model: keys co-identify rows and backward jumps start runs.
+timeline:
+  key_columns: []              # extra key columns (sweep mode)
+  auto_key_columns: false      # timestamp alone is the key
+  collision_policy: keep_last  # aggregate | keep_last | keep_first | none
+  disorder_policy: drop        # drop | sort | none
+  run_detection: false         # sweep mode only
+  min_run_overlap_rows: 8
+  sweep_aware: false           # true → key by sweep factors + segment runs
+  # Per-campaign regularization: golang/python pause for months between
+  # collection campaigns; one grid across the pause is 92–98% empty and trips
+  # the sparsity guard. Split at the pause and each campaign gets its own
+  # uniform grid at the cadence it was actually sampled at.
+  segment_regularization: true
+  segment_gap_seconds: 86400   # a pause this long starts a new campaign
+  min_segment_rows: 32
+  require_all_segments: true   # all campaigns grid, or none — keeps train/test
+                               # on one sampling regime
 
 # Imputation handoff: the pipeline regularizes gappy timelines and advertises a
 # method catalog; it does NOT run imputation. Choose (app, method) here and the
 # external orchestrator invokes the matching app on the prepared-dir bundle.
 imputation:
-  app:               # Darts | ImputeGAP | PyPOTS | WaveStitchPlus
-  method:            # e.g. saits, iim, linear, v2
+  app:    WaveStitchPlus           # Darts | ImputeGAP | PyPOTS | WaveStitchPlus
+  method: v1           # e.g. saits, iim, linear, v2
   build_bundle: true
   prepared_dir:      # default: <output_stem>_prepared/ next to the output csv

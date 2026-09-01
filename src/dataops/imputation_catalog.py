@@ -18,8 +18,11 @@ truth on the app side):
   * PyPOTS         — ``dockers/tools/PyPOTS_app/run_imputation.py`` (``--method`` choices)
   * WaveStitchPlus — diffusion v1 + local-anchoring v2
 
-``known_failing`` records method/install combinations observed to fail in the
-``autofeat-6g`` experiment env, so a selection can be flagged without blocking.
+``known_failing`` records method/install combinations observed to fail **in a
+specific environment**, so a selection can be flagged without blocking. It is a
+property of an install, not of the method: re-verify before trusting it, and
+clear an entry once the combination is observed working (see the notes on each
+app below).
 """
 from __future__ import annotations
 
@@ -34,7 +37,10 @@ CATALOG: dict[str, dict] = {
         "methods": ["auto", "linear", "quadratic", "cubic", "nearest",
                     "slinear", "zero", "kalman"],
         "default": "auto",
-        "known_failing": ["kalman"],
+        # Was ["kalman"] from the autofeat-6g env. Re-verified 2026-08-31 in
+        # wavestitchplus-repro: darts/kalman ran clean end to end and produced
+        # both split outputs plus a final, so the flag no longer applies here.
+        "known_failing": [],
     },
     "ImputeGAP": {
         "methods": [
@@ -53,10 +59,14 @@ CATALOG: dict[str, dict] = {
         "methods": ["saits", "brits", "transformer", "gpvae", "mrnn",
                     "csdi", "usgan", "timesnet"],
         "default": "saits",
-        "known_failing": ["saits"],
+        # Was ["saits"] from the autofeat-6g env. Re-verified 2026-08-31 in
+        # wavestitchplus-repro: pypots/saits produced test+train outputs for all
+        # four bundled datasets and scores on the shared holdout, so the flag no
+        # longer applies here.
+        "known_failing": [],
     },
     "WaveStitchPlus": {
-        "methods": ["v1", "v2", "v2_tuned"],
+        "methods": ["v1", "v2", "harpoon"],
         "default": "v2",
         "known_failing": [],
     },
