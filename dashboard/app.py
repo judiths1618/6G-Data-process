@@ -2552,13 +2552,62 @@ def render_regularization_status(run: "DataOpsRun") -> None:
            else _badge("SKIPPED — IRREGULAR", "#d62728")),
         unsafe_allow_html=True,
     )
+    # ``expected_gap_pct`` is the projection the sparsity guard runs on, made
+    # before the grid exists; ``achieved_gap_pct`` is measured after it is built.
+    # They diverge whenever source rows land closer together than base_dt, and
+    # showing only the projection made a 36.8%-empty grid read as 11.4%.
+    projected = reg.get("expected_gap_pct")
+    achieved = reg.get("achieved_gap_pct")
+    dropped = reg.get("source_rows_dropped")
+    guard = reg.get("sparse_skip_pct")
+
     g = st.columns(4)
     g[0].metric("base_dt", _fmt_seconds(reg.get("base_dt", meta.get("base_dt"))))
     g[1].metric("Grid rows", f"{int(reg.get('grid_rows', 0)):,}" if reg.get("grid_rows") else "—")
-    g[2].metric("Observed rows", f"{int(reg.get('source_rows', 0)):,}" if reg.get("source_rows") else "—")
-    g[3].metric("Grid emptiness", f"{float(reg.get('expected_gap_pct', 0)):.1f}%",
-                delta_color="inverse",
-                help=f"Guard threshold: {reg.get('sparse_skip_pct')}%")
+    g[2].metric(
+        "Grid emptiness",
+        f"{float(achieved):.1f}%" if achieved is not None
+        else (f"{float(projected):.1f}%" if projected is not None else "—"),
+        delta=(f"{float(achieved) - float(projected):+.1f} pts vs projected"
+               if achieved is not None and projected is not None
+               and abs(float(achieved) - float(projected)) >= 0.05 else None),
+        delta_color="inverse",
+        help=("Measured after the grid was built. Guard threshold: "
+              f"{guard}%, applied to the {float(projected):.1f}% projection."
+              if achieved is not None and projected is not None
+              else f"Guard threshold: {guard}%"),
+    )
+    g[3].metric(
+        "Source rows dropped",
+        f"{int(dropped):,}" if dropped is not None else "—",
+        delta=(f"{float(reg.get('source_rows_dropped_pct', 0)):.1f}% of source"
+               if dropped else None),
+        delta_color="inverse",
+        help="Rows closer together than base_dt lose their grid slot to a nearer "
+             "neighbour, so their measurements never reach the regularized output.",
+    )
+
+    if achieved is None:
+        st.caption("　This bundle predates achieved-emptiness reporting — the figure "
+                   "above is the pre-build projection. Re-run the pipeline to measure it.")
+    if dropped:
+        st.warning(
+            f"**{int(dropped):,} source row(s) "
+            f"({float(reg.get('source_rows_dropped_pct', 0)):.1f}%) are not in the "
+            f"regularized output.** A uniform grid takes one row per slot; rows spaced "
+            f"closer than `base_dt` compete and only the nearest is kept. Exact-duplicate "
+            f"timestamps are averaged before this step, but near-duplicates are not."
+        )
+    if reg.get("achieved_exceeds_guard"):
+        failing = reg.get("campaigns_failing_on_achieved") or []
+        st.error(
+            f"**The sparsity guard passed this grid on a projection it did not meet.** "
+            f"Projected {float(projected):.1f}% empty, actually {float(achieved):.1f}% — "
+            f"above the {guard}% budget"
+            + (f" (campaign(s) {', '.join(str(c) for c in failing)})." if failing else ".")
+            + " The projection assumes one grid slot per source row. Deciding on the "
+              "measured value instead would reject this bundle."
+        )
     if not ok and reg.get("skip_reason"):
         st.error(
             f"**This bundle is not on a uniform grid.** {reg['skip_reason']}. "
@@ -2614,7 +2663,10 @@ def render_regularization_status(run: "DataOpsRun") -> None:
                     "rows": s.get("rows_in_segment"),
                     "base_dt": _fmt_seconds(s.get("base_dt")),
                     "grid rows": s.get("grid_rows"),
-                    "empty %": round(float(s.get("expected_gap_pct", 0)), 1),
+                    "empty % (projected)": round(float(s.get("expected_gap_pct", 0)), 1),
+                    "empty % (actual)": (round(float(s["achieved_gap_pct"]), 1)
+                                         if s.get("achieved_gap_pct") is not None else None),
+                    "rows dropped": s.get("source_rows_dropped"),
                     "uniform grid": "✓" if s.get("regularized") else "✗ too sparse",
                 } for s in segments]),
                 hide_index=True, width="stretch",
@@ -2799,12 +2851,134 @@ def _stage_ledger(comparison: dict, bundle: dict, final_stats: dict,
     return ledger
 
 
-def render_pipeline_explainer(comparison: dict, bundle: dict, final_stats: dict,
-                              final_label: Optional[str]) -> None:
-    """The five-stage ledger plus a written account of what each stage does.
+def _md_inline(text: str) -> str:
+    """Render `code` and **bold** as HTML.
+
+    Streamlit passes a raw HTML block through untouched, so markdown written
+    inside one reaches the browser as literal backticks and asterisks.
+    """
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    return re.sub(r"`([^`]+?)`", r"<code style='font-size:.85em'>\1</code>", text)
+
+
+def _step_facts(step: str, comparison: dict, quality: dict, bundle: dict,
+                final_stats: dict, reg: dict, n_methods: int,
+                final_label: Optional[str]) -> List[str]:
+    """What this step actually did to *this* run, in concrete numbers.
+
+    The report already carries a per-step effect block for every stage; it was
+    only ever summarised into two headline tiles, so the individual steps had no
+    visible evidence attached to them.
+    """
+    cl = comparison.get("cleaning_effect", {})
+    rm = comparison.get("remediation_effect", {})
+    out: List[str] = []
+    if step == "soft-cleaned":
+        dropped = int(cl.get("dropped_rows", 0) or 0)
+        dup = int(cl.get("timestamp_collisions_detected", 0)
+                  or cl.get("duplicate_timestamps_collapsed", 0) or 0)
+        ooo = int(cl.get("out_of_order_rows_dropped", 0) or 0)
+        out.append(f"{dropped:,} empty/duplicate row(s) dropped")
+        out.append(f"{dup:,} primary-key collision(s) reduced "
+                   f"(`{cl.get('disorder_policy', 'drop')}` disorder policy)")
+        out.append(f"{ooo:,} out-of-order row(s) removed")
+        if not (dropped or dup or ooo):
+            out.append("**nothing to repair — the source was already well-formed**")
+    elif step == "remediated":
+        clipped = int(rm.get("outlier_cells_clipped", 0) or 0)
+        flagged = int(rm.get("outlier_cells_flagged", 0) or 0)
+        out.append(f"{clipped:,} outlier cell(s) clipped")
+        out.append(f"{flagged:,} outlier cell(s) flagged and **kept** "
+                   f"(clipping is opt-in via `--clip-outliers`)")
+        acts = rm.get("actions") or []
+        if acts:
+            out.append("actions: " + ", ".join(f"`{a}`" for a in acts))
+    elif step == "regularized":
+        if not bundle.get("read"):
+            out.append("bundle not on disk — nothing measured")
+        else:
+            ok = bool(reg.get("regularized", True))
+            grid = (f"grid `base_dt` = {_fmt_seconds(reg.get('base_dt'))}"
+                    + (f" across {int(reg.get('num_segments', 1))} campaign(s)"
+                       if reg.get("num_segments") else ""))
+            if not ok:
+                # Nothing was gridded, so the bundle's NaN are the evaluation
+                # holdout, not gaps — saying "N gap cells" here would be wrong.
+                out.append("**grid NOT built** — the sparsity guard declined, so the "
+                           "bundle keeps its original irregular timestamps")
+                out.append(f"it would have been {grid}")
+                out.append(f"the {bundle['missing_cells']:,} NaN in this bundle are the "
+                           f"**evaluation holdout**, not timeline gaps — the detected "
+                           f"gaps were never turned into rows, so nothing fills them")
+                out.append("⚠ windowed models (WaveStitch+ Hann windows, PyPOTS "
+                           "`--window`) assume a uniform axis; scores here are not "
+                           "comparable with regularized datasets")
+            else:
+                out.append(grid)
+                out.append(f"{bundle['gap_rows']:,} synthetic `is_gap` row(s) added → "
+                           f"{bundle['missing_cells']:,} NaN cells "
+                           f"({bundle['missing_cells'] / (bundle['target_cells'] or 1):.1%} "
+                           f"of {bundle['n_targets']} target columns)")
+                achieved, projected = reg.get("achieved_gap_pct"), reg.get("expected_gap_pct")
+                if achieved is not None and projected is not None:
+                    out.append(f"grid emptiness {float(achieved):.1f}% measured "
+                               f"(the guard ran on a {float(projected):.1f}% projection)")
+                drop = reg.get("source_rows_dropped")
+                if drop:
+                    out.append(f"⚠ {int(drop):,} source row(s) "
+                               f"({float(reg.get('source_rows_dropped_pct', 0)):.1f}%) lost "
+                               f"their grid slot and are **not** in the output")
+    elif step == "impute":
+        out.append(f"{n_methods} method(s) have a test output on disk"
+                   if n_methods else "no imputed output yet — run one in the **Run** tab")
+        out.append("each fills the NaN above; they are ranked on the shared holdout below")
+    elif step == "final":
+        if final_stats.get("read"):
+            residual = int(final_stats["missing_cells"])
+            out.append(f"delivered as `{final_label}`" if final_label else "delivered")
+            out.append(f"{final_stats['rows']:,} rows · "
+                       + (f"**{residual:,} residual NaN**" if residual
+                          else "**no residual NaN**"))
+        else:
+            out.append("not built yet")
+    return out
+
+
+# Step name → (badge label, module, one-line purpose). Mirrors the five-step
+# flow in the README and the stage names used throughout the pipeline.
+_STEP_DOCS = [
+    ("soft-cleaned", "1 · SOFT CLEAN", "cleaning.clean_dataframe + timeline.*",
+     "Structural repair only. Empty and duplicate rows go, the timestamp is parsed, then "
+     "`infer_key_columns` → `resolve_collisions` → `enforce_monotonic` put the timeline in "
+     "forward order. No timeline gap is filled here."),
+    ("remediated", "2 · REMEDIATE", "remediation.remediate",
+     "The last step that can change a cell in place: robust scaler statistics, outlier "
+     "clipping or flagging, and ordinary tabular NaN filling. Timeline gaps are "
+     "deliberately left for imputation."),
+    ("regularized", "3 · REGULARIZE", "transform.preprocess",
+     "The decisive step. The irregular timeline is resampled onto a uniform `base_dt` grid, "
+     "so an instant that was never sampled becomes a real row whose targets are NaN. Row "
+     "count rises, missing cells rise from ~0 to the true size of the damage, and the "
+     "train / test_input / test_gt bundle every method consumes is written."),
+    ("impute", "4 · IMPUTE", "dataops.imputation_runner / app runners",
+     "Each method fills the NaN the grid exposed — darts and imputegap built-ins in "
+     "process, PyPOTS and WaveStitch+ through their own runners."),
+    ("final", "5 · SCORE + FINALIZE", "auto_impute.py / dataops_imputation_completes",
+     "Methods are ranked on the shared holdout, then the winner's imputed train and test "
+     "halves are stitched into one gap-free CSV."),
+]
+
+_STEP_COLORS = {"soft-cleaned": "#1f77b4", "remediated": "#1f77b4",
+                "regularized": "#e8820c", "impute": "#7e57c2", "final": "#2ca02c"}
+
+
+def render_pipeline_explainer(comparison: dict, quality: dict, bundle: dict,
+                              final_stats: dict, final_label: Optional[str],
+                              reg: dict, n_methods: int) -> None:
+    """Five-step ledger plus, for each step, what it did to this run.
 
     Replaces a four-metric row whose first tile was labelled "Final rows" while
-    showing the *remediated* row count, and whose "Missing cells" tile read 0 for
+    showing the *remediated* count, and whose "Missing cells" tile read 0 for
     every dataset whose defect is unsampled instants rather than empty cells.
     """
     st.markdown("##### How this run moved through the pipeline")
@@ -2812,6 +2986,7 @@ def render_pipeline_explainer(comparison: dict, bundle: dict, final_stats: dict,
                "→ **final** (imputed, gap-free)")
 
     ledger = _stage_ledger(comparison, bundle, final_stats, final_label)
+    by_stage = {e["stage"]: e for e in ledger}
     cols = st.columns(len(ledger))
     base_rows = ledger[0]["rows"]
     for col, entry in zip(cols, ledger):
@@ -2825,27 +3000,39 @@ def render_pipeline_explainer(comparison: dict, bundle: dict, final_stats: dict,
         col.caption(f"{miss:,} missing cells" if isinstance(miss, int) else "—")
         col.caption(entry["note"])
 
-    with st.expander("What each stage does, and what it did to this run", expanded=False):
-        by_stage = {e["stage"]: e for e in ledger}
-        for stage, module, headline, body in _STAGE_DOCS:
-            entry = by_stage.get(stage)
-            st.markdown(f"**{stage}** &nbsp;<code>{module}</code>"
-                        + (f" &nbsp;<span style='opacity:.6;font-size:.85em'>{headline}"
-                           f"</span>" if headline else ""),
-                        unsafe_allow_html=True)
-            st.markdown(f"<span style='font-size:.9em'>{body}</span>",
-                        unsafe_allow_html=True)
-            if entry is None:
-                st.caption("　_Not reached in this run — no artifact on disk._")
-            else:
-                rows, miss = entry["rows"], entry["missing"]
-                st.caption(
-                    "　This run: "
-                    + (f"**{rows:,}** rows" if isinstance(rows, int) else "rows —")
-                    + (f" · **{miss:,}** missing cells" if isinstance(miss, int) else "")
-                    + f" · {entry['note']}"
-                )
-            st.markdown("")
+    st.markdown("")
+    st.markdown("**Step by step**")
+    prev = by_stage.get("raw")
+    for stage, label, module, purpose in _STEP_DOCS:
+        entry = by_stage.get(stage)
+        # The impute step writes into <name>_generated/ rather than a stage CSV,
+        # so it has no ledger row; show it from the discovered method count.
+        transition = ""
+        if entry is not None and prev is not None:
+            pr, cr = prev.get("rows"), entry.get("rows")
+            pm, cm = prev.get("missing"), entry.get("missing")
+            bits = []
+            if isinstance(pr, int) and isinstance(cr, int):
+                bits.append(f"rows {pr:,} → <b>{cr:,}</b>"
+                            + (f" ({cr - pr:+,})" if cr != pr else ""))
+            if isinstance(pm, int) and isinstance(cm, int):
+                bits.append(f"missing {pm:,} → <b>{cm:,}</b>")
+            transition = " &nbsp;·&nbsp; ".join(bits)
+        facts = _step_facts(stage, comparison, quality, bundle, final_stats,
+                            reg, n_methods, final_label)
+        st.markdown(
+            f"<div style='border-left:3px solid {_STEP_COLORS[stage]};"
+            f"padding:4px 0 4px 12px;margin:10px 0'>"
+            f"<b>{label}</b> &nbsp;<code style='font-size:.8em'>{module}</code>"
+            + (f"<br><span style='font-size:.85em'>{transition}</span>" if transition else "")
+            + f"<br><span style='font-size:.88em;opacity:.8'>{_md_inline(purpose)}</span>"
+            + "".join(f"<br><span style='font-size:.85em'>　• {_md_inline(f)}</span>"
+                      for f in facts)
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+        if entry is not None:
+            prev = entry
 
 
 # The end-to-end contract implemented by pipelines/dataops_imputation_completes.py.
@@ -2853,45 +3040,36 @@ def render_pipeline_explainer(comparison: dict, bundle: dict, final_stats: dict,
 # completes module is the single entrypoint that runs all six.
 _COMPLETE_PIPELINE_STAGES = [
     ("1", "clean", "raw CSV → `<name>_soft_cleaned.csv` → `<name>_remediated.csv`",
-     "Delegates to `minimal_dataops.run_pipeline`, so the cleaning contract is "
-     "identical whichever entrypoint you use and the report this dashboard reads is "
-     "the same file. Structural repair first (empty/duplicate rows, timestamp "
-     "parsing, then `infer_key_columns` → `resolve_collisions` → `enforce_monotonic`), "
-     "then Pandera + Great Expectations validation, then `remediate` for outliers and "
-     "tabular missing cells. Winsorizing is opt-in via `--clip-outliers`."),
+     "Delegates to `minimal_dataops.run_pipeline`, so the cleaning contract is identical "
+     "whichever entrypoint you use and the report this dashboard reads is the same file. "
+     "Structural repair, then Pandera + Great Expectations validation, then `remediate` "
+     "for outliers and tabular missing cells. Winsorizing is opt-in (`--clip-outliers`)."),
     ("2", "regularize", "→ `<name>_regularized/` (train, test_input, test_gt, meta, masks)",
-     "Resamples the irregular timeline onto a uniform `base_dt` grid so unsampled "
-     "instants become explicit NaN rows, splits train/test, and carves the shared "
-     "evaluation holdout (`eval_holdout_mask.npy`) — cells hidden from `test_input.csv` "
-     "whose truth is kept in `test_gt.csv`. Every method is later scored on this one "
-     "mask, which is what makes the leaderboard a fair comparison. A sparsity guard "
-     "refuses to build a grid that would be mostly empty."),
+     "Resamples onto a uniform `base_dt` grid so unsampled instants become explicit NaN "
+     "rows, splits train/test, and carves the shared evaluation holdout "
+     "(`eval_holdout_mask.npy`) — cells hidden from `test_input.csv` whose truth is kept "
+     "in `test_gt.csv`. Every method is scored on that one mask, which is what makes the "
+     "leaderboard fair. A sparsity guard refuses a grid that would be mostly empty."),
     ("3", "impute", "→ `<name>_generated/<lib>_<method>_<split>_imputed.csv`",
-     "Each requested method is dispatched to whichever engine can run it: the "
-     "in-process pandas built-ins (darts interpolation, imputegap statistics) or an "
-     "app runner as a subprocess (darts kalman, imputegap ML, PyPOTS, WaveStitch+ "
-     "v1/v2/harpoon). A method that fails is recorded and the run continues, unless "
-     "`--strict`. Heavy libraries may live in another env via "
-     "`DATAOPS_IMPUTE_PYTHON` / `DATAOPS_IMPUTE_CONDA_ENV`."),
+     "Each method is dispatched to whichever engine can run it: the in-process pandas "
+     "built-ins (darts interpolation, imputegap statistics) or an app runner as a "
+     "subprocess (darts kalman, imputegap ML, PyPOTS, WaveStitch+ v1/v2/harpoon). A "
+     "failure is recorded and the run continues, unless `--strict`."),
     ("4a", "outlier scan", "→ filled cells outside the observed band, reported",
-     "The mirror of stage 1's outlier policy, one stage later and on the opposite set "
-     "of cells: it inspects only the values a *model produced*, never an observed "
-     "measurement. Reported by default; `--clip-imputed-outliers` clips them, and it "
-     "runs before scoring so the leaderboard reflects the corrected values."),
+     "The mirror of stage 1's outlier policy, one stage later and on the opposite set of "
+     "cells: it inspects only values a *model produced*, never an observed measurement. "
+     "Reported by default; `--clip-imputed-outliers` clips them, before scoring."),
     ("4b", "score", "→ fill coverage + shared-holdout leaderboard",
-     "`compare_clean_vs_imputed` measures fill coverage per split and, on the test "
-     "split, accuracy at the holdout cells. Because every method saw the same mask, "
-     "pooled MAE/RMSE rank them directly. A method that could not be scored is left "
-     "off the board rather than sorted into a position that would read as a rank."),
+     "`compare_clean_vs_imputed` measures fill coverage per split and accuracy at the "
+     "holdout cells. Because every method saw the same mask, pooled MAE/RMSE rank them "
+     "directly. A method that could not be scored is left off rather than given a rank."),
     ("5", "finalize", "→ `<key>_final.csv` per method + `<name>_final.csv` (canonical)",
-     "Stitches a method's imputed train and imputed test halves back into one gap-free "
-     "CSV. Every method gets its own final; the canonical pick (config, or the "
-     "leaderboard winner) is additionally written as `<name>_final.csv` — the "
-     "delivered dataset."),
+     "Stitches a method's imputed train and test halves into one gap-free CSV. Every "
+     "method gets its own final; the canonical pick (config, or the leaderboard winner) "
+     "is also written as `<name>_final.csv` — the delivered dataset."),
     ("6", "report", "→ `reports/<name>_imputation_compare.json`",
-     "The manifest: every run, its comparison, the leaderboard, outlier handling, "
-     "stale inputs and failures. This dashboard reads it alongside "
-     "`<name>_report.json` to reconstruct the run."),
+     "The manifest: every run, its comparison, the leaderboard, outlier handling, stale "
+     "inputs and failures. Read alongside `<name>_report.json` to reconstruct the run."),
 ]
 
 
@@ -2905,10 +3083,10 @@ def render_complete_pipeline_doc(run: Optional["DataOpsRun"]) -> None:
     with st.expander("The complete pipeline — `pipelines/dataops_imputation_completes.py`",
                      expanded=False):
         st.caption(
-            "`minimal_dataops` deliberately stops at the handoff and never fills a "
-            "cell. `dataops_imputation_completes` is the single entrypoint that runs "
-            "all six stages; stages 1–2 delegate to it, so the cleaning contract and "
-            "the report are unchanged."
+            "`minimal_dataops` deliberately stops at the handoff and never fills a cell. "
+            "`dataops_imputation_completes` is the single entrypoint that runs all six "
+            "stages; stages 1–2 delegate to it, so the cleaning contract and the report "
+            "are unchanged."
         )
         for num, name, artifacts, body in _COMPLETE_PIPELINE_STAGES:
             st.markdown(
@@ -2919,27 +3097,25 @@ def render_complete_pipeline_doc(run: Optional["DataOpsRun"]) -> None:
             st.markdown(f"<span style='font-size:.9em'>{body}</span>",
                         unsafe_allow_html=True)
             st.markdown("")
+        name = run.name.removesuffix("_report") if run else "<dataset>"
         st.markdown("**Run it**")
         st.code(
-            "# every dependency-free method on one dataset\n"
-            "python -m pipelines.dataops_imputation_completes --dataset "
-            + (run.name.removesuffix("_report") if run else "<dataset>") + "\n\n"
-            "# the full comparison, WaveStitch+ included\n"
-            "python -m pipelines.dataops_imputation_completes --dataset "
-            + (run.name.removesuffix("_report") if run else "<dataset>")
-            + " \\\n    --methods all --device cpu --fast\n\n"
-            "# reuse the existing bundle, add one method\n"
-            "python -m pipelines.dataops_imputation_completes --dataset "
-            + (run.name.removesuffix("_report") if run else "<dataset>")
-            + " \\\n    --skip-clean --methods pypots/saits",
+            f"# every dependency-free built-in method\n"
+            f"python -m pipelines.dataops_imputation_completes --dataset {name}\n\n"
+            f"# the full comparison, WaveStitch+ included\n"
+            f"python -m pipelines.dataops_imputation_completes --dataset {name} \\\n"
+            f"    --methods all --device cpu --fast\n\n"
+            f"# reuse the existing bundle, add one method\n"
+            f"python -m pipelines.dataops_imputation_completes --dataset {name} \\\n"
+            f"    --skip-clean --methods pypots/saits",
             language="bash",
         )
         st.caption(
             "Outlier handling is opt-in at both ends and always reported: "
             "`--clip-outliers` winsorizes the raw data in stage 1, "
             "`--clip-imputed-outliers` clips filled cells in stage 4a. Neither runs by "
-            "default — rewriting a measurement, or a model's output, should be a "
-            "decision rather than a side effect."
+            "default — rewriting a measurement, or a model's output, should be a decision "
+            "rather than a side effect."
         )
 
 
@@ -3031,7 +3207,19 @@ def render_validation_comparison(report: dict, data_type: str,
     final_stats = final_gap_stats(final_path, targets)
     final_label = Path(final_path).name if final_path else None
 
-    render_pipeline_explainer(comparison, bundle, final_stats, final_label)
+    generated_dir = getattr(run, "generated_dir", None)
+    if generated_dir is None and prepared_dir is not None:
+        generated_dir = _generated_dir_for(prepared_dir)
+    n_methods = len(_discover_imputed_files_by_dir(generated_dir, "test"))
+    reg = {}
+    if prepared_dir and (Path(prepared_dir) / "meta.json").exists():
+        try:
+            reg = load_meta(Path(prepared_dir)).get("regularization") or {}
+        except Exception:
+            reg = {}
+
+    render_pipeline_explainer(comparison, quality, bundle, final_stats,
+                              final_label, reg, n_methods)
     render_complete_pipeline_doc(run)
     st.divider()
     render_missing_taxonomy(quality, handoff, bundle, final_stats)
@@ -3141,9 +3329,6 @@ def render_validation_comparison(report: dict, data_type: str,
         _render_handoff(handoff)
 
     # ---- Final cleaned data & clean-vs-imputed comparison ----------------
-    generated_dir = getattr(run, "generated_dir", None)
-    if generated_dir is None and prepared_dir is not None:
-        generated_dir = _generated_dir_for(prepared_dir)
     board = disk_leaderboard(prepared_dir, generated_dir)
     if impute_compare or board:
         st.divider()
@@ -3287,7 +3472,7 @@ def render_overview(run: Optional["DataOpsRun"]) -> None:
                 star = " ★ delivered" if label == canon_label else ""
                 st.caption(f"　✓ **{label}**{star} → `{p}`"
                            + (f" · {n:,} rows · gap-free" if n else ""))
-    st.caption("→ full breakdown in **Quality & remediation**; per-method comparison and the "
+    st.caption("→ full breakdown in **Quality**; per-method comparison and the "
                "stitched-timeline plot in the **Imputation → Final** tab.")
 
 
@@ -3361,7 +3546,7 @@ def main() -> None:
 
     # No imputation source (no bundle, no experiment subset) → cleaning-only view.
     if subset is None:
-        t_raw, t_ov, t_q = st.tabs(["Raw data", "Overview", "Quality & remediation"])
+        t_raw, t_ov, t_q = st.tabs(["Raw data", "Overview", "Quality"])
         with t_raw:
             render_raw_data_view(raw, run)
         with t_ov:
@@ -3376,7 +3561,7 @@ def main() -> None:
 
     # ---- Top-level sections (cleaning-first) -------------------------------
     tab_raw, tab_overview, tab_quality, tab_imp, tab_run_sec = st.tabs(
-        ["Raw data", "Overview", "Quality & remediation", "Imputation", "Run"]
+        ["Raw data", "Overview", "Quality", "Imputation", "Run"]
     )
 
     with tab_raw:

@@ -319,6 +319,19 @@ def regularize(df: pd.DataFrame, time_col="time", base_dt=None,
         "rows_in": int(n_before),
         "timestamp_collisions_averaged": int(collisions),
         "expected_gap_pct": float(expected_gap_pct),
+        # ``expected_gap_pct`` is a *projection* made before the grid exists: it
+        # assumes every source row lands on its own slot. The nearest-neighbour
+        # mapping below does not guarantee that — rows closer together than
+        # base_dt compete for one slot and the loser is never placed. The fields
+        # below are measured after the mapping and are the truth; they are only
+        # available on the path that actually builds a grid.
+        "achieved_gap_pct": None,
+        "source_rows_placed": None,
+        "source_rows_dropped": None,
+        "source_rows_dropped_pct": None,
+        "guard_basis": "expected_gap_pct",
+        "achieved_exceeds_guard": None,
+        "grid_coarser_than_source": bool(n_grid < len(t)),
         "sparse_skip_pct": float(sparse_skip_pct),
         "skip_if_sparse": bool(skip_if_sparse),
         "skip_reason": None,
@@ -424,13 +437,42 @@ def regularize(df: pd.DataFrame, time_col="time", base_dt=None,
         observed_col_mask[c] = observed_row_mask & mapped_notna
 
     # Stats
-    obs_count = observed_row_mask.sum()
+    obs_count = int(observed_row_mask.sum())
     gap_pct = 100 * (1 - obs_count / len(full))
     print(f"[INFO] Grid: {len(full)} pts, Observed: {obs_count} "
           f"({100 - gap_pct:.1f}%), Gaps: {gap_pct:.1f}%")
 
     if gap_pct > 70:
         print(f"[WARNING] High gap percentage ({gap_pct:.1f}%)")
+
+    # ── Measured outcome (vs the projection the guard ran on) ──────────
+    # Every grid slot takes at most one source row, so a source row that is not
+    # the nearest neighbour of any slot within base_dt/2 never appears in the
+    # output: its measurements are dropped. This is the same failure the
+    # exact-duplicate branch above guards against, one step later and on
+    # *near*-duplicates, and it was previously neither counted nor reported.
+    dropped = int(len(t) - obs_count)
+    diag["achieved_gap_pct"] = float(gap_pct)
+    diag["source_rows_placed"] = obs_count
+    diag["source_rows_dropped"] = dropped
+    diag["source_rows_dropped_pct"] = float(100 * dropped / len(t)) if len(t) else 0.0
+    diag["achieved_exceeds_guard"] = bool(gap_pct > sparse_skip_pct)
+    if dropped:
+        print(f"[WARNING] {dropped} of {len(t)} source row(s) ({100*dropped/len(t):.1f}%) "
+              f"were closer together than the {base_dt:g}s grid and lost their slot — "
+              f"their values are not in the regularized output")
+    if diag["achieved_exceeds_guard"]:
+        print(f"[WARNING] Achieved emptiness {gap_pct:.1f}% exceeds the "
+              f"{sparse_skip_pct:.1f}% guard, but the guard passed this grid on the "
+              f"{expected_gap_pct:.1f}% projection — see diag.achieved_gap_pct")
+        diag["decision"]["guard_note"] = (
+            f"The guard admitted this grid on a projected {expected_gap_pct:.1f}% "
+            f"emptiness, but the built grid is {gap_pct:.1f}% empty — above the "
+            f"{sparse_skip_pct:.0f}% budget. The projection assumes one slot per source "
+            f"row; {dropped:,} row(s) ({100*dropped/len(t):.1f}%) lost their slot to a "
+            f"nearer neighbour. Set validation.guard_on_achieved: true to decide on the "
+            f"measured value instead (this will reject grids that pass today)."
+        )
 
     return df_reg, observed_row_mask, observed_col_mask, base_dt, diag
 
@@ -582,6 +624,10 @@ def regularize_segments(df: pd.DataFrame, time_col="time", base_dt=None,
     representative = float(np.median(seg_base_dts))
     grid_rows = int(sum(d.get("grid_rows", 0) for d in seg_diags))
     source_rows = int(sum(d.get("source_rows", 0) for d in seg_diags))
+    _placed = [d.get("source_rows_placed") for d in seg_diags]
+    placed_rows = (int(sum(v for v in _placed if v is not None))
+                   if any(v is not None for v in _placed) else None)
+    dropped_src = (source_rows - placed_rows) if placed_rows is not None else None
     diag = {
         # Only a bundle whose every campaign made it onto a grid is uniform.
         "regularized": n_ok == len(seg_diags),
@@ -603,6 +649,24 @@ def regularize_segments(df: pd.DataFrame, time_col="time", base_dt=None,
         "expected_gap_pct": float(
             100 * (1 - source_rows / grid_rows) if grid_rows else 0.0
         ),
+        # Measured totals across the campaigns that actually built a grid — the
+        # bundle-level counterpart of the per-campaign fields set in regularize().
+        "achieved_gap_pct": (
+            float(100 * (1 - placed_rows / grid_rows)) if grid_rows and placed_rows
+            is not None else None
+        ),
+        "source_rows_placed": placed_rows,
+        "source_rows_dropped": dropped_src,
+        "source_rows_dropped_pct": (
+            float(100 * dropped_src / source_rows)
+            if source_rows and dropped_src is not None else None
+        ),
+        "guard_basis": "expected_gap_pct",
+        "achieved_exceeds_guard": bool(
+            any(d.get("achieved_exceeds_guard") for d in seg_diags)),
+        "campaigns_failing_on_achieved": [
+            d.get("campaign") for d in seg_diags if d.get("achieved_exceeds_guard")
+        ],
         "sparse_skip_pct": float(sparse_skip_pct),
         "skip_if_sparse": bool(skip_if_sparse),
         "skip_reason": None if n_ok == len(seg_diags) else (

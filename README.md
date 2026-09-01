@@ -9,8 +9,6 @@
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square)
 ![Status](https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square)
 
-This repository provides an end-to-end implementation for (time-series) data cleaning, validation, remediation, and imputation handoff using Apache Airflow, SeaweedFS, and ML models.
-
 
 ## Table of Contents
 
@@ -36,13 +34,13 @@ Diffusion model-based time-series imputation: **WaveStitch+** extends WaveStitch
 This project code contains a **reproducible, end-to-end data-cleaning pipeline** (validation → remediation → imputation) with GitHub Actions CI, `pytest`, DVC versioning, and a Streamlit **monitoring dashboard** that makes every run stage-by-stage auditable (Jump to **[Reproduce the results](#reproduce-the-results)** for a clean-room, copy-paste run). Also, this project shows how the AI-assisted imputation methods can be integrated into the **Time-series data cleaning pipeline** with a full Apache Airflow and SeaweedFS stack. 
 
 
-## The pipeline logic
+## The end-to-end pipeline logic
 
-we introduce a minimal dataops pipeline presenting **Raw CSV in → gap-free dataset out.** It consists of five steps, each writing a named artifact you can inspect. Numbers are the bundled `amf-performance` run.
+We introduce a minimal dataops pipeline presenting **Raw CSV in → gap-free dataset out.** It consists of five steps, where artifacts are named per stage from the dataset `<name>` (e.g. `amf-performance`)
 
 ### Top-view
 ```text
-  data/raw/<name>.csv                    27,413 rows · irregular clock · 10,055 gaps
+  data/raw/<name>.csv                    27,413 rows  
         │
         │  1  SOFT CLEAN            drop empty/duplicate rows, parse the timestamp,
         ▼                      resolve key collisions, enforce forward time
@@ -50,11 +48,11 @@ we introduce a minimal dataops pipeline presenting **Raw CSV in → gap-free dat
         │
         │  2  REMEDIATE        clip or flag outliers, fill ordinary tabular NaN
         ▼                      (timeline gaps are deliberately left alone)
-  <name>_remediated.csv                  last step that edits a cell in place
+  <name>_remediated.csv                  27,413 rows (no missing cells), 5,973 outlier cell(s) flagged and kept 
         │
         │  3  REGULARIZE       resample onto a uniform base_dt grid based on a regularization strategy,
         ▼                      split train/test, carve the evaluation holdout
-  <name>_regularized/                    99,942 rows · 1,051,526 NaN · is_gap flag
+  <name>_regularized/                    99,942 rows （is_gap flag, train/test split 80/20）
         │                                train.csv · test_input.csv · test_gt.csv
         │
         │  4  IMPUTE           every method fills the NaN — darts, imputegap,
@@ -66,18 +64,12 @@ we introduce a minimal dataops pipeline presenting **Raw CSV in → gap-free dat
   <name>_final.csv                       99,942 rows · 0 NaN  ← delivered
   reports/<name>_imputation_compare.json manifest of every run
 ```
-Artifacts are named per stage from the dataset `<name>` (e.g. `rabbitmq-performance`):
 
-- **soft-cleaned** (`<name>_soft_cleaned.csv`, key `report.soft_cleaned_output`;
-  legacy alias `report.cleaned_output`) — conservative cleaning: snake_case columns, empty or
-  duplicate row removal, timestamp ordering fixes, and epoch-aware datetime coercion.
-- **remediated** (`<name>_remediated.csv`, the configured `output`) — issue-specific fixes from
-  `data_process_modules.remediation`, including numeric outlier winsorization and type-aware
-  tabular filling. Time-series gaps are *deferred* to imputation.
-- **regularized** (`<name>_regularized/`) — when a time-series gap is detected, the timeline is
-  regularized onto a uniform grid. Gaps become explicit NaN rows, written as a prepared bundle.
-- **final** (`<name>_final.csv`) — the gap-free, analysis-ready dataset (built by the imputation
-  step, see below), stitched from the imputed train + imputed test splits under `<name>_generated/`.
+
+- **soft-cleaned** (`<name>_soft_cleaned.csv`, key `report.soft_cleaned_output`; legacy alias `report.cleaned_output`) — conservative cleaning: snake_case columns, empty or duplicate row removal, timestamp ordering fixes, and epoch-aware datetime coercion.
+- **remediated** (`<name>_remediated.csv`, the configured `output`) — issue-specific fixes from `data_process_modules.remediation`, including numeric outlier winsorization and type-aware tabular filling. Time-series gaps are *deferred* to imputation.
+- **regularized** (`<name>_regularized/`) — when a time-series gap is detected, the timeline is regularized onto a uniform grid. Gaps become explicit NaN rows, written as a prepared bundle.
+- **final** (`<name>_final.csv`) — the gap-free, analysis-ready dataset (built by the imputation step, see below), stitched from the imputed train + imputed test splits under `<name>_generated/`.
 
 **Imputation handoff → final dataset.** Steps 1–3 are `pipelines/minimal_dataops.py`, which stops at the handoff and never fills a cell. `pipelines/dataops_imputation_completes.py` runs all five — see [Reproduce the results](#reproduce-the-results) for the commands, and the [dashboard](#comparison-dashboard) to walk a finished run stage by stage.
 
@@ -107,11 +99,7 @@ The same block controls **per-campaign regularization**. Collection for these da
 The full rationale — why regularize at all, why no single rule fits every dataset, where each threshold comes from and how sensitive the outcome is to it — is written up in [design/regularization_strategy.md](design/regularization_strategy.md). Every bundle also records its own decision: `meta.json` → `regularization.decision` carries an outcome code, a rationale written for that dataset with its own numbers, and the alternatives that would change it. The dashboard shows this under **Overview → Why this outcome**.
 
 `require_all_segments: true` (default) regularizes **only when every campaign fits a grid**.
-Gridding just some of them leaves the bundle with two sampling regimes, and the chronological
-train/test split puts them on opposite sides: on python that produced a train split 66%
-gridded-with-gaps (36.2% NaN) against a test split that was entirely irregular and dense —
-training on one regime and scoring on the other. python is bursty *within* campaigns (median
-step 8s against a ~61s mean), so no split threshold rescues it; it keeps its original timeline
+Gridding just some of them leaves the bundle with two sampling regimes, and the chronological train/test split puts them on opposite sides: on python that produced a train split 66% gridded-with-gaps (36.2% NaN) against a test split that was entirely irregular and dense — training on one regime and scoring on the other. python is bursty *within* campaigns (median step 8s against a ~61s mean), so no split threshold rescues it; it keeps its original timeline
 and stays internally consistent.
 
 The prepared-bundle contract (`meta.json`, `train.csv`, `test_input.csv`, `test_gt.csv`,
@@ -797,7 +785,7 @@ step.
 
 1. **Raw data** — source preview, quick quality counters, numeric visualization, and all DataOps runs linked to that CSV.
 2. **Overview** — the `raw → soft-cleaned → remediated → regularized → final` lineage as stage cards, including row counts, artifact presence, key metrics, GX **before/after**, the imputation handoff, and the final cleaned-data callout.
-3. **Quality & remediation** — GX detected issues versus after-remediation results, concrete failed expectations, issue → solution plan grouped by status (auto-handled / deferred-to-imputation / manual), the handoff, and the **clean-vs-imputed** comparison (fill rate + per-column MAE).
+3. **Quality** — GX detected issues versus after-remediation results, concrete failed expectations, issue → solution plan grouped by status (auto-handled / deferred-to-imputation / manual), the handoff, and the **clean-vs-imputed** comparison (fill rate + per-column MAE).
 4. **Imputation** — the method workbench; **split, method, and feature pickers live here**. Sub-tabs:
    - **Time series** — observed, ground-truth-on-eval, per-method imputed, and truly-missing bands on a datetime x-axis;
    - **Metrics** — MAE, RMSE, MAPE, and fill rate per method, with per-feature breakdowns and constraint violations;

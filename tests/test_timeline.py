@@ -346,3 +346,67 @@ def test_all_segments_passing_still_regularizes_under_the_strict_rule():
     )
     assert diag["strategy"] == "per_segment"
     assert diag["regularized"]
+
+
+# --------------------------------------------------------------------------- #
+# Grid occupancy: projected vs achieved emptiness, and dropped source rows
+# --------------------------------------------------------------------------- #
+
+def test_regularize_measures_achieved_emptiness_and_dropped_rows():
+    """A uniform grid takes one row per slot, so rows spaced closer than
+    ``base_dt`` lose theirs. ``expected_gap_pct`` is projected before the grid
+    exists and cannot see that; the measured fields must."""
+    from dataops import _preprocess_impl as impl
+
+    # Cadence is 100s, but every third sample arrives 1s after its predecessor,
+    # so those stragglers have to fight for a slot they cannot both hold.
+    base = np.arange(0, 100 * 60, 100, dtype=float)
+    crowded = np.sort(np.concatenate([base, base[::3] + 1.0]))
+    df = pd.DataFrame({"time": crowded, "v": np.arange(len(crowded), dtype=float)})
+
+    _, row_mask, _, base_dt, diag = impl.regularize(
+        df, "time", skip_if_sparse=False, sparse_skip_pct=100.0
+    )
+
+    placed = int(np.asarray(row_mask, dtype=bool).sum())
+    assert diag["source_rows_placed"] == placed
+    assert diag["source_rows_dropped"] == diag["source_rows"] - placed
+    assert diag["source_rows_dropped"] > 0, "crowded timestamps must lose slots"
+    # The projection assumes one slot per row, so it understates the emptiness.
+    assert diag["achieved_gap_pct"] > diag["expected_gap_pct"]
+    assert diag["guard_basis"] == "expected_gap_pct"
+
+
+def test_achieved_emptiness_flags_a_grid_the_guard_let_through():
+    """The guard decides on the projection; when the built grid misses the
+    budget anyway, that has to be visible rather than silently accepted."""
+    from dataops import _preprocess_impl as impl
+
+    # Blocks of 60 occupied slots then 40 empty keep the median step at 100s
+    # while leaving the grid 37.5% empty; a straggler beside every tenth point
+    # adds source rows that cannot win a slot, so the projection undercounts.
+    slots = [blk * 100 + i for blk in range(10) for i in range(60)]
+    on_grid = np.array(slots, dtype=float) * 100.0
+    stragglers = on_grid[::10] + 25.0
+    crowded = np.sort(np.concatenate([on_grid, stragglers]))
+    df = pd.DataFrame({"time": crowded, "v": np.arange(len(crowded), dtype=float)})
+
+    _, _, _, _, diag = impl.regularize(df, "time", sparse_skip_pct=35.0)
+
+    assert diag["regularized"], "the projection must pass the guard for this case"
+    assert diag["expected_gap_pct"] <= 35.0 < diag["achieved_gap_pct"]
+    assert diag["achieved_exceeds_guard"] is True
+    assert "guard_note" in diag["decision"]
+
+
+def test_uniform_timeline_drops_nothing():
+    """The measurement must not manufacture drops on a clean grid."""
+    from dataops import _preprocess_impl as impl
+
+    df = pd.DataFrame({"time": np.arange(0, 1000, 10, dtype=float),
+                       "v": np.arange(100, dtype=float)})
+    _, _, _, _, diag = impl.regularize(df, "time")
+
+    assert diag["source_rows_dropped"] == 0
+    assert diag["achieved_gap_pct"] == 0.0
+    assert diag["achieved_exceeds_guard"] is False
